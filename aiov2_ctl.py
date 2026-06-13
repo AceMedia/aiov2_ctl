@@ -6,6 +6,7 @@ import time
 import json
 import shutil
 import re
+import tempfile
 from statistics import mean
 
 INSTALL_META_PATH = "/usr/local/share/aiov2_ctl/install.json"
@@ -265,6 +266,7 @@ _aiov2_ctl()
         --mesh-off-boot
         --boot-rail
         --boot-rails-status
+        --boot-device
         --add-apps
         --remove-apps
         --sync-rtc
@@ -294,6 +296,11 @@ _aiov2_ctl()
 
     if [[ "${prev}" == "--mesh-on-boot" ]]; then
         COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${prev}" == "--boot-device" ]]; then
+        COMPREPLY=( $(compgen -W "status sd nvme toggle" -- "${cur}") )
         return 0
     fi
 
@@ -437,6 +444,7 @@ USAGE:
     aiov2_ctl --mesh-on-boot [on|off|status]
     aiov2_ctl --boot-rail <FEATURE> on|off|status
     aiov2_ctl --boot-rails-status
+  sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
   sudo aiov2_ctl --sync-rtc
@@ -459,6 +467,7 @@ COMMANDS:
         --mesh-off-boot    Disable meshtasticd autostart (default)
       --boot-rail      Set per-rail GPIO state to apply on boot
       --boot-rails-status   Show configured per-rail boot states
+  --boot-device   Set EEPROM boot order (SD/eMMC vs NVMe first)
   --add-apps   Install HackerGadgets AIO apps
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
@@ -627,6 +636,201 @@ def sync_rtc():
     print("Syncing system time to RTC…")
     subprocess.call(["hwclock", "-w"])
     print("RTC updated and synced.")
+    return 0
+
+
+# ==============================
+# Boot device / EEPROM boot order
+# ==============================
+# BOOT_ORDER nibbles are processed right-to-left on the CM5 bootloader:
+#   1 = SD/eMMC, 6 = NVMe, f = restart (loop).
+SD_FIRST_BOOT_ORDER = "0xf61"     # SD/eMMC -> NVMe -> repeat
+NVME_FIRST_BOOT_ORDER = "0xf16"   # NVMe -> SD/eMMC -> repeat
+
+
+def have_rpi_eeprom_config():
+    return shutil.which("rpi-eeprom-config") is not None
+
+
+def get_boot_order():
+    if not have_rpi_eeprom_config():
+        return None
+
+    try:
+        out = subprocess.check_output(
+            ["rpi-eeprom-config"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("BOOT_ORDER="):
+            return line.split("=", 1)[1].strip()
+
+    return None
+
+
+def set_boot_order(order):
+    if not have_rpi_eeprom_config():
+        print("Missing rpi-eeprom-config.")
+        print("Try: sudo apt install rpi-eeprom")
+        return 1
+
+    try:
+        current = subprocess.check_output(
+            ["rpi-eeprom-config"],
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to read EEPROM config:")
+        print(e.output)
+        return 1
+
+    found = False
+    new_lines = []
+
+    for line in current.splitlines():
+        if line.startswith("BOOT_ORDER="):
+            new_lines.append(f"BOOT_ORDER={order}")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"BOOT_ORDER={order}")
+
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        tmp_path = f.name
+        f.write("\n".join(new_lines) + "\n")
+
+    try:
+        subprocess.check_call(["rpi-eeprom-config", "--apply", tmp_path])
+    except subprocess.CalledProcessError:
+        print("Failed to apply EEPROM config.")
+        return 1
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return 0
+
+
+def current_root_device():
+    try:
+        return subprocess.check_output(
+            ["findmnt", "-n", "-o", "SOURCE", "/"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def current_boot_device_guess(rootdev=None):
+    if rootdev is None:
+        rootdev = current_root_device()
+
+    if rootdev.startswith("/dev/nvme"):
+        return "nvme"
+    if rootdev.startswith("/dev/mmcblk") or rootdev.startswith("/dev/sd"):
+        return "sd"
+
+    return "unknown"
+
+
+def boot_device_mode_from_order(order):
+    if order == SD_FIRST_BOOT_ORDER:
+        return "SD/eMMC first, NVMe fallback"
+    if order == NVME_FIRST_BOOT_ORDER:
+        return "NVMe first, SD/eMMC fallback"
+    if not order:
+        return "unknown"
+    return "custom/unknown"
+
+
+def print_boot_device_status():
+    order = get_boot_order()
+    rootdev = current_root_device()
+    guess = current_boot_device_guess(rootdev)
+
+    print("Boot device status")
+    print("====================")
+    print(f"Current root device : {rootdev}")
+    print(f"Likely booted from  : {guess}")
+    print(f"BOOT_ORDER          : {order or 'unknown'}")
+    print(f"Mode                : {boot_device_mode_from_order(order)}")
+    print()
+    print("Known modes:")
+    print(f"  sd   : {SD_FIRST_BOOT_ORDER}   SD/eMMC -> NVMe -> repeat")
+    print(f"  nvme : {NVME_FIRST_BOOT_ORDER}  NVMe -> SD/eMMC -> repeat")
+
+
+def maybe_prompt_reboot():
+    if not sys.stdin.isatty():
+        print("Reboot required for boot order change to take effect.")
+        return
+
+    print()
+    ans = input("Reboot now? [y/N] ").strip().lower()
+    if ans in ("y", "yes"):
+        subprocess.call(["systemctl", "reboot"])
+    else:
+        print("Not rebooting. Change takes effect after next reboot.")
+
+
+def boot_device_command(mode):
+    mode = (mode or "status").lower()
+
+    if mode == "status":
+        print_boot_device_status()
+        return 0
+
+    # Read once up front; reused for the toggle decision and the no-op check.
+    # May be None if reading the EEPROM isn't permitted unprivileged.
+    current = get_boot_order()
+
+    if mode in ("sd", "sdcard", "scard"):
+        target = SD_FIRST_BOOT_ORDER
+        label = "SD/eMMC first, NVMe fallback"
+    elif mode == "nvme":
+        target = NVME_FIRST_BOOT_ORDER
+        label = "NVMe first, SD/eMMC fallback"
+    elif mode == "toggle":
+        if current == NVME_FIRST_BOOT_ORDER:
+            target = SD_FIRST_BOOT_ORDER
+            label = "SD/eMMC first, NVMe fallback"
+        else:
+            target = NVME_FIRST_BOOT_ORDER
+            label = "NVMe first, SD/eMMC fallback"
+    else:
+        print("Usage: sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>")
+        return 2
+
+    # Short-circuit a no-op before prompting for sudo. If the read above was
+    # unprivileged-blocked (current is None) we fall through and escalate.
+    if current is not None and current == target:
+        print(f"Already set: {label}. No change.")
+        return 0
+
+    # Re-execs and re-enters this function as root, where `current` is read
+    # authoritatively and the no-op check above catches an already-set order.
+    if os.geteuid() != 0:
+        rerun_with_sudo(["--boot-device", mode])
+
+    print(f"Setting boot mode: {label}")
+    rc = set_boot_order(target)
+    if rc != 0:
+        return rc
+
+    print()
+    print_boot_device_status()
+    maybe_prompt_reboot()
     return 0
 
 
@@ -1018,7 +1222,7 @@ def run_gui():
             QApplication, QSystemTrayIcon, QMenu,
             QWidget, QVBoxLayout, QLabel, QCheckBox
         )
-        from PyQt6.QtGui import QAction, QIcon, QCursor
+        from PyQt6.QtGui import QAction, QActionGroup, QIcon, QCursor
         from PyQt6.QtCore import Qt, QTimer, QSharedMemory
     except ImportError:
         print("PyQt6 is not installed.")
@@ -1107,6 +1311,55 @@ def run_gui():
         boot_actions[f] = a
 
     menu.addMenu(boot_menu)
+
+    # Boot device (EEPROM boot order). Reads spawn a subprocess, so this
+    # submenu is refreshed only at startup and after a change, not per tick.
+    boot_device_menu = QMenu("Boot device")
+    boot_device_actions = {}
+    boot_device_group = QActionGroup(boot_device_menu)
+    boot_device_group.setExclusive(True)
+
+    def refresh_boot_device():
+        order = get_boot_order()
+        boot_device_actions["sd"].blockSignals(True)
+        boot_device_actions["nvme"].blockSignals(True)
+        boot_device_actions["sd"].setChecked(order == SD_FIRST_BOOT_ORDER)
+        boot_device_actions["nvme"].setChecked(order == NVME_FIRST_BOOT_ORDER)
+        boot_device_actions["sd"].blockSignals(False)
+        boot_device_actions["nvme"].blockSignals(False)
+
+    for mode, text in (("sd", "SD/eMMC first"), ("nvme", "NVMe first")):
+        a = QAction(text)
+        a.setCheckable(True)
+        def on_boot_device_selected(checked, mode=mode):
+            rc = subprocess.call(
+                ["sudo", "-n", "/usr/local/bin/aiov2_ctl", "--boot-device", mode],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if rc != 0:
+                tray.showMessage(
+                    "AIOv2 Boot Device",
+                    "Boot device changes require sudo in terminal.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    5000,
+                )
+            else:
+                tray.showMessage(
+                    "AIOv2 Boot Device",
+                    "Boot order updated. Reboot for it to take effect.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+            refresh_boot_device()
+
+        a.triggered.connect(on_boot_device_selected)
+        boot_device_group.addAction(a)
+        boot_device_menu.addAction(a)
+        boot_device_actions[mode] = a
+
+    menu.addMenu(boot_device_menu)
+    refresh_boot_device()
 
     menu.addSeparator()
     power_action = QAction("Power: -- W")
@@ -1556,6 +1809,10 @@ def main():
 
     elif arg == "--sync-rtc":
         sys.exit(sync_rtc())
+
+    elif arg == "--boot-device":
+        mode = sys.argv[2] if len(sys.argv) > 2 else "status"
+        sys.exit(boot_device_command(mode))
 
     elif arg == "--measure":
         if len(sys.argv) < 3:

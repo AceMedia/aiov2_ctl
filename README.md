@@ -177,6 +177,29 @@ Notes:
 - Boot rail settings are applied by `aiov2-rails-boot.service`
 - `--boot-rail ... on|off` may require sudo escalation depending on context
 
+### Boot device (EEPROM boot order)
+
+Control whether the CM5 bootloader tries **SD/eMMC** or **NVMe** first:
+
+```bash
+aiov2_ctl --boot-device status
+sudo aiov2_ctl --boot-device sd
+sudo aiov2_ctl --boot-device nvme
+sudo aiov2_ctl --boot-device toggle
+```
+
+This edits the bootloader `BOOT_ORDER` via `rpi-eeprom-config --apply`:
+
+- `sd`   → `0xf61` (SD/eMMC → NVMe → repeat)
+- `nvme` → `0xf16` (NVMe → SD/eMMC → repeat)
+
+Notes:
+
+- Requires `rpi-eeprom` (`sudo apt install rpi-eeprom`)
+- Changes take effect on **next reboot**; the tool offers to reboot when run interactively
+- `status` works without sudo; `sd`/`nvme`/`toggle` escalate automatically
+- A no-op (already in the requested mode) is detected and skipped
+
 ---
 
 ## 5) Power monitoring
