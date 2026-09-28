@@ -110,9 +110,10 @@ class RtlsdrUsbTests(unittest.TestCase):
 class ReadsbStalledTests(unittest.TestCase):
     NOW = 1_000_000.0
 
-    def stalled(self, stats=None, running=True, pid="1234", uptime="600", stats_error=None):
+    def stalled(self, stats=None, running=True, pid="1234", uptime="600", stats_error=None,
+                log="rtlsdr: tuner gain set to 49.6 dB"):
         def run(cmd):
-            return {"systemctl": pid, "ps": uptime}[cmd[0]]
+            return {"systemctl": pid, "ps": uptime, "journalctl": log}[cmd[0]]
 
         if stats_error:
             opener = mock.patch("builtins.open", side_effect=stats_error)
@@ -145,6 +146,17 @@ class ReadsbStalledTests(unittest.TestCase):
 
     def test_no_samples_in_last_minute(self):
         self.assertTrue(self.stalled(self.stats(samples=0)))
+
+    def test_no_tuner_found(self):
+        # Direct-sampling fallback: samples flow, nothing decodes.
+        self.assertTrue(self.stalled(self.stats(), log="No supported tuner found\n"
+                                                       "Enabled direct sampling mode, input 1"))
+
+    def test_no_tuner_found_still_gets_a_grace_period(self):
+        self.assertFalse(self.stalled(self.stats(), uptime="30", log="No supported tuner found"))
+
+    def test_unreadable_journal_falls_back_to_stats(self):
+        self.assertFalse(self.stalled(self.stats(), log=None))
 
     def test_unreadable_stats(self):
         self.assertTrue(self.stalled(stats_error=OSError("gone")))

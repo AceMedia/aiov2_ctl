@@ -1326,7 +1326,8 @@ def readsb_stalled(grace=150, stale=90):
     """
     readsb is up but the tuner has stopped delivering samples. readsb exits
     when it loses the device, but a wedged tuner can also leave it running
-    with nothing coming in.
+    with nothing coming in, or with no tuner at all: librtlsdr then falls
+    back to direct sampling, which keeps samples flowing but decodes nothing.
     """
     if not readsb_service_running():
         return False
@@ -1335,6 +1336,11 @@ def readsb_stalled(grace=150, stale=90):
     uptime = GpioController.run(["ps", "-o", "etimes=", "-p", pid or "0"])
     if not uptime or int(uptime) < grace:
         return False
+
+    log = GpioController.run(["journalctl", "-b", "-u", "readsb", f"_PID={pid}",
+                              "-o", "cat", "-q", "--no-pager"])
+    if log and "No supported tuner found" in log:
+        return True
 
     try:
         with open("/run/readsb/stats.json") as f:
@@ -1374,7 +1380,7 @@ def sdr_recovery(stage):
     elif stage == "check":
         if not readsb_stalled():
             return 0
-        print("readsb is running but receiving no samples; recovering the tuner…")
+        print("readsb is running without a working tuner; recovering it…")
         subprocess.call(["systemctl", "stop", "readsb"])
         cycle_sdr_rail()
         subprocess.call(["systemctl", "start", "readsb"])
