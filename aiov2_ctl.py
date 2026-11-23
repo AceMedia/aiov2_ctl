@@ -2021,8 +2021,9 @@ class Telemetry:
     # trusted. Take a few and ignore the ones that cannot be a real cell.
     BATTERY_MIN_V = 2.5
     BATTERY_MAX_V = 4.5
-    GAUGE_SAMPLES = 5
+    GAUGE_SAMPLES = 8
     GAUGE_DELAY = 0.05
+    GAUGE_SPREAD_V = 0.15
     last_discarded = (0, 0)   # (ignored, taken) from the latest battery_v_i_w()
 
     @staticmethod
@@ -2041,6 +2042,13 @@ class Telemetry:
             v, i = v / 1e6, i / 1e6
             if Telemetry.BATTERY_MIN_V <= v <= Telemetry.BATTERY_MAX_V:
                 good.append((v, i))
+
+        # The glitch only ever reads low, and on the board it ramps through
+        # everything between about 1.3 V and the real value. So trust the
+        # highest plausible reading and keep only those close to it.
+        if good:
+            top = max(g[0] for g in good)
+            good = [g for g in good if top - g[0] <= Telemetry.GAUGE_SPREAD_V]
 
         Telemetry.last_discarded = (taken - len(good), taken)
         if not good:
@@ -3021,6 +3029,12 @@ def marauder_command(args):
     return 0
 
 
+def gauge_disagrees(summary):
+    """True when the reported charge level cannot match the cell voltage."""
+    cap, volts = summary.get("capacity"), summary.get("voltage")
+    return cap is not None and volts is not None and cap >= 90 and volts < 3.3
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -3056,6 +3070,10 @@ def show_status():
     print(f"Voltage   : {summary['voltage']} V")
     print(f"Current   : {summary['current']} A")
     print(f"Power     : {summary['power']} W")
+    if gauge_disagrees(summary):
+        print(f"Warning   : the gauge says {summary['capacity']}% but the battery is at "
+              f"{summary['voltage']} V. A full cell reads about 4.2 V, so one cell may be flat "
+              "or not making contact. Check the battery before running on battery power.")
     if ignored:
         print(f"Gauge     : {ignored} of {taken} readings ignored as implausible. "
               "If this keeps happening, check the battery contacts.")

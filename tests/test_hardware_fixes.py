@@ -45,6 +45,14 @@ class BatteryGaugeTests(unittest.TestCase):
         self.assertGreater(r["current"], 0.1)
         self.assertEqual(a.Telemetry.last_discarded, (3, 5))
 
+    def test_ramp_values_inside_the_cell_range_are_ignored_too(self):
+        # Real capture: the glitch ramps through 3.4 V and 2.6 V as well as 1.5 V.
+        with gauge([(2620000, 0), (4229000, 166000), (3424000, 96000), (1500000, 0),
+                    (4228000, 162000), (2900000, 0), (4230000, 150000), (1650000, 0)]):
+            r = a.Telemetry.battery_v_i_w()
+        self.assertEqual(r["voltage"], 4.23)
+        self.assertEqual(a.Telemetry.last_discarded, (5, 8))
+
     def test_all_implausible_gives_nothing_rather_than_a_wrong_number(self):
         with gauge([(1500000, 0)] * 5):
             self.assertIsNone(a.Telemetry.battery_v_i_w())
@@ -73,6 +81,17 @@ class BatteryGaugeTests(unittest.TestCase):
                 redirect_stdout(out):
             a.show_status()
         self.assertIn("3 of 5 readings ignored", out.getvalue())
+
+
+class GaugeDisagreementTests(unittest.TestCase):
+    def test_full_charge_at_a_flat_voltage_is_flagged(self):
+        # Seen on the uConsole: capacity 100% with the cell steady at 2.7 V.
+        self.assertTrue(a.gauge_disagrees({"capacity": 100, "voltage": 2.7}))
+
+    def test_normal_readings_are_not_flagged(self):
+        self.assertFalse(a.gauge_disagrees({"capacity": 100, "voltage": 4.2}))
+        self.assertFalse(a.gauge_disagrees({"capacity": 10, "voltage": 3.1}))
+        self.assertFalse(a.gauge_disagrees({"capacity": None, "voltage": 3.0}))
 
 
 class InstallSudoersTests(unittest.TestCase):
