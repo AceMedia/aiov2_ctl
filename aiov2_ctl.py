@@ -3322,6 +3322,23 @@ def gauge_disagrees(summary):
     return cap is not None and volts is not None and cap >= 90 and volts < 3.3
 
 
+def status_data():
+    """Everything --status shows, as plain data, for the GUI and other tools."""
+    rails = {}
+    for name, pin in GPIO_MAP.items():
+        state_bool, _source = GpioController.get_pin_state(pin)
+        rails[name] = "on" if state_bool else "off"
+    summary = Telemetry.power_summary()
+    ignored, taken = Telemetry.last_discarded
+    return {
+        "rails": rails,
+        "power": summary,
+        "gauge_ignored": {"ignored": ignored, "taken": taken},
+        "gauge_warning": bool(summary and gauge_disagrees(summary)),
+        "companions": detect_companions(),
+    }
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -4572,7 +4589,10 @@ def main():
         sys.exit(check_update_interactive())
 
     elif arg == "--status":
-        show_status()
+        if "--json" in sys.argv[2:]:
+            print(json.dumps(status_data(), indent=2))
+        else:
+            show_status()
 
     elif arg == "--power":
         show_power_live()
