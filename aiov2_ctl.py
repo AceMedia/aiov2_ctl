@@ -327,6 +327,7 @@ _aiov2_ctl()
         --remove-apps
         --setup-sudoers
         --companions
+        --doctor
         --flipper
         --marauder
         --fix-sdr
@@ -542,6 +543,7 @@ COMMANDS:
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
   --companions    Detect a Flipper Zero or ESP32 board on USB (detection only)
+  --doctor        Read only health check for the uConsole (RTC, kernel, EEPROM, battery, storage)
   --flipper       Flipper info, ls, apps, open (see: aiov2_ctl --flipper)
   --marauder      Passive ESP32 Marauder scanning and logging (see: aiov2_ctl --marauder)
   --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
@@ -3081,6 +3083,177 @@ def show_status():
 # ==============================
 # Sampling / Measurement
 # ==============================
+# ==============================
+# Doctor: read only health checks for the uConsole
+# ==============================
+# Everything here only reads. Each check takes plain text in and returns a list
+# of (level, message), where level is "ok", "info" or "warn", so it can be
+# tested without a uConsole. Sources are in the README.
+DOCTOR_CONFIG_PATH = "/boot/firmware/config.txt"
+KERNEL_PACKAGES = ("clockworkpi-kernel", "akrex-kernel")
+EEPROM_MIN_DATE = "2025-01-06"   # Rex's Trixie post: CM5 Lite needs newer than this
+
+
+def _doctor_cmd(args, timeout=10):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _config_lines(text):
+    return [l.strip() for l in (text or "").splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+
+
+def check_rtc(config_text, rtc_names, dmesg_text):
+    lines = _config_lines(config_text)
+    rtc_off = "dtparam=rtc=off" in lines
+    overlay = any(l.startswith("dtoverlay=i2c-rtc") and "pcf85063" in l for l in lines)
+    out = []
+    if rtc_off and not overlay:
+        out.append(("warn", "RTC: dtparam=rtc=off is set but there is no i2c-rtc,pcf85063a overlay, so there is no clock at all. "
+                            "Add: dtoverlay=i2c-rtc,pcf85063a,i2c_csi_dsi0 under [pi5]."))
+    elif overlay:
+        out.append(("ok", "RTC: AIO clock overlay is in config.txt."))
+    if overlay and not any("pcf85063" in n for n in rtc_names):
+        out.append(("warn", "RTC: the overlay is set but no pcf85063 clock registered. Check the board is seated."))
+    if dmesg_text and "POR issue detected" in dmesg_text:
+        out.append(("info", "RTC: the clock reported a power on reset at boot. If the time is wrong after power off, "
+                            "check the CR1220 battery is fitted, tight and not flat, then set it once with: "
+                            "sudo hwclock --systohc"))
+    if dmesg_text and "hctosys: unable to read" in dmesg_text:
+        out.append(("info", "RTC: the system could not read the clock at boot. It is harmless once the clock is set."))
+    return out
+
+
+def check_kernel(installed, sim_upgrade_text):
+    out = []
+    if any(p in installed for p in KERNEL_PACKAGES):
+        out.append(("ok", "Kernel: uConsole kernel package is installed (" +
+                    ", ".join(p for p in KERNEL_PACKAGES if p in installed) + ")."))
+    else:
+        out.append(("warn", "Kernel: no clockworkpi-kernel or akrex-kernel package found. If you upgraded recently, "
+                            "try: sudo apt install clockworkpi-cm-firmware akrex-kernel"))
+    removing = []
+    for line in (sim_upgrade_text or "").splitlines():
+        if line.startswith("Remv") and re.search(r"kernel|linux-image|clockworkpi|firmware", line):
+            removing.append(line.split()[1])
+    if removing:
+        out.append(("warn", "Upgrade: a full-upgrade would REMOVE " + ", ".join(removing) +
+                            ". Do not upgrade until you know why."))
+    elif sim_upgrade_text is not None:
+        out.append(("ok", "Upgrade: a full-upgrade would not remove any kernel or firmware package."))
+    return out
+
+
+def check_eeprom(version_text):
+    m = re.search(r"(\d{4})/(\d{2})/(\d{2})|(\d{4}-\d{2}-\d{2})", version_text or "")
+    if not m:
+        return [("info", "EEPROM: could not read the bootloader version.")]
+    date = m.group(4) or f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    if date <= EEPROM_MIN_DATE:
+        return [("warn", f"EEPROM: bootloader is dated {date}. A CM5 Lite should be newer than {EEPROM_MIN_DATE}. "
+                         "Check with: sudo rpi-eeprom-update")]
+    return [("ok", f"EEPROM: bootloader is dated {date}.")]
+
+
+def check_config(config_text):
+    lines = _config_lines(config_text)
+    out = []
+    if "dtparam=spi=on" in lines:
+        out.append(("warn", "config.txt: dtparam=spi=on disables the backlight on the CM5. Use dtoverlay=spi1-1cs instead."))
+    if any(l.startswith("disable_audio_dither") for l in lines):
+        out.append(("info", "config.txt: disable_audio_dither is not recommended on the uConsole."))
+    if any(l.startswith("gpio=11=op") for l in lines):
+        out.append(("info", "config.txt: gpio=11=op,dh is for the CM3 only."))
+    if not out:
+        out.append(("ok", "config.txt: no known problem settings."))
+    return out
+
+
+def check_alsa(version):
+    if version and version.startswith("1.2.14-1") and not version.startswith("1.2.14-2"):
+        return [("info", f"Audio: alsa-utils {version} has a known udev rule typo (Debian bug 1093057). "
+                         "It only prints a warning at boot.")]
+    return []
+
+
+def check_battery(summary, throttled):
+    out = []
+    if summary:
+        if gauge_disagrees(summary):
+            out.append(("warn", f"Battery: gauge says {summary['capacity']}% but the cell is at {summary['voltage']} V. "
+                                "One cell may be flat or not making contact."))
+        else:
+            out.append(("ok", f"Battery: {summary['capacity']}% at {summary['voltage']} V."))
+    else:
+        out.append(("warn", "Battery: the gauge gave no believable reading. Check the battery contacts."))
+    if throttled is not None and throttled != 0:
+        out.append(("warn", f"Power: the Pi reports under voltage or throttling (0x{throttled:x}). "
+                            "Check the charger, cable and battery."))
+    elif throttled == 0:
+        out.append(("ok", "Power: no undervoltage or throttling since boot."))
+    return out
+
+
+def check_storage(root_options, dmesg_text):
+    out = []
+    if root_options and "ro" in root_options.split(","):
+        out.append(("warn", "Storage: the root filesystem is read only. The system may have found errors."))
+    errors = [l for l in (dmesg_text or "").splitlines()
+              if re.search(r"EXT4-fs.*(error|warning)|mmc\d.*(error|timeout)|I/O error", l, re.I)]
+    if errors:
+        out.append(("warn", f"Storage: {len(errors)} filesystem or card error line(s) in this boot's kernel log. "
+                            "Back up, then run fsck from another machine. Latest: " + errors[-1].strip()))
+    if not out:
+        out.append(("ok", "Storage: root is read write with no filesystem errors this boot."))
+    return out
+
+
+def doctor_command():
+    config = None
+    try:
+        with open(DOCTOR_CONFIG_PATH) as f:
+            config = f.read()
+    except OSError:
+        pass
+    dmesg = _doctor_cmd(["dmesg"])
+    rtc_names = []
+    try:
+        for d in sorted(os.listdir("/sys/class/rtc")):
+            rtc_names.append(read_sysfs(f"/sys/class/rtc/{d}/name") or "")
+    except OSError:
+        pass
+    pkgs = _doctor_cmd(["dpkg-query", "-W", "-f=${Package}\\n", *KERNEL_PACKAGES]) or ""
+    sim = _doctor_cmd(["apt-get", "-s", "full-upgrade"], timeout=60)
+    alsa = (_doctor_cmd(["dpkg-query", "-W", "-f=${Version}", "alsa-utils"]) or "").strip()
+    throttled = None
+    m = re.search(r"0x([0-9a-fA-F]+)", _doctor_cmd(["vcgencmd", "get_throttled"]) or "")
+    if m:
+        throttled = int(m.group(1), 16)
+    root_opts = (_doctor_cmd(["findmnt", "-no", "OPTIONS", "/"]) or "").strip()
+
+    results = []
+    results += check_rtc(config, rtc_names, dmesg)
+    results += check_kernel(set(pkgs.split()), sim)
+    results += check_eeprom(_doctor_cmd(["vcgencmd", "bootloader_version"]))
+    results += check_config(config)
+    results += check_alsa(alsa)
+    results += check_battery(Telemetry.power_summary(), throttled)
+    results += check_storage(root_opts, dmesg)
+
+    print("aiov2_ctl doctor (read only)")
+    print("----------------------------")
+    tags = {"ok": "OK  ", "info": "INFO", "warn": "WARN"}
+    for level, msg in results:
+        print(f"{tags[level]}  {msg}")
+    warns = sum(1 for l, _ in results if l == "warn")
+    print("----------------------------")
+    print("Nothing to worry about." if not warns else f"{warns} thing(s) worth a look.")
+    return 0
+
+
 def sample_battery_power(seconds=3.0, interval=0.2):
     currents, powers = [], []
     voltage = None
@@ -4146,6 +4319,9 @@ def main():
 
     elif arg == "--flipper":
         sys.exit(flipper_command(sys.argv[2:]))
+
+    elif arg == "--doctor":
+        sys.exit(doctor_command())
 
     elif arg == "--companions":
         sys.exit(show_companions(as_json="--json" in sys.argv[2:]))
