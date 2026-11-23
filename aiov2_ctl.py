@@ -330,6 +330,7 @@ _aiov2_ctl()
         --doctor
         --flipper
         --marauder
+        --wifi
         --fix-sdr
         --sdr-biastee
         --wifi-monitor
@@ -360,6 +361,21 @@ _aiov2_ctl()
 
     if [[ "${prev}" == "--mesh-on-boot" || "${prev}" == "--sdr-biastee" || "${prev}" == "--wifi-monitor" ]]; then
         COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${prev}" == "--wifi" ]]; then
+        COMPREPLY=( $(compgen -W "radios scan" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${prev}" == "--iface" ]]; then
+        COMPREPLY=( $(compgen -W "wlan0 wlan1" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ ${COMP_CWORD} -ge 3 ]] && [[ "${COMP_WORDS[1]}" == "--wifi" ]]; then
+        COMPREPLY=( $(compgen -W "--iface --json --save" -- "${cur}") )
         return 0
     fi
 
@@ -546,6 +562,7 @@ COMMANDS:
   --doctor        Read only health check for the uConsole (RTC, kernel, EEPROM, battery, storage)
   --flipper       Flipper info, ls, apps, open (see: aiov2_ctl --flipper)
   --marauder      Passive ESP32 Marauder scanning and logging (see: aiov2_ctl --marauder)
+  --wifi          Wi-Fi radios and a passive scan: radios, scan [--iface wlan0|wlan1] [--json] [--save]
   --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
   --update --yes  Apply updates without the confirmation prompt
 
@@ -3346,6 +3363,339 @@ def marauder_command(args):
     return 0
 
 
+# ---- Wi-Fi radios and passive scanning ---------------------------------------
+# Read only and passive. Radios are found from sysfs (and 'iw dev' when it is
+# installed). Scanning uses NetworkManager (nmcli), which a normal user may do
+# without root, so no sudoers rule is needed. Nothing here transmits anything
+# other than the ordinary probe requests of a managed mode scan. The Flipper
+# Wi-Fi dev board is a third source, but only when a Flipper is plugged in AND
+# the board answers; with no Flipper on the bus its port is never opened.
+SYS_NET = "/sys/class/net"
+FLIPPER_RADIO = "flipper-marauder"
+MT7921_USB_ID = ("0e8d", "7961")
+WIFI_SCAN_SECONDS = 8.0
+_IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+_MARAUDER_AP_RE = re.compile(r"^\[\d+\]\s*\[CH:\s*(\d+)\]\s*(.*?)\s*(-\d+)?\s*$")
+
+
+def _wifi_driver_info(iface, base=SYS_NET):
+    """(driver, bus, usb_id) for a network interface, from sysfs only."""
+    dev = os.path.join(base, iface, "device")
+    driver, bus = "", ""
+    try:
+        driver = os.path.basename(os.readlink(os.path.join(dev, "driver")))
+    except OSError:
+        pass
+    try:
+        bus = os.path.basename(os.readlink(os.path.join(dev, "subsystem")))
+    except OSError:
+        pass
+    uevent = read_sysfs(os.path.join(dev, "uevent")) or ""
+    fields = dict(line.split("=", 1) for line in uevent.splitlines() if "=" in line)
+    driver = driver or fields.get("DRIVER", "")
+    usb_id = None
+    if "PRODUCT" in fields:  # USB: vendor/product/bcd, hex without leading zeros
+        parts = fields["PRODUCT"].split("/")
+        if len(parts) >= 2:
+            try:
+                usb_id = (f"{int(parts[0], 16):04x}", f"{int(parts[1], 16):04x}")
+            except ValueError:
+                pass
+        bus = bus or "usb"
+    elif "SDIO_ID" in fields:
+        bus = bus or "sdio"
+    return driver, bus, usb_id
+
+
+def classify_wifi_radio(bus, usb_id):
+    """'onboard', 'internal-usb' or 'external-usb' from the bus and USB id."""
+    if bus == "usb":
+        return "internal-usb" if usb_id == MT7921_USB_ID else "external-usb"
+    return "onboard"
+
+
+def parse_iw_dev(text):
+    """Interface names from 'iw dev' output."""
+    return [m.group(1) for m in re.finditer(r"^\s*Interface\s+(\S+)", text or "", re.M)]
+
+
+def _iw_dev_names():
+    iw = shutil.which("iw") or next(
+        (p for p in ("/usr/sbin/iw", "/sbin/iw") if os.access(p, os.X_OK)), None)
+    if not iw:
+        return []
+    try:
+        out = subprocess.run([iw, "dev"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_iw_dev(out.stdout) if out.returncode == 0 else []
+
+
+def detect_wifi_radios(base=SYS_NET, iw_names=None):
+    """Wi-Fi radios as [{name, kind, driver, up}], without touching the Flipper."""
+    try:
+        names = [n for n in sorted(os.listdir(base))
+                 if os.path.isdir(os.path.join(base, n, "wireless"))]
+    except OSError:
+        names = []
+    for n in (_iw_dev_names() if iw_names is None else iw_names):
+        if n not in names and os.path.isdir(os.path.join(base, n)):
+            names.append(n)
+    radios = []
+    for name in sorted(names):
+        driver, bus, usb_id = _wifi_driver_info(name, base)
+        flags = read_sysfs(os.path.join(base, name, "flags")) or "0"
+        try:
+            up = bool(int(flags, 16) & 1)  # IFF_UP
+        except ValueError:
+            up = False
+        radios.append({"name": name, "kind": classify_wifi_radio(bus, usb_id),
+                       "driver": driver, "up": up})
+    return radios
+
+
+def _nmcli_split(line):
+    """Split one nmcli terse line on unescaped colons."""
+    fields, cur, i = [], [], 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line):
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if ch == ":":
+            fields.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    fields.append("".join(cur))
+    return fields
+
+
+def wifi_security_label(raw):
+    raw = (raw or "").strip()
+    if raw in ("", "--"):
+        return "Open"
+    return "/".join(raw.split())
+
+
+def parse_nmcli_wifi_list(text, radio):
+    """Parse 'nmcli -t -f BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY dev wifi list'.
+
+    NetworkManager reports signal as 0-100, not dBm. It derives that figure
+    as 2 * (dBm + 100), so the inverse is used to get an approximate dBm.
+    """
+    networks = []
+    for line in (text or "").splitlines():
+        f = _nmcli_split(line)
+        if len(f) != 6 or not re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", f[0]):
+            continue
+        try:
+            channel = int(f[2])
+            freq = int(f[3].split()[0])
+            pct = max(0, min(100, int(f[4])))
+        except (ValueError, IndexError):
+            continue
+        networks.append({
+            "ssid": f[1], "bssid": f[0].lower(), "channel": channel,
+            "freq_mhz": freq, "signal_dbm": round(pct / 2 - 100),
+            "security": wifi_security_label(f[5]), "radio": radio,
+        })
+    return networks
+
+
+def parse_marauder_aps(lines, radio=FLIPPER_RADIO):
+    """Parse Marauder 'list -a' lines such as '[0][CH:6] HomeNet -50'.
+
+    The list carries no BSSID, so that field is empty, and no frequency is
+    known for 2.4 GHz channels outside 1-14, so it is derived only for those.
+    """
+    networks = []
+    for line in lines:
+        m = _MARAUDER_AP_RE.match(line)
+        if not m:
+            continue
+        channel = int(m.group(1))
+        freq = 2407 + 5 * channel if 1 <= channel <= 13 else (2484 if channel == 14 else 0)
+        networks.append({
+            "ssid": m.group(2), "bssid": "", "channel": channel, "freq_mhz": freq,
+            "signal_dbm": int(m.group(3)) if m.group(3) else 0,
+            "security": "unknown", "radio": radio,
+        })
+    return networks
+
+
+def dedupe_wifi_networks(networks):
+    """One entry per (network, radio) pair, keeping the strongest reading."""
+    best = {}
+    for n in networks:
+        key = (n["radio"], n["bssid"] or f"{n['ssid']}|{n['channel']}")
+        if key not in best or n["signal_dbm"] > best[key]["signal_dbm"]:
+            best[key] = n
+    return sorted(best.values(), key=lambda n: n["signal_dbm"], reverse=True)
+
+
+def scan_wifi_nmcli(iface):
+    """Managed mode scan via NetworkManager. Returns (networks, error or None)."""
+    nmcli = shutil.which("nmcli")
+    if not nmcli:
+        return [], "nmcli is not installed"
+    cmd = [nmcli, "-t", "-f", "BSSID,SSID,CHAN,FREQ,SIGNAL,SECURITY",
+           "dev", "wifi", "list", "ifname", iface, "--rescan"]
+    err = None
+    for rescan in ("yes", "no"):  # NM refuses back to back rescans; fall back to its cache
+        try:
+            out = subprocess.run(cmd + [rescan], capture_output=True, text=True, timeout=40)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return [], str(exc)
+        if out.returncode == 0:
+            return parse_nmcli_wifi_list(out.stdout, iface), None
+        err = (out.stderr or out.stdout).strip() or f"nmcli exited {out.returncode}"
+    return [], err
+
+
+class _NullLog:
+    def write(self, line):
+        pass
+
+
+def scan_wifi_flipper(seconds=WIFI_SCAN_SECONDS):
+    """Access points from a Flipper's Wi-Fi dev board, or None to skip silently.
+
+    Never opens a port unless a Flipper is on the USB bus and the board answers.
+    """
+    flippers = [d for d in detect_companions() if d["kind"] == "flipper" and d["tty"]]
+    if not flippers:
+        return None
+    path = flippers[0]["tty"]
+    if probe_wifi_board(path) != "present":
+        return None
+    try:
+        with MarauderSerial(path) as ser:
+            marauder_scan(ser, "all", seconds, _NullLog(), say=lambda _l: None)
+            lines = ser.collect(MARAUDER_LISTS["aps"])
+    except (MarauderError, OSError):
+        return None
+    return parse_marauder_aps(lines)
+
+
+def collect_wifi_scan(iface=None, say=None):
+    """Scan every available radio. Returns the documented JSON structure."""
+    radios = detect_wifi_radios()
+    networks = []
+    for r in radios:
+        if iface and r["name"] != iface:
+            continue
+        found, err = scan_wifi_nmcli(r["name"])
+        if err and say:
+            say(f"{r['name']}: could not scan ({err})")
+        networks += found
+    if iface in (None, FLIPPER_RADIO):
+        flipper = scan_wifi_flipper()
+        if flipper is not None:
+            radios.append({"name": FLIPPER_RADIO, "kind": FLIPPER_RADIO,
+                           "driver": "marauder", "up": True})
+            networks += flipper
+    if iface:
+        radios = [r for r in radios if r["name"] == iface]
+    return {"radios": radios, "networks": dedupe_wifi_networks(networks),
+            "scanned_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+
+def format_wifi_radios(radios):
+    if not radios:
+        return "No Wi-Fi radios found."
+    rows = [f"{'RADIO':<18}{'KIND':<18}{'DRIVER':<12}STATE"]
+    for r in radios:
+        rows.append(f"{r['name']:<18}{r['kind']:<18}{r['driver'] or '-':<12}"
+                    f"{'up' if r['up'] else 'down'}")
+    return "\n".join(rows)
+
+
+def format_wifi_networks(networks):
+    if not networks:
+        return "No networks found."
+    rows = [f"{'SIGNAL':>6}  {'CH':>3}  {'RADIO':<9} {'SECURITY':<14} SSID"]
+    for n in sorted(networks, key=lambda n: n["signal_dbm"], reverse=True):
+        rows.append(f"{n['signal_dbm']:>6}  {n['channel']:>3}  {n['radio'][:9]:<9} "
+                    f"{n['security'][:14]:<14} {n['ssid'] or '(hidden)'}")
+    return "\n".join(rows)
+
+
+def save_wifi_scan(data, directory=None):
+    """Write a scan as JSON. Folder 0700, file 0600, never overwrites."""
+    directory = directory or CAPTURES_DIR
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    stamp = time.strftime("wifi-scan-%Y%m%d-%H%M%S")
+    for n in range(100):
+        path = os.path.join(directory, stamp + (f"-{n}" if n else "") + ".json")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        return path
+    raise OSError("Could not find a free file name in " + directory)
+
+
+def wifi_command(args):
+    usage = (
+        "Usage: aiov2_ctl --wifi radios [--json]\n"
+        "       aiov2_ctl --wifi scan [--iface wlan0|wlan1] [--json] [--save]\n"
+        "Passive only: lists Wi-Fi radios and does a normal managed mode scan.\n"
+        "No root needed. --save keeps the scan in ~/aiov2-captures (private)."
+    )
+    args = list(args)
+    as_json = "--json" in args
+    save = "--save" in args
+    args = [a for a in args if a not in ("--json", "--save")]
+    iface = None
+    if "--iface" in args:
+        i = args.index("--iface")
+        if i + 1 >= len(args) or not (
+                _IFACE_RE.match(args[i + 1]) or args[i + 1] == FLIPPER_RADIO):
+            print(usage)
+            return 1
+        iface = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 1 or args[0] not in ("radios", "scan") or (
+            args[0] == "radios" and (iface or save)):
+        print(usage)
+        return 1
+
+    if args[0] == "radios":
+        radios = detect_wifi_radios()
+        if as_json:
+            print(json.dumps({"radios": radios}, indent=2))
+        else:
+            print(format_wifi_radios(radios))
+        return 0
+
+    known = [r["name"] for r in detect_wifi_radios()]
+    if iface and iface not in known + [FLIPPER_RADIO]:
+        print(f"No such Wi-Fi radio: {iface}. Found: {', '.join(known) or 'none'}.",
+              file=sys.stderr)
+        return 1
+    data = collect_wifi_scan(iface, say=lambda m: print(m, file=sys.stderr))
+    if as_json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(format_wifi_radios(data["radios"]))
+        print()
+        print(format_wifi_networks(data["networks"]))
+    if save:
+        try:
+            path = save_wifi_scan(data)
+        except OSError as exc:
+            print(f"Could not save: {exc}", file=sys.stderr)
+            return 1
+        print(f"Saved to {path} (private, mode 600).", file=sys.stderr if as_json else sys.stdout)
+    return 0
+
+
 def gauge_disagrees(summary):
     """True when the reported charge level cannot match the cell voltage."""
     cap, volts = summary.get("capacity"), summary.get("voltage")
@@ -4714,6 +5064,9 @@ def main():
 
     elif arg == "--add-apps":
         sys.exit(add_apps())
+
+    elif arg == "--wifi":
+        sys.exit(wifi_command(sys.argv[2:]))
 
     elif arg == "--marauder":
         sys.exit(marauder_command(sys.argv[2:]))
