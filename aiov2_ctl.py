@@ -3029,6 +3029,12 @@ def marauder_command(args):
     return 0
 
 
+def gauge_disagrees(summary):
+    """True when the reported charge level cannot match the cell voltage."""
+    cap, volts = summary.get("capacity"), summary.get("voltage")
+    return cap is not None and volts is not None and cap >= 90 and volts < 3.3
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -3064,6 +3070,10 @@ def show_status():
     print(f"Voltage   : {summary['voltage']} V")
     print(f"Current   : {summary['current']} A")
     print(f"Power     : {summary['power']} W")
+    if gauge_disagrees(summary):
+        print(f"Warning   : the gauge says {summary['capacity']}% but the battery is at "
+              f"{summary['voltage']} V. A full cell reads about 4.2 V, so one cell may be flat "
+              "or not making contact. Check the battery before running on battery power.")
     if ignored:
         print(f"Gauge     : {ignored} of {taken} readings ignored as implausible. "
               "If this keeps happening, check the battery contacts.")

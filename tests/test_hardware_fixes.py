@@ -83,6 +83,17 @@ class BatteryGaugeTests(unittest.TestCase):
         self.assertIn("3 of 5 readings ignored", out.getvalue())
 
 
+class GaugeDisagreementTests(unittest.TestCase):
+    def test_full_charge_at_a_flat_voltage_is_flagged(self):
+        # Seen on the uConsole: capacity 100% with the cell steady at 2.7 V.
+        self.assertTrue(a.gauge_disagrees({"capacity": 100, "voltage": 2.7}))
+
+    def test_normal_readings_are_not_flagged(self):
+        self.assertFalse(a.gauge_disagrees({"capacity": 100, "voltage": 4.2}))
+        self.assertFalse(a.gauge_disagrees({"capacity": 10, "voltage": 3.1}))
+        self.assertFalse(a.gauge_disagrees({"capacity": None, "voltage": 3.0}))
+
+
 class InstallSudoersTests(unittest.TestCase):
     def test_installer_no_longer_writes_the_broad_rule(self):
         src = inspect.getsource(a.install_self)
