@@ -422,6 +422,16 @@ A Flipper charging from a uConsole port draws from the battery, so keep an eye o
 
 ---
 
+### Wi-Fi radios and scan (passive only)
+
+```bash
+aiov2_ctl --wifi radios [--json]
+aiov2_ctl --wifi scan [--iface wlan0|wlan1] [--json] [--save]
+```
+`radios` lists the Wi-Fi radios from sysfs: `wlan0` is the onboard Broadcom (`onboard`, brcmfmac), `wlan1` is the MediaTek MT7921 on the AIO board's internal USB (`internal-usb`, mt7921u, 0e8d:7961), and any other USB adapter shows as `external-usb`. `scan` does an ordinary managed mode scan on each radio through NetworkManager (`nmcli`), so it needs no root and no sudoers rule. If your Flipper's Wi-Fi dev board is running the USB-UART Bridge app and answers, its access points are added as a third radio called `flipper-marauder`. With no Flipper plugged in, that port is never opened.
+
+`--json` prints `{"radios": [...], "networks": [...], "scanned_at": "..."}` with one entry per network and radio (name, bssid, channel, freq_mhz, signal_dbm, security, radio). Hidden networks have an empty `ssid`. NetworkManager only gives a 0 to 100 signal figure, so `signal_dbm` is an estimate worked out from it. The Marauder list has no BSSID or security information, so those show as empty and `unknown`. `--save` writes the JSON to `~/aiov2-captures` (folder 700, file 600, never overwrites). Nothing here deauthenticates, injects or spoofs; the saved file contains your neighbours' network names, so keep it private.
+
 ## Privileges and updates
 
 - Anything run as root only ever executes a copy that root alone can modify (the installed `/usr/local/bin/aiov2_ctl`). If you run a boot-rail or similar command from a user writable checkout without installing first, it refuses and tells you to install.
