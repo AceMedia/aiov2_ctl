@@ -599,6 +599,26 @@ WantedBy=multi-user.target
 """
 
 
+def autostart_is_stale(text):
+    """Our own older autostart entry. It started the tray at once, before the panel's
+    tray host existed, so no icon appeared. Files that are not ours are left alone."""
+    return "aiov2_ctl --gui" in (text or "") and text != AUTOSTART_DESKTOP
+
+
+def check_tray_autostart(text, tray_running):
+    """Doctor check. text is the autostart file or None when there is none."""
+    if text is None:
+        return []
+    if autostart_is_stale(text):
+        return [("warn", "Tray: your autostart entry is an older one that starts the tray before the "
+                         "panel is ready, so the icon can go missing at login. Fix it with: "
+                         "aiov2_ctl --autostart")]
+    if not tray_running:
+        return [("info", "Tray: autostart is set up but the tray is not running. "
+                         "Start it now with: aiov2_ctl --gui")]
+    return [("ok", "Tray: autostart is current and the tray is running.")]
+
+
 def autostart_path():
     return os.path.expanduser("~/.config/autostart/aiov2_ctl.desktop")
 
@@ -611,7 +631,17 @@ def enable_autostart():
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     if os.path.exists(path):
-        print("Autostart already enabled.")
+        try:
+            with open(path) as f:
+                current = f.read()
+        except OSError:
+            current = ""
+        if not autostart_is_stale(current):
+            print("Autostart already enabled.")
+            return 0
+        with open(path, "w") as f:
+            f.write(AUTOSTART_DESKTOP)
+        print(f"Autostart updated: {path}")
         return 0
 
     with open(path, "w") as f:
@@ -3601,6 +3631,13 @@ def doctor_command():
     except Exception:
         lora_level = None
     lora_rail = None if lora_level is None else ("on" if lora_level else "off")
+    try:
+        with open(autostart_path()) as f:
+            autostart_text = f.read()
+    except OSError:
+        autostart_text = None
+    tray_up = bool((_doctor_cmd(["pgrep", "-f", "aiov2_ctl --gui"]) or "").strip())
+    results += check_tray_autostart(autostart_text, tray_up)
     results += check_mesh("meshtasticd.service" in units, state == "active", lora_rail,
                           os.path.exists("/dev/spidev1.0"))
 

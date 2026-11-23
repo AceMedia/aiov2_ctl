@@ -169,6 +169,45 @@ class BootRailTests(unittest.TestCase):
             self.assertNotIn(word, src)
 
 
+class TrayTests(unittest.TestCase):
+    OLD = "[Desktop Entry]\nExec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --gui\nXDG_AUTOSTART_DELAY=5\n"
+
+    def test_no_autostart_says_nothing(self):
+        self.assertEqual(a.check_tray_autostart(None, False), [])
+
+    def test_old_entry_is_flagged_with_the_fix(self):
+        r = a.check_tray_autostart(self.OLD, False)
+        self.assertEqual(levels(r), ["warn"])
+        self.assertIn("aiov2_ctl --autostart", text(r))
+
+    def test_current_entry(self):
+        self.assertEqual(levels(a.check_tray_autostart(a.AUTOSTART_DESKTOP, True)), ["ok"])
+        self.assertEqual(levels(a.check_tray_autostart(a.AUTOSTART_DESKTOP, False)), ["info"])
+
+    def test_someone_elses_file_is_not_called_stale(self):
+        self.assertFalse(a.autostart_is_stale("[Desktop Entry]\nExec=other\n"))
+
+    def test_refresh_rewrites_only_a_stale_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "aiov2_ctl.desktop")
+            with open(path, "w") as f:
+                f.write(self.OLD)
+            with mock.patch.object(a, "autostart_path", return_value=path), \
+                    mock.patch.object(a.os, "geteuid", return_value=1000), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(a.enable_autostart(), 0)
+                self.assertEqual(open(path).read(), a.AUTOSTART_DESKTOP)
+            other = "[Desktop Entry]\nExec=other\n"
+            with open(path, "w") as f:
+                f.write(other)
+            with mock.patch.object(a, "autostart_path", return_value=path), \
+                    mock.patch.object(a.os, "geteuid", return_value=1000), \
+                    redirect_stdout(io.StringIO()):
+                a.enable_autostart()
+            self.assertEqual(open(path).read(), other)
+
+
 class MeshTests(unittest.TestCase):
     def test_not_set_up_says_nothing(self):
         self.assertEqual(a.check_mesh(False, False, "off", False), [])
