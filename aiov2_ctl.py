@@ -6,6 +6,8 @@ import time
 import json
 import shutil
 import re
+import pwd
+import tempfile
 import threading
 from statistics import mean
 
@@ -46,14 +48,18 @@ def run_cmd(cmd, cwd=None):
     except subprocess.CalledProcessError:
         return False
 
-def get_git_root():
+def get_git_root(cwd=None):
+    # Anchored to the running script by default: the caller's working
+    # directory may well be an unrelated repository.
+    cwd = cwd or os.path.dirname(os.path.realpath(__file__))
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
             stderr=subprocess.DEVNULL,
             text=True
         ).strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, OSError):
         return None
 
 
@@ -273,8 +279,12 @@ _aiov2_ctl()
         --mesh-off-boot
         --boot-rail
         --boot-rails-status
+        --boot-device
         --add-apps
         --remove-apps
+        --fix-sdr
+        --sdr-biastee
+        --wifi-monitor
         --sync-rtc
     "
 
@@ -300,8 +310,13 @@ _aiov2_ctl()
         return 0
     fi
 
-    if [[ "${prev}" == "--mesh-on-boot" ]]; then
+    if [[ "${prev}" == "--mesh-on-boot" || "${prev}" == "--sdr-biastee" || "${prev}" == "--wifi-monitor" ]]; then
         COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${prev}" == "--boot-device" ]]; then
+        COMPREPLY=( $(compgen -W "status sd nvme toggle" -- "${cur}") )
         return 0
     fi
 
@@ -377,7 +392,7 @@ Meshtastic
 ----------
 An open-source, off-grid, decentralised mesh network for low-power devices.
 
- • Launch: meshtastic-mui
+ • Launch: meshtastic-ui
  • Set your call sign and country in settings
  • US users: set Frequency Slot to 20
  • Map packs go in: /home/USER/.portduino/default/maps
@@ -412,8 +427,9 @@ Graphical GPS / GNSS diagnostics tool.
 
  • Launch: pygpsclient
  • Initial GPS lock may take time (antenna dependent)
- • On CM5 select the second serial device
+ • Opens on /dev/serial0 (the GPS UART) at 9600 baud
  • Click the USB/UART icon to connect
+ • Keep the GPS powered at boot: sudo aiov2_ctl --boot-rail GPS on
 
 General
 -------
@@ -445,8 +461,12 @@ USAGE:
     aiov2_ctl --mesh-on-boot [on|off|status]
     aiov2_ctl --boot-rail <FEATURE> on|off|status
     aiov2_ctl --boot-rails-status
+  sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
+  sudo aiov2_ctl --fix-sdr
+  sudo aiov2_ctl --sdr-biastee on|off|status
+  sudo aiov2_ctl --wifi-monitor on|off|status
   sudo aiov2_ctl --sync-rtc
 
 FEATURES:
@@ -467,7 +487,11 @@ COMMANDS:
         --mesh-off-boot    Disable meshtasticd autostart (default)
       --boot-rail      Set per-rail GPIO state to apply on boot
       --boot-rails-status   Show configured per-rail boot states
+  --boot-device   Set EEPROM boot order (SD/eMMC vs NVMe first)
   --add-apps   Install HackerGadgets AIO apps
+  --fix-sdr    Free the RTL-SDR from the kernel DVB driver
+  --sdr-biastee  Power the SDR antenna input (bias tee) while readsb runs
+  --wifi-monitor Keep NetworkManager off the USB WiFi for monitor mode
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
 
@@ -491,10 +515,9 @@ AUTOSTART_DESKTOP = """[Desktop Entry]
 Type=Application
 Name=AIO v2 Controller
 Comment=GPIO tray controller
-Exec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --gui
+Exec=sh -c 'sleep 5; exec env QT_QPA_PLATFORM=xcb /usr/bin/python3 /usr/local/bin/aiov2_ctl --gui'
 Terminal=false
 X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=5
 """
 
 SYSTEM_DESKTOP_ENTRY = """[Desktop Entry]
@@ -557,6 +580,633 @@ def disable_autostart():
 
     return 0
 
+def read_os_release():
+    info = {}
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if "=" not in line:
+                    continue
+                key, _, value = line.strip().partition("=")
+                info[key] = value.strip('"')
+    except OSError:
+        pass
+    return info
+
+
+def meshtastic_repo_dir():
+    """
+    Pick the OBS repo flavour matching this host.
+
+    The Meshtastic builds are per-suite: the Debian_12 build links against
+    libgpiod2, which trixie-based systems (Kali rolling included) no longer
+    ship, so picking the wrong one makes meshtasticd uninstallable.
+    """
+    info = read_os_release()
+    codename = info.get("VERSION_CODENAME", "").lower()
+    distro_id = info.get("ID", "").lower()
+
+    prefix = "Raspbian" if distro_id == "raspbian" else "Debian"
+
+    if codename in ("bookworm", "kali-last-snapshot"):
+        return f"{prefix}_12"
+    if codename in ("trixie", "forky", "sid", "unstable", "kali-rolling"):
+        return f"{prefix}_13"
+
+    # Rolling or unknown codename: fall back to the numeric base version.
+    try:
+        with open("/etc/debian_version") as f:
+            major = int(f.read().strip().split(".")[0])
+        return f"{prefix}_12" if major <= 12 else f"{prefix}_13"
+    except (OSError, ValueError):
+        return f"{prefix}_13"
+
+
+def ensure_meshtastic_repo():
+    """
+    Point the Meshtastic APT source at the suite this host can actually
+    install, rewriting it if something (e.g. the AIO board package's
+    postinst) left the wrong one behind. Returns True if it was changed.
+    """
+    list_path = "/etc/apt/sources.list.d/network:Meshtastic:beta.list"
+    key_path = "/etc/apt/trusted.gpg.d/network_Meshtastic_beta.gpg"
+    repo_dir = meshtastic_repo_dir()
+    base = "http://download.opensuse.org/repositories/network:/Meshtastic:/beta"
+    wanted = f"deb {base}/{repo_dir}/ /\n"
+
+    try:
+        with open(list_path) as f:
+            current = f.read()
+    except OSError:
+        current = ""
+
+    if current.strip() == wanted.strip() and os.path.exists(key_path):
+        return False
+
+    print(f"Pointing Meshtastic repo at {repo_dir}…")
+    with open(list_path, "w") as f:
+        f.write(wanted)
+    os.chmod(list_path, 0o644)
+
+    key_url = (
+        "https://download.opensuse.org/repositories/"
+        f"network:Meshtastic:beta/{repo_dir}/Release.key"
+    )
+    try:
+        armoured = subprocess.check_output(
+            ["curl", "-fsSL", key_url],
+            stderr=subprocess.DEVNULL
+        )
+        dearmoured = subprocess.run(
+            ["gpg", "--dearmor"],
+            input=armoured,
+            stdout=subprocess.PIPE,
+            check=True
+        ).stdout
+        with open(key_path, "wb") as f:
+            f.write(dearmoured)
+        os.chmod(key_path, 0o644)
+    except (subprocess.CalledProcessError, OSError):
+        print("Warning: could not refresh the Meshtastic signing key.")
+
+    return True
+
+
+def apt_install(packages, recommends=False):
+    """Install packages, returning the list that failed."""
+    # Several of these packages ship conffiles that earlier source-based
+    # installs already wrote, and a conffile prompt would hang a -y run.
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+
+    failed = []
+    for pkg in packages:
+        cmd = ["apt", "install"]
+        if recommends:
+            cmd.append("--install-recommends")
+        cmd += [
+            "-o", "Dpkg::Options::=--force-confdef",
+            "-o", "Dpkg::Options::=--force-confold",
+            pkg, "-y",
+        ]
+
+        print(f"\nInstalling {pkg}…")
+        if subprocess.call(cmd, env=env) != 0:
+            print(f"Failed to install {pkg}.")
+            failed.append(pkg)
+
+    return failed
+
+
+def target_user():
+    """The desktop user behind a sudo invocation."""
+    user = os.environ.get("SUDO_USER")
+    if user and user != "root":
+        return user
+    try:
+        return subprocess.check_output(["logname"], text=True).strip()
+    except (subprocess.CalledProcessError, OSError):
+        return None
+
+
+def target_home(user=None):
+    user = user or target_user()
+    if not user:
+        return None
+    try:
+        return pwd.getpwnam(user).pw_dir
+    except KeyError:
+        return None
+
+
+PYGPSCLIENT_PATH_LINE = 'export PATH="$HOME/.pygpsclient/bin:$PATH"'
+
+PYGPSCLIENT_CONFIG = """{
+  "userport_s": "/dev/serial0",
+  "bpsrate_n": 9600
+}
+"""
+
+
+def prepare_pygpsclient_profile():
+    """
+    The pygpsclient package's installer appends a PATH line to the login
+    profile and then sources it with bash. On a zsh system that profile
+    contains zsh-only builtins, so bash aborts and the postinst never
+    creates the launcher symlink. Guard the zsh-only block and drop the
+    duplicate PATH lines earlier failed runs left behind.
+    """
+    home = target_home()
+    if not home:
+        return
+
+    for name in (".zprofile", ".zshrc"):
+        path = os.path.join(home, name)
+        if not os.path.isfile(path):
+            continue
+
+        try:
+            with open(path) as f:
+                lines = f.read().split("\n")
+        except OSError:
+            continue
+
+        out = []
+        changed = False
+        seen_path_line = False
+
+        for line in lines:
+            stripped = line.strip()
+
+            # Collapse the repeated PyGPSClient PATH stanza to one copy.
+            if stripped == "# Path to PyGPSClient executable":
+                if seen_path_line:
+                    changed = True
+                    continue
+                out.append(line)
+                continue
+
+            if stripped.startswith('export PATH=') and ".pygpsclient/bin" in stripped:
+                if seen_path_line:
+                    changed = True
+                    continue
+                seen_path_line = True
+                # The installer spells the home as /home/"$(logname)", which
+                # comes out empty without a controlling terminal.
+                if stripped != PYGPSCLIENT_PATH_LINE:
+                    indent = line[:len(line) - len(line.lstrip())]
+                    line = indent + PYGPSCLIENT_PATH_LINE
+                    changed = True
+                out.append(line)
+                continue
+
+            # zsh-only builtin: skip it when a POSIX shell sources the file.
+            if stripped.startswith("emulate ") and "ZSH_VERSION" not in line:
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(f'{indent}[ -n "$ZSH_VERSION" ] && {stripped}')
+                changed = True
+                continue
+
+            out.append(line)
+
+        if changed:
+            print(f"Making {path} safe to source from sh…")
+            with open(path, "w") as f:
+                f.write("\n".join(out))
+
+
+def finalize_pygpsclient():
+    """
+    Finish what the pygpsclient postinst leaves undone: the launcher it
+    skips when its install script trips, the venv it builds as root inside
+    the user's home, and a first-run config that finds the GPS.
+    """
+    user = target_user()
+    home = target_home(user)
+    if not home:
+        return
+
+    venv = os.path.join(home, ".pygpsclient")
+    src = os.path.join(venv, "bin", "pygpsclient")
+    link = "/usr/local/bin/pygpsclient"
+
+    if not os.path.isfile(src):
+        return
+
+    if not os.path.exists(link):
+        print(f"Linking {link} → {src}")
+        try:
+            os.symlink(src, link)
+        except OSError as exc:
+            print(f"Could not create the pygpsclient launcher: {exc}")
+
+    # A root-owned venv stops PyGPSClient's in-app updater installing into it.
+    owner = pwd.getpwnam(user)
+    if os.stat(venv).st_uid != owner.pw_uid:
+        print(f"Handing {venv} back to {user}…")
+        subprocess.call(["chown", "-R", f"{owner.pw_uid}:{owner.pw_gid}", venv])
+
+    # With no config PyGPSClient preselects the first scanned port,
+    # /dev/ttyACM0 — the uConsole keyboard. /dev/serial0 is the GPS UART and,
+    # being a symlink, is left out of the scan, so as the user-defined port
+    # it is listed first and selected.
+    config = os.path.join(home, "pygpsclient.json")
+    if not os.path.exists(config):
+        print(f"Pointing PyGPSClient at the GPS UART → {config}")
+        with open(config, "w") as f:
+            f.write(PYGPSCLIENT_CONFIG)
+        os.chown(config, owner.pw_uid, owner.pw_gid)
+
+
+def readsb_json_present():
+    return os.path.isfile("/run/readsb/aircraft.json")
+
+
+def readsb_service_running():
+    """
+    A decoder only counts if the unit is settled. readsb writes its json
+    before it opens the SDR, so with no dongle attached the files appear
+    and are then wiped again by the Restart=always loop.
+    """
+    out = subprocess.run(
+        ["systemctl", "is-active", "readsb"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True
+    ).stdout.strip()
+    return out == "active" and readsb_json_present()
+
+
+SDR_BLACKLIST_PATH = "/etc/modprobe.d/blacklist-rtlsdr.conf"
+SDR_UDEV_PATH = "/etc/udev/rules.d/99-rtlsdr-nosuspend.rules"
+
+SDR_UDEV_RULES = """# RTL2832U SDR on the AIO v2 board.
+# USB autosuspend (usbcore default: 2s) leaves the R820T tuner
+# unresponsive on I2C (r82xx_write: i2c wr failed=-9) and can drop the
+# device off the bus entirely. Keep it powered whenever it is attached.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2832", ATTR{power/control}="on", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ATTR{power/control}="on", ATTR{power/autosuspend}="-1"
+"""
+
+SDR_BLACKLIST = """# The RTL2832U on the AIO v2 board is used as an SDR via librtlsdr
+# (readsb, SDR++, rtl_433). The kernel DVB-T driver claims the device
+# first and blocks them, so keep it out of the way.
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist dvb_usb_v2
+"""
+
+SDR_RECOVERY_DROPIN_PATH = "/etc/systemd/system/readsb.service.d/10-aiov2-sdr-recovery.conf"
+SDR_BIASTEE_DROPIN_PATH = "/etc/systemd/system/readsb.service.d/20-aiov2-sdr-biastee.conf"
+RTL_BIAST = "/usr/bin/rtl_biast"
+SDR_WATCHDOG_SERVICE = "aiov2-sdr-watchdog.service"
+SDR_WATCHDOG_TIMER = "aiov2-sdr-watchdog.timer"
+
+SDR_RECOVERY_DROPIN = """# Installed by aiov2_ctl --install.
+# The on-board RTL2832U intermittently wedges at tuner init or drops off
+# USB, and readsb's Restart= loop cannot bring it back on its own. Wait
+# for the tuner before starting, and power cycle the SDR rail after a
+# failed run.
+[Unit]
+After=aiov2-rails-boot.service
+
+[Service]
+ExecStartPre=+/usr/bin/python3 /usr/local/bin/aiov2_ctl --sdr-recovery prestart
+ExecStopPost=+/usr/bin/python3 /usr/local/bin/aiov2_ctl --sdr-recovery poststop
+TimeoutStartSec=60
+"""
+
+SDR_BIASTEE_DROPIN = f"""# Installed by aiov2_ctl --sdr-biastee on.
+# Debian/Kali readsb builds accept --enable-biastee but never switch the
+# rtlsdr bias tee, so turn it (GPIO0) on just before readsb opens the
+# tuner. It stays on until the SDR loses power and is set again on every
+# start, including after an SDR rail power cycle.
+[Service]
+ExecStartPre=+{RTL_BIAST} -d 0 -b 1
+"""
+
+WIFI_MONITOR_CONF_PATH = "/etc/NetworkManager/conf.d/99-aiov2-usb-wifi-unmanaged.conf"
+
+WIFI_MONITOR_CONF = """# Installed by aiov2_ctl --wifi-monitor on.
+# Leave the AIO v2 USB WiFi (MT7961, mt7921u: wlan1 / wlan1mon) to
+# monitor-mode tools. NetworkManager otherwise re-randomises its MAC for
+# scans and fights monitor mode, which is why airmon-ng suggests
+# "check kill" -- and that stops the NetworkManager and wpa_supplicant
+# keeping the onboard WiFi online. Matching the driver survives both the
+# MAC changes and airmon-ng renaming the interface.
+[keyfile]
+unmanaged-devices=driver:mt7921u
+"""
+
+SDR_WATCHDOG_SERVICE_UNIT = """[Unit]
+Description=AIO v2 recover readsb if the RTL-SDR stops delivering samples
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/bin/aiov2_ctl --sdr-recovery check
+"""
+
+SDR_WATCHDOG_TIMER_UNIT = """[Unit]
+Description=AIO v2 check readsb RTL-SDR sample flow every minute
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def rtlsdr_present():
+    """True if an RTL2832U is on the USB bus."""
+    out = GpioController.run(["lsusb"]) or ""
+    return "0bda:2832" in out or "0bda:2838" in out
+
+
+def dvb_driver_loaded():
+    return "dvb_usb_rtl28xxu" in (GpioController.run(["lsmod"]) or "")
+
+
+def rtlsdr_usable():
+    """True if librtlsdr can claim the tuner (no DVB driver in the way)."""
+    return rtlsdr_present() and not dvb_driver_loaded()
+
+
+def set_sdr_rail(state):
+    pin = GPIO_MAP.get("SDR")
+    if pin is None:
+        return False
+    GpioController.set_gpio(pin, state)
+    return True
+
+
+def wait_for_rtlsdr(seconds=10, check=None):
+    check = check or rtlsdr_present
+    for _ in range(seconds):
+        time.sleep(1)
+        if check():
+            return True
+    return False
+
+
+def cycle_sdr_rail():
+    """
+    Power cycle the SDR rail so the tuner re-enumerates.
+
+    The RTL2832U can wedge after a driver unbind or a marginal power
+    event — it drops to full-speed and answers descriptor reads with
+    -EPIPE until the rail is dropped. We own that rail, so use it.
+    """
+    if not set_sdr_rail(False):
+        return False
+
+    print("Power cycling the SDR rail…")
+    time.sleep(3)
+    set_sdr_rail(True)
+    return wait_for_rtlsdr()
+
+
+def unload_dvb_driver():
+    """
+    Remove the kernel DVB-T driver from the tuner.
+
+    It holds a reference for as long as the device is attached, so a
+    plain `modprobe -r` fails while the rail is up — and the driver then
+    simply rebinds the next time the device enumerates. Drop the rail
+    first, unload, then bring it back with the blacklist in force.
+    """
+    if not dvb_driver_loaded():
+        return True
+
+    print("Unloading dvb_usb_rtl28xxu…")
+    set_sdr_rail(False)
+    time.sleep(2)
+
+    for mod in ("dvb_usb_rtl28xxu", "dvb_usb_v2"):
+        subprocess.call(["modprobe", "-r", mod],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    removed = not dvb_driver_loaded()
+
+    set_sdr_rail(True)
+    wait_for_rtlsdr()
+
+    if not removed:
+        print("dvb_usb_rtl28xxu is still loaded; a reboot will apply the blacklist.")
+
+    return removed
+
+
+def ensure_sdr_driver():
+    """
+    Keep the kernel DVB-T driver off the RTL2832U.
+
+    Left to itself, dvb_usb_rtl28xxu binds the tuner at enumeration and
+    librtlsdr consumers — readsb, SDR++, rtl_433 — fail with
+    `usb_claim_interface error -6`. Blacklisting it is a standard
+    RTL-SDR setup step and this board is no exception.
+    """
+    try:
+        with open(SDR_BLACKLIST_PATH) as f:
+            current = f.read()
+    except OSError:
+        current = None
+
+    if current != SDR_BLACKLIST:
+        print(f"Blacklisting the DVB-T driver → {SDR_BLACKLIST_PATH}")
+        with open(SDR_BLACKLIST_PATH, "w") as f:
+            f.write(SDR_BLACKLIST)
+        os.chmod(SDR_BLACKLIST_PATH, 0o644)
+
+    ensure_sdr_udev_rules()
+
+    return unload_dvb_driver()
+
+
+def ensure_sdr_udev_rules():
+    """Keep USB autosuspend away from the tuner."""
+    try:
+        with open(SDR_UDEV_PATH) as f:
+            current = f.read()
+    except OSError:
+        current = None
+
+    if current == SDR_UDEV_RULES:
+        return
+
+    print(f"Disabling USB autosuspend for the tuner → {SDR_UDEV_PATH}")
+    with open(SDR_UDEV_PATH, "w") as f:
+        f.write(SDR_UDEV_RULES)
+    os.chmod(SDR_UDEV_PATH, 0o644)
+
+    subprocess.call(["udevadm", "control", "--reload-rules"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def ensure_rtlsdr_ready():
+    """Get the on-board tuner into a state librtlsdr can open."""
+    ensure_sdr_driver()
+
+    if rtlsdr_usable():
+        return True
+
+    if not rtlsdr_present():
+        print("No RTL-SDR on the USB bus; attempting recovery…")
+        cycle_sdr_rail()
+
+    return rtlsdr_usable()
+
+
+def ensure_adsb_decoder():
+    """
+    tar1090's installer refuses to run unless a decoder is already
+    producing aircraft.json. Install readsb and get it emitting one.
+
+    With no SDR dongle attached readsb exits at sdrOpen(), so fall back to
+    reconfiguring the unit for net-only operation: the installer only
+    needs the json to exist, and tar1090's own postinst rebuilds readsb
+    and restarts the service partway through, which would wipe any
+    throwaway instance we started alongside it.
+
+    Returns a handle for stop_temp_decoder(), or None if nothing to undo.
+    """
+    if readsb_service_running():
+        return None
+
+    if not shutil.which("readsb"):
+        print("\nInstalling readsb (required by tar1090)…")
+        if apt_install(["readsb"]):
+            print("readsb could not be installed; skipping tar1090.")
+            return None
+
+    ensure_rtlsdr_ready()
+
+    subprocess.call(["systemctl", "start", "readsb"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for _ in range(10):
+        if readsb_service_running():
+            return None
+        time.sleep(1)
+
+    # A readsb that dies mid-stream can leave the tuner wedged: it drops
+    # off the bus and re-enumerates at full speed with failing descriptor
+    # reads. Stop the restart loop, power cycle the rail, and retry once.
+    print("readsb did not come up; recovering the tuner…")
+    subprocess.call(["systemctl", "stop", "readsb"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+
+    if ensure_rtlsdr_ready():
+        subprocess.call(["systemctl", "start", "readsb"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(10):
+            if readsb_service_running():
+                return None
+            time.sleep(1)
+        subprocess.call(["systemctl", "stop", "readsb"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    print("No SDR decoder running; running readsb net-only for the install…")
+    print("(tar1090 only needs aircraft.json to exist to complete setup.)")
+
+    defaults = "/etc/default/readsb"
+    try:
+        with open(defaults) as f:
+            original = f.read()
+    except OSError:
+        print("Could not read /etc/default/readsb; skipping tar1090 setup.")
+        return None
+
+    patched, count = re.subn(
+        r"^RECEIVER_OPTIONS=.*$",
+        'RECEIVER_OPTIONS="--net-only"',
+        original,
+        flags=re.MULTILINE
+    )
+    if not count:
+        patched = original.rstrip("\n") + '\nRECEIVER_OPTIONS="--net-only"\n'
+
+    with open(defaults, "w") as f:
+        f.write(patched)
+
+    subprocess.call(["systemctl", "restart", "readsb"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    handle = {"defaults": defaults, "original": original}
+
+    for _ in range(15):
+        if readsb_service_running():
+            return handle
+        time.sleep(1)
+
+    print("Could not get a decoder to produce aircraft.json.")
+    return handle
+
+
+def stop_temp_decoder(handle):
+    """Put the receiver config back the way we found it."""
+    if not handle:
+        return
+
+    try:
+        with open(handle["defaults"], "w") as f:
+            f.write(handle["original"])
+    except OSError as exc:
+        print(f"Could not restore {handle['defaults']}: {exc}")
+        return
+
+    # tar1090's postinst leaves readsb stopped and disabled on purpose —
+    # the launcher starts it on demand — so only reload a running unit.
+    if subprocess.run(
+        ["systemctl", "is-active", "readsb"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    ).returncode == 0:
+        subprocess.call(["systemctl", "restart", "readsb"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def configure_meshtasticd_gpiochip():
+    """Point meshtasticd's LoRa config at the RP1 gpiochip used on Pi 5 / CM5."""
+    yaml_path = "/etc/meshtasticd/config.yaml"
+    if not os.path.exists(yaml_path):
+        return
+    try:
+        with open(yaml_path, "r") as f:
+            content = f.read()
+        if re.search(r"^[ \t]*gpiochip:", content, flags=re.MULTILINE):
+            return
+        content = re.sub(r"^([Ll]ora:.*)$", r"\1\n  gpiochip: 15", content, count=1, flags=re.MULTILINE)
+        with open(yaml_path, "w") as f:
+            f.write(content)
+        print(f"Configured {yaml_path}: added gpiochip: 15 under Lora:")
+    except Exception as e:
+        print(f"Warning: failed to configure {yaml_path}: {e}")
+
+
 def add_apps():
     if os.geteuid() != 0:
         print("This command requires sudo.")
@@ -565,28 +1215,74 @@ def add_apps():
 
     draw_header("Installing HackerGadgets AIO applications")
 
-    subprocess.check_call(["apt", "update"])
+    sdr_original_state = GpioController.get_gpio(GPIO_MAP["SDR"])
+    if not sdr_original_state:
+        print("Turning on SDR for installation...")
+        GpioController.set_feature("SDR", True)
+        time.sleep(2)
 
-    subprocess.check_call([
-        "apt", "--install-recommends",
-        "install",
-        "hackergadgets-uconsole-aio-board",
-        "-y"
-    ])
+    subprocess.call(["apt", "update"])
 
-    subprocess.check_call([
-        "apt", "install",
-        "meshtastic-mui",
-        "sdrpp-brown",
-        "tar1090",
-        "pygpsclient",
-        "-y"
-    ])
+    # The board package drops in the Meshtastic APT source, so install it
+    # first and correct the suite afterwards.
+    failed = apt_install(["hackergadgets-uconsole-aio-board"], recommends=True)
 
-    print("\nInstallation complete.\n")
+    try:
+        if ensure_meshtastic_repo():
+            subprocess.call(["apt", "update"])
+
+        # Installed one at a time so a single broken package does not block
+        # the rest of the set.
+        failed += apt_install(["meshtastic-mui", "sdrpp-brown"])
+        configure_meshtasticd_gpiochip()
+
+        prepare_pygpsclient_profile()
+        failed += apt_install(["pygpsclient"])
+        finalize_pygpsclient()
+        prepare_pygpsclient_profile()
+
+        decoder = ensure_adsb_decoder()
+        try:
+            failed += apt_install(["tar1090"])
+        finally:
+            stop_temp_decoder(decoder)
+    finally:
+        if not sdr_original_state:
+            print("Restoring SDR original status...")
+            GpioController.set_feature("SDR", False)
+
+    # tar1090 starts readsb on demand, so keep it out of OS autostart. Meshtastic
+    # autostart is handled below by the mesh_on_boot setting.
+    subprocess.call(["systemctl", "disable", "readsb.service"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    if failed:
+        print("\nInstallation finished with errors.")
+        print("These packages could not be installed:")
+        for pkg in failed:
+            print(f"  - {pkg}")
+        print("\nRe-run after checking the apt output above.\n")
+    else:
+        print("\nInstallation complete.\n")
+
     print(POST_INSTALL_TIPS)
     report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
-    return 0
+
+    if sys.stdin.isatty():
+        print("\n" + "=" * 50)
+        print("A reboot is recommended so the new drivers and services load correctly.")
+        print("=" * 50 + "\n")
+        while True:
+            resp = input("Would you like to reboot now? [Y/n] ").strip().lower()
+            if resp in ("y", "yes", ""):
+                print("Rebooting system...")
+                subprocess.call(["reboot"])
+                break
+            if resp in ("n", "no"):
+                print("Please remember to reboot later.")
+                break
+
+    return 1 if failed else 0
 
 
 def remove_apps():
@@ -597,6 +1293,8 @@ def remove_apps():
 
     draw_header("Removing HackerGadgets AIO applications")
 
+    print("Stopping related services before removal...")
+    subprocess.call(["systemctl", "disable", "--now", "readsb.service", "meshtasticd.service"])
     subprocess.call([
         "apt", "remove",
         "meshtastic-mui",
@@ -617,9 +1315,268 @@ def remove_apps():
         "-y"
     ])
 
+    print("=== Starting readsb Cleanup Process ===")
+    print("Removing binary programs, logs, and configuration directories...")
+    for path in [
+        "/lib/systemd/system/readsb.service",
+        "/usr/bin/readsb",
+        "/etc/default/readsb",
+        "/usr/share/readsb",
+        "/var/log/readsb",
+        "/run/readsb",
+        "/usr/local/bin/readsb-gain",
+        "/usr/local/bin/readsb-set-location"
+    ]:
+        if os.path.exists(path) or os.path.islink(path):
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            except Exception as e:
+                print(f"Warning: Failed to remove {path}: {e}")
+
+    subprocess.call(["systemctl", "daemon-reload"])
+
+    uninstall_script = "/usr/local/share/tar1090/uninstall.sh"
+    if os.path.isfile(uninstall_script):
+        print("Found tar1090 web interface. Running map uninstaller...")
+        subprocess.call(["/bin/bash", uninstall_script])
+    else:
+        print("tar1090 web interface not detected or already removed.")
+
+    print("=== Cleanup complete! readsb components have been removed. ===")
+
+    yaml_path = "/etc/meshtasticd/config.yaml"
+    if os.path.exists(yaml_path):
+        try:
+            os.remove(yaml_path)
+            print(f"Removed {yaml_path}")
+        except Exception as e:
+            print(f"Warning: Failed to remove {yaml_path}: {e}")
+
     print("\nApplications removed.")
     return 0
 
+
+
+def fix_sdr():
+    if os.geteuid() != 0:
+        print("This command requires sudo.")
+        print("Run: sudo aiov2_ctl --fix-sdr")
+        return 1
+
+    draw_header("Repairing RTL-SDR access")
+
+    if ensure_rtlsdr_ready():
+        print("\nRTL-SDR is available to librtlsdr.")
+        out = GpioController.run(["lsusb"]) or ""
+        for line in out.split("\n"):
+            if "0bda:2832" in line or "0bda:2838" in line:
+                print(f"  {line.strip()}")
+        print("\nOnly one app can use the SDR at a time.")
+        return 0
+
+    print("\nRTL-SDR is still unavailable.")
+    print("Check that the SDR rail is on (aiov2_ctl SDR on) and the module is seated.")
+    return 1
+
+
+def read_sysfs(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def rtlsdr_sysfs():
+    """sysfs directory of the on-board RTL2832U, or None."""
+    base = "/sys/bus/usb/devices"
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return None
+
+    for name in names:
+        dev = os.path.join(base, name)
+        if (read_sysfs(os.path.join(dev, "idVendor")) == "0bda"
+                and read_sysfs(os.path.join(dev, "idProduct")) in ("2832", "2838")):
+            return dev
+    return None
+
+
+def rtlsdr_high_speed():
+    """A wedged tuner re-enumerates at full speed (12M) or not at all."""
+    dev = rtlsdr_sysfs()
+    return dev is not None and read_sysfs(os.path.join(dev, "speed")) == "480"
+
+
+def rtlsdr_in_use():
+    """True if another program (SDR++, gqrx, …) holds the tuner open."""
+    dev = rtlsdr_sysfs()
+    if not dev:
+        return False
+
+    try:
+        node = "/dev/bus/usb/%03d/%03d" % (
+            int(read_sysfs(os.path.join(dev, "busnum"))),
+            int(read_sysfs(os.path.join(dev, "devnum"))),
+        )
+        return subprocess.call(["fuser", "-s", node],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL) == 0
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def readsb_stalled(grace=150, stale=90):
+    """
+    readsb is up but the tuner has stopped delivering samples. readsb exits
+    when it loses the device, but a wedged tuner can also leave it running
+    with nothing coming in, or with no tuner at all: librtlsdr then falls
+    back to direct sampling, which keeps samples flowing but decodes nothing.
+    """
+    if not readsb_service_running():
+        return False
+
+    pid = GpioController.run(["systemctl", "show", "readsb", "-p", "MainPID", "--value"])
+    uptime = GpioController.run(["ps", "-o", "etimes=", "-p", pid or "0"])
+    if not uptime or int(uptime) < grace:
+        return False
+
+    log = GpioController.run(["journalctl", "-b", "-u", "readsb", f"_PID={pid}",
+                              "-o", "cat", "-q", "--no-pager"])
+    if log and "No supported tuner found" in log:
+        return True
+
+    try:
+        with open("/run/readsb/stats.json") as f:
+            stats = json.load(f)
+        return (time.time() - stats["now"] >= stale
+                or stats["last1min"]["local"]["samples_processed"] == 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+
+
+def sdr_recovery(stage):
+    """
+    Hooks behind SDR_RECOVERY_DROPIN and the SDR watchdog timer. Always
+    succeeds: a failing hook would only stack a unit failure on top of
+    readsb's own Restart= loop.
+    """
+    # Leave a rail that was switched off on purpose alone.
+    if not GpioController.get_gpio(GPIO_MAP["SDR"]):
+        if stage == "prestart":
+            print("SDR rail is off; turn it on with: aiov2_ctl SDR on")
+        return 0
+
+    if stage == "prestart":
+        if not wait_for_rtlsdr(20, rtlsdr_high_speed):
+            print("RTL-SDR has not enumerated at high speed.")
+
+    elif stage == "poststop":
+        # Set by systemd; "success" covers a plain `systemctl stop`.
+        if os.environ.get("SERVICE_RESULT", "success") == "success":
+            return 0
+        if rtlsdr_in_use():
+            print("RTL-SDR is held by another program; not power cycling.")
+            return 0
+        if not cycle_sdr_rail():
+            print("RTL-SDR did not come back after the power cycle.")
+
+    elif stage == "check":
+        if not readsb_stalled():
+            return 0
+        print("readsb is running without a working tuner; recovering it…")
+        subprocess.call(["systemctl", "stop", "readsb"])
+        cycle_sdr_rail()
+        subprocess.call(["systemctl", "start", "readsb"])
+
+    return 0
+
+
+def sdr_biastee(state):
+    """Power the SDR antenna input (bias tee) whenever readsb runs."""
+    enabled = os.path.exists(SDR_BIASTEE_DROPIN_PATH)
+    if state == "status":
+        print(f"SDR bias tee for readsb: {'ON' if enabled else 'OFF'}")
+        return 0
+
+    if os.geteuid() != 0:
+        rerun_with_sudo(["--sdr-biastee", state])
+
+    if state == "on" and not os.path.exists(RTL_BIAST):
+        print(f"{RTL_BIAST} not found. Install it with: sudo apt install rtl-sdr")
+        return 1
+
+    readsb_active = subprocess.call(["systemctl", "is-active", "--quiet", "readsb"]) == 0
+
+    if state == "on":
+        os.makedirs(os.path.dirname(SDR_BIASTEE_DROPIN_PATH), exist_ok=True)
+        with open(SDR_BIASTEE_DROPIN_PATH, "w") as f:
+            f.write(SDR_BIASTEE_DROPIN)
+        os.chmod(SDR_BIASTEE_DROPIN_PATH, 0o644)
+    elif enabled:
+        os.remove(SDR_BIASTEE_DROPIN_PATH)
+
+    subprocess.call(["systemctl", "daemon-reload"])
+
+    def biast_off():
+        if os.path.exists(RTL_BIAST):
+            subprocess.call([RTL_BIAST, "-d", "0", "-b", "0"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # The bias tee outlives the process that set it, so switching it off
+    # needs the tuner free for a moment.
+    if readsb_active and state == "on":
+        subprocess.call(["systemctl", "restart", "readsb"])
+    elif readsb_active:
+        subprocess.call(["systemctl", "stop", "readsb"])
+        biast_off()
+        subprocess.call(["systemctl", "start", "readsb"])
+    elif state == "off" and rtlsdr_present() and not rtlsdr_in_use():
+        biast_off()
+
+    print(f"SDR bias tee for readsb set to {state.upper()}")
+    if state == "on" and not readsb_active:
+        print("It switches on the next time readsb starts.")
+    return 0
+
+
+def wifi_monitor(state):
+    """
+    Reserve the USB WiFi for monitor mode, so airmon-ng no longer needs
+    "check kill" and the onboard WiFi stays connected.
+    """
+    enabled = os.path.exists(WIFI_MONITOR_CONF_PATH)
+    if state == "status":
+        print(f"USB WiFi reserved for monitor mode: {'ON' if enabled else 'OFF'}")
+        return 0
+
+    if os.geteuid() != 0:
+        rerun_with_sudo(["--wifi-monitor", state])
+
+    if state == "on":
+        os.makedirs(os.path.dirname(WIFI_MONITOR_CONF_PATH), exist_ok=True)
+        with open(WIFI_MONITOR_CONF_PATH, "w") as f:
+            f.write(WIFI_MONITOR_CONF)
+        os.chmod(WIFI_MONITOR_CONF_PATH, 0o644)
+    elif enabled:
+        os.remove(WIFI_MONITOR_CONF_PATH)
+
+    # A configuration reload applies unmanaged-devices without touching
+    # active connections; a restart would drop the onboard WiFi.
+    if shutil.which("nmcli"):
+        subprocess.call(["nmcli", "general", "reload", "conf"])
+    else:
+        print("NetworkManager not found; the setting applies once it runs.")
+
+    print(f"USB WiFi reserved for monitor mode: {state.upper()}")
+    if state == "on":
+        print("Start monitor mode with: sudo airmon-ng start wlan1")
+        print("Skip 'airmon-ng check kill' — it takes the onboard WiFi down too.")
+    return 0
 
 
 def sync_rtc():
@@ -638,6 +1595,201 @@ def sync_rtc():
         print(f"hwclock failed (exit code {rc}). RTC was not updated.")
         return 1
     print("RTC updated and synced.")
+    return 0
+
+
+# ==============================
+# Boot device / EEPROM boot order
+# ==============================
+# BOOT_ORDER nibbles are processed right-to-left on the CM5 bootloader:
+#   1 = SD/eMMC, 6 = NVMe, f = restart (loop).
+SD_FIRST_BOOT_ORDER = "0xf61"     # SD/eMMC -> NVMe -> repeat
+NVME_FIRST_BOOT_ORDER = "0xf16"   # NVMe -> SD/eMMC -> repeat
+
+
+def have_rpi_eeprom_config():
+    return shutil.which("rpi-eeprom-config") is not None
+
+
+def get_boot_order():
+    if not have_rpi_eeprom_config():
+        return None
+
+    try:
+        out = subprocess.check_output(
+            ["rpi-eeprom-config"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("BOOT_ORDER="):
+            return line.split("=", 1)[1].strip()
+
+    return None
+
+
+def set_boot_order(order):
+    if not have_rpi_eeprom_config():
+        print("Missing rpi-eeprom-config.")
+        print("Try: sudo apt install rpi-eeprom")
+        return 1
+
+    try:
+        current = subprocess.check_output(
+            ["rpi-eeprom-config"],
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print("Failed to read EEPROM config:")
+        print(e.output)
+        return 1
+
+    found = False
+    new_lines = []
+
+    for line in current.splitlines():
+        if line.startswith("BOOT_ORDER="):
+            new_lines.append(f"BOOT_ORDER={order}")
+            found = True
+        else:
+            new_lines.append(line)
+
+    if not found:
+        new_lines.append(f"BOOT_ORDER={order}")
+
+    with tempfile.NamedTemporaryFile("w", delete=False) as f:
+        tmp_path = f.name
+        f.write("\n".join(new_lines) + "\n")
+
+    try:
+        subprocess.check_call(["rpi-eeprom-config", "--apply", tmp_path])
+    except subprocess.CalledProcessError:
+        print("Failed to apply EEPROM config.")
+        return 1
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return 0
+
+
+def current_root_device():
+    try:
+        return subprocess.check_output(
+            ["findmnt", "-n", "-o", "SOURCE", "/"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def current_boot_device_guess(rootdev=None):
+    if rootdev is None:
+        rootdev = current_root_device()
+
+    if rootdev.startswith("/dev/nvme"):
+        return "nvme"
+    if rootdev.startswith("/dev/mmcblk") or rootdev.startswith("/dev/sd"):
+        return "sd"
+
+    return "unknown"
+
+
+def boot_device_mode_from_order(order):
+    if order == SD_FIRST_BOOT_ORDER:
+        return "SD/eMMC first, NVMe fallback"
+    if order == NVME_FIRST_BOOT_ORDER:
+        return "NVMe first, SD/eMMC fallback"
+    if not order:
+        return "unknown"
+    return "custom/unknown"
+
+
+def print_boot_device_status():
+    order = get_boot_order()
+    rootdev = current_root_device()
+    guess = current_boot_device_guess(rootdev)
+
+    print("Boot device status")
+    print("====================")
+    print(f"Current root device : {rootdev}")
+    print(f"Likely booted from  : {guess}")
+    print(f"BOOT_ORDER          : {order or 'unknown'}")
+    print(f"Mode                : {boot_device_mode_from_order(order)}")
+    print()
+    print("Known modes:")
+    print(f"  sd   : {SD_FIRST_BOOT_ORDER}   SD/eMMC -> NVMe -> repeat")
+    print(f"  nvme : {NVME_FIRST_BOOT_ORDER}  NVMe -> SD/eMMC -> repeat")
+
+
+def maybe_prompt_reboot():
+    if not sys.stdin.isatty():
+        print("Reboot required for boot order change to take effect.")
+        return
+
+    print()
+    ans = input("Reboot now? [y/N] ").strip().lower()
+    if ans in ("y", "yes"):
+        subprocess.call(["systemctl", "reboot"])
+    else:
+        print("Not rebooting. Change takes effect after next reboot.")
+
+
+def boot_device_command(mode):
+    mode = (mode or "status").lower()
+
+    if mode == "status":
+        print_boot_device_status()
+        return 0
+
+    # Read once up front; reused for the toggle decision and the no-op check.
+    # May be None if reading the EEPROM isn't permitted unprivileged.
+    current = get_boot_order()
+
+    if mode in ("sd", "sdcard", "scard"):
+        target = SD_FIRST_BOOT_ORDER
+        label = "SD/eMMC first, NVMe fallback"
+    elif mode == "nvme":
+        target = NVME_FIRST_BOOT_ORDER
+        label = "NVMe first, SD/eMMC fallback"
+    elif mode == "toggle":
+        if current == NVME_FIRST_BOOT_ORDER:
+            target = SD_FIRST_BOOT_ORDER
+            label = "SD/eMMC first, NVMe fallback"
+        else:
+            target = NVME_FIRST_BOOT_ORDER
+            label = "NVMe first, SD/eMMC fallback"
+    else:
+        print("Usage: sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>")
+        return 2
+
+    # Short-circuit a no-op before prompting for sudo. If the read above was
+    # unprivileged-blocked (current is None) we fall through and escalate.
+    if current is not None and current == target:
+        print(f"Already set: {label}. No change.")
+        return 0
+
+    # Re-execs and re-enters this function as root, where `current` is read
+    # authoritatively and the no-op check above catches an already-set order.
+    if os.geteuid() != 0:
+        rerun_with_sudo(["--boot-device", mode])
+
+    print(f"Setting boot mode: {label}")
+    rc = set_boot_order(target)
+    if rc != 0:
+        return rc
+
+    print()
+    print_boot_device_status()
+    maybe_prompt_reboot()
     return 0
 
 
@@ -672,9 +1824,9 @@ class GpioController:
 
     @staticmethod
     def _service_active(name):
-        cmd = ["systemctl", "is-active", "--quiet", name]
-        if os.geteuid() == 0:
-            return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        cmd = ["systemctl", "is-active", name]
+        if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return True
 
         return subprocess.run(
             ["sudo", "-n", *cmd],
@@ -684,9 +1836,9 @@ class GpioController:
 
     @staticmethod
     def _service_enabled(name):
-        cmd = ["systemctl", "is-enabled", "--quiet", name]
-        if os.geteuid() == 0:
-            return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        cmd = ["systemctl", "is-enabled", name]
+        if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            return True
 
         return subprocess.run(
             ["sudo", "-n", *cmd],
@@ -695,11 +1847,27 @@ class GpioController:
         ).returncode == 0
 
     @staticmethod
-    def _run_service(action):
+    def _service_installed(name):
+        cmd = ["systemctl", "show", "-p", "LoadState", name]
+        try:
+            output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+            return output != "LoadState=not-found"
+        except Exception:
+            return False
+
+    @staticmethod
+    def _run_service(action, service_name="meshtasticd"):
+        if action == "start":
+            reset_cmd = ["systemctl", "reset-failed", service_name]
+            if os.geteuid() == 0:
+                subprocess.run(reset_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(["sudo", "-n", *reset_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         if isinstance(action, (list, tuple)):
-            cmd = ["systemctl", *action, "meshtasticd"]
+            cmd = ["systemctl", *action, service_name]
         else:
-            cmd = ["systemctl", action, "meshtasticd"]
+            cmd = ["systemctl", action, service_name]
         if os.geteuid() == 0:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return
@@ -727,17 +1895,12 @@ class GpioController:
             return
         GpioController.set_gpio(pin, state)
         if feature == "LORA":
-            is_active = GpioController._service_active("meshtasticd")
             if state:
                 # Allow device enumeration after power-on
                 time.sleep(0.5)
-                if is_active:
-                    GpioController._run_service("restart")
-                else:
-                    GpioController._run_service("start")
+                GpioController._run_service("start", "meshtasticd.service")
             else:
-                if is_active:
-                    GpioController._run_service("stop")
+                GpioController._run_service("stop", "meshtasticd.service")
                 disable_mesh_autostart_if_default(announce=False)
 
     @staticmethod
@@ -1034,7 +2197,7 @@ def run_gui():
             QApplication, QSystemTrayIcon, QMenu,
             QWidget, QVBoxLayout, QLabel, QCheckBox
         )
-        from PyQt6.QtGui import QAction, QIcon, QCursor
+        from PyQt6.QtGui import QAction, QActionGroup, QIcon, QCursor
         from PyQt6.QtCore import Qt, QTimer, QLockFile, QObject, pyqtSignal
     except ImportError:
         # PyQt6 from apt lives in the system Python's dist-packages. If a venv
@@ -1150,6 +2313,95 @@ def run_gui():
 
     menu.addMenu(boot_menu)
 
+    # Boot device (EEPROM boot order). Reads spawn a subprocess, so this
+    # submenu is refreshed only at startup and after a change, not per tick.
+    boot_device_menu = QMenu("Boot device")
+    boot_device_actions = {}
+    boot_device_group = QActionGroup(boot_device_menu)
+    boot_device_group.setExclusive(True)
+
+    def refresh_boot_device():
+        order = get_boot_order()
+        boot_device_actions["sd"].blockSignals(True)
+        boot_device_actions["nvme"].blockSignals(True)
+        boot_device_actions["sd"].setChecked(order == SD_FIRST_BOOT_ORDER)
+        boot_device_actions["nvme"].setChecked(order == NVME_FIRST_BOOT_ORDER)
+        boot_device_actions["sd"].blockSignals(False)
+        boot_device_actions["nvme"].blockSignals(False)
+
+    for mode, text in (("sd", "SD/eMMC first"), ("nvme", "NVMe first")):
+        a = QAction(text)
+        a.setCheckable(True)
+        def on_boot_device_selected(checked, mode=mode):
+            rc = subprocess.call(
+                ["sudo", "-n", "/usr/local/bin/aiov2_ctl", "--boot-device", mode],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if rc != 0:
+                tray.showMessage(
+                    "AIOv2 Boot Device",
+                    "Boot device changes require sudo in terminal.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    5000,
+                )
+            else:
+                tray.showMessage(
+                    "AIOv2 Boot Device",
+                    "Boot order updated. Reboot for it to take effect.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+            refresh_boot_device()
+
+        a.triggered.connect(on_boot_device_selected)
+        boot_device_group.addAction(a)
+        boot_device_menu.addAction(a)
+        boot_device_actions[mode] = a
+
+    menu.addMenu(boot_device_menu)
+    refresh_boot_device()
+
+    app_services_menu = QMenu("App Services")
+
+    mesh_title_action = QAction("meshtasticd.service")
+    mesh_title_action.setEnabled(False)
+    mesh_status_action = QAction("    Status: Stopped")
+    mesh_status_action.setEnabled(False)
+    mesh_start_action = QAction("    ▶ Start")
+    mesh_stop_action = QAction("    ■ Stop")
+    mesh_restart_action = QAction("    ↻ Restart")
+    mesh_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "meshtasticd.service"), refresh()))
+    mesh_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "meshtasticd.service"), refresh()))
+    mesh_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "meshtasticd.service"), refresh()))
+
+    app_services_menu.addAction(mesh_title_action)
+    app_services_menu.addAction(mesh_status_action)
+    app_services_menu.addAction(mesh_start_action)
+    app_services_menu.addAction(mesh_stop_action)
+    app_services_menu.addAction(mesh_restart_action)
+
+    app_services_menu.addSeparator()
+
+    readsb_title_action = QAction("readsb.service")
+    readsb_title_action.setEnabled(False)
+    readsb_status_action = QAction("    Status: Stopped")
+    readsb_status_action.setEnabled(False)
+    readsb_start_action = QAction("    ▶ Start")
+    readsb_stop_action = QAction("    ■ Stop")
+    readsb_restart_action = QAction("    ↻ Restart")
+    readsb_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "readsb.service"), refresh()))
+    readsb_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "readsb.service"), refresh()))
+    readsb_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "readsb.service"), refresh()))
+
+    app_services_menu.addAction(readsb_title_action)
+    app_services_menu.addAction(readsb_status_action)
+    app_services_menu.addAction(readsb_start_action)
+    app_services_menu.addAction(readsb_stop_action)
+    app_services_menu.addAction(readsb_restart_action)
+
+    menu.addMenu(app_services_menu)
+
     menu.addSeparator()
     power_action = QAction("Power: -- W")
     power_action.setEnabled(False)
@@ -1160,6 +2412,15 @@ def run_gui():
 
     menu.addSeparator()
     menu.addAction("Quit", app.quit)
+    menu_active = [False]
+    def on_menu_show():
+        menu_active[0] = True
+        refresh(force=True)
+    def on_menu_hide():
+        menu_active[0] = False
+        
+    menu.aboutToShow.connect(on_menu_show)
+    menu.aboutToHide.connect(on_menu_hide)
     tray.setContextMenu(menu)
 
     # -------- Left-click window --------
@@ -1180,7 +2441,9 @@ def run_gui():
         layout.addWidget(cb)
         checkboxes[f] = cb
 
-    def refresh():
+    def refresh(force=False):
+        if not force and not window.isVisible() and not menu_active[0]:
+            return
         summary = Telemetry.power_summary()
         rails_on_boot = get_rails_on_boot_config(system_only=True)
         if summary:
@@ -1207,9 +2470,41 @@ def run_gui():
             boot_actions[f].setChecked(bool(rails_on_boot.get(f, False)))
             boot_actions[f].blockSignals(False)
 
+        if not GpioController._service_installed("meshtasticd.service"):
+            mesh_state = "Not installed"
+            mesh_start_action.setVisible(False)
+            mesh_stop_action.setVisible(False)
+            mesh_restart_action.setVisible(False)
+        else:
+            mesh_active = GpioController._service_active("meshtasticd.service")
+            mesh_state = "Running" if mesh_active else "Stopped"
+            mesh_start_action.setVisible(True)
+            mesh_stop_action.setVisible(True)
+            mesh_restart_action.setVisible(True)
+            mesh_start_action.setEnabled(not mesh_active)
+            mesh_stop_action.setEnabled(mesh_active)
+
+        mesh_status_action.setText(f"    Status: {mesh_state}")
+
+        if not GpioController._service_installed("readsb.service"):
+            readsb_state = "Not installed"
+            readsb_start_action.setVisible(False)
+            readsb_stop_action.setVisible(False)
+            readsb_restart_action.setVisible(False)
+        else:
+            readsb_active = GpioController._service_active("readsb.service")
+            readsb_state = "Running" if readsb_active else "Stopped"
+            readsb_start_action.setVisible(True)
+            readsb_stop_action.setVisible(True)
+            readsb_restart_action.setVisible(True)
+            readsb_start_action.setEnabled(not readsb_active)
+            readsb_stop_action.setEnabled(readsb_active)
+            
+        readsb_status_action.setText(f"    Status: {readsb_state}")
+
     def on_activate(reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            refresh()
+            refresh(force=True)
             window.move(QCursor.pos())
             window.show()
             window.raise_()
@@ -1281,6 +2576,41 @@ def run_gui():
     sys.exit(app.exec())
 
 
+def ensure_sudo_path_link(dst):
+    """
+    sudo's secure_path does not include /usr/local/bin on every distro
+    (Kali, for one), which breaks the documented `sudo aiov2_ctl ...`
+    commands. Drop a symlink somewhere secure_path does cover.
+    """
+    try:
+        out = subprocess.check_output(
+            ["sudo", "-n", "sh", "-c", "printf %s \"$PATH\""],
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        sudo_path = out.split(":")
+    except (subprocess.CalledProcessError, OSError):
+        return
+
+    bin_dir = os.path.dirname(dst)
+    if bin_dir in sudo_path:
+        return
+
+    for candidate in ("/usr/bin", "/usr/sbin"):
+        if candidate not in sudo_path:
+            continue
+        link = os.path.join(candidate, os.path.basename(dst))
+        if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(dst):
+            return
+        if os.path.exists(link) and not os.path.islink(link):
+            return
+        print(f"sudo does not search {bin_dir}; linking {link} → {dst}\n")
+        if os.path.islink(link):
+            os.remove(link)
+        os.symlink(dst, link)
+        return
+
+
 def install_self():
     if os.geteuid() != 0:
         print("Install requires sudo.")
@@ -1301,11 +2631,12 @@ def install_self():
         if repo_from_meta and os.path.isdir(repo_from_meta):
             repo = repo_from_meta
 
-    if repo:
+    if repo and os.path.isfile(os.path.join(repo, "aiov2_ctl.py")):
         repo = os.path.realpath(repo)
         src = os.path.join(repo, "aiov2_ctl.py")
         img_src = os.path.join(repo, "img")
     else:
+        repo = None
         src = os.path.realpath(__file__)
         img_src = None
 
@@ -1335,6 +2666,8 @@ def install_self():
     else:
         subprocess.check_call(["cp", src, dst])
         subprocess.check_call(["chmod", "+x", dst])
+
+    ensure_sudo_path_link(dst)
 
     # ------------------------------
     # Install assets (icons, etc.)
@@ -1369,8 +2702,50 @@ def install_self():
     with open(RAILS_BOOT_SERVICE_PATH, "w") as f:
         f.write(RAILS_BOOT_SERVICE_UNIT)
     os.chmod(RAILS_BOOT_SERVICE_PATH, 0o644)
+
+    # ------------------------------
+    # Install readsb SDR recovery
+    # ------------------------------
+    print(f"Installing readsb SDR recovery → {SDR_RECOVERY_DROPIN_PATH}\n")
+    os.makedirs(os.path.dirname(SDR_RECOVERY_DROPIN_PATH), exist_ok=True)
+    for path, content in (
+        (SDR_RECOVERY_DROPIN_PATH, SDR_RECOVERY_DROPIN),
+        (f"/etc/systemd/system/{SDR_WATCHDOG_SERVICE}", SDR_WATCHDOG_SERVICE_UNIT),
+        (f"/etc/systemd/system/{SDR_WATCHDOG_TIMER}", SDR_WATCHDOG_TIMER_UNIT),
+    ):
+        with open(path, "w") as f:
+            f.write(content)
+        os.chmod(path, 0o644)
+
     subprocess.call(["systemctl", "daemon-reload"])
     subprocess.call(["systemctl", "enable", RAILS_BOOT_SERVICE])
+    subprocess.call(["systemctl", "enable", "--now", SDR_WATCHDOG_TIMER])
+
+    # ------------------------------
+    # Install sudoers rule for systemctl status checks
+    # ------------------------------
+    sudoers_path = "/etc/sudoers.d/aiov2_ctl"
+    print(f"Installing sudoers rule → {sudoers_path}\n")
+
+    # Detect the real systemctl path
+    systemctl = shutil.which("systemctl") or "/bin/systemctl"
+    systemctl_paths = sorted(list({systemctl, "/bin/systemctl", "/usr/bin/systemctl"}))
+
+    cmds = []
+    for s_path in systemctl_paths:
+        for action in ("status", "start", "stop", "restart", "is-active", "disable", "reset-failed"):
+            for svc in ("readsb", "readsb.service", "meshtasticd", "meshtasticd.service"):
+                cmds.append(f"{s_path} {action} {svc}")
+
+    sudoers_rules = [
+        f"ALL ALL=(ALL) NOPASSWD: {', '.join(cmds)}"
+    ]
+
+    sudoers_content = "# Generated by aiov2_ctl --install\n" + "\n".join(sudoers_rules) + "\n"
+
+    with open(sudoers_path, "w") as f:
+        f.write(sudoers_content)
+    os.chmod(sudoers_path, 0o440)
 
     os.makedirs(os.path.dirname(INSTALL_META_PATH), exist_ok=True)
     with open(INSTALL_META_PATH, "w") as f:
@@ -1606,14 +2981,42 @@ def main():
     elif arg == "--apply-boot-rails":
         sys.exit(apply_rails_on_boot())
 
+    elif arg == "--sdr-recovery":
+        stage = sys.argv[2] if len(sys.argv) > 2 else ""
+        if stage not in ("prestart", "poststop", "check"):
+            print("Usage: aiov2_ctl --sdr-recovery prestart|poststop|check")
+            sys.exit(1)
+        sys.exit(sdr_recovery(stage))
+
+    elif arg == "--wifi-monitor":
+        state = sys.argv[2].lower() if len(sys.argv) > 2 else ""
+        if state not in ("on", "off", "status"):
+            print("Usage: aiov2_ctl --wifi-monitor on|off|status")
+            sys.exit(1)
+        sys.exit(wifi_monitor(state))
+
+    elif arg == "--sdr-biastee":
+        state = sys.argv[2].lower() if len(sys.argv) > 2 else ""
+        if state not in ("on", "off", "status"):
+            print("Usage: aiov2_ctl --sdr-biastee on|off|status")
+            sys.exit(1)
+        sys.exit(sdr_biastee(state))
+
     elif arg == "--add-apps":
         sys.exit(add_apps())
 
     elif arg == "--remove-apps":
         sys.exit(remove_apps())
 
+    elif arg == "--fix-sdr":
+        sys.exit(fix_sdr())
+
     elif arg == "--sync-rtc":
         sys.exit(sync_rtc())
+
+    elif arg == "--boot-device":
+        mode = sys.argv[2] if len(sys.argv) > 2 else "status"
+        sys.exit(boot_device_command(mode))
 
     elif arg == "--measure":
         if len(sys.argv) < 3:
