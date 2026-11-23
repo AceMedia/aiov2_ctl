@@ -16,6 +16,8 @@ sys.path.insert(0, REPO)
 
 import aiov2_ctl as a  # noqa: E402
 
+VISUDO = shutil.which("visudo", path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")
+
 
 class TrustedFileTests(unittest.TestCase):
     def test_user_writable_file_is_not_trusted(self):
@@ -65,13 +67,13 @@ class SudoersTests(unittest.TestCase):
             for state in ("on", "off"):
                 self.assertIn(f"--boot-rail {feature} {state}", text)
 
-    @unittest.skipUnless(shutil.which("visudo"), "visudo not installed")
+    @unittest.skipUnless(VISUDO, "visudo not installed")
     def test_visudo_accepts_generated_rules(self):
         with tempfile.NamedTemporaryFile("w", suffix=".sudoers", delete=False) as f:
             f.write(a.build_sudoers("shane"))
             path = f.name
         try:
-            rc = subprocess.call(["visudo", "-cf", path],
+            rc = subprocess.call([VISUDO, "-cf", path],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.assertEqual(rc, 0)
         finally:

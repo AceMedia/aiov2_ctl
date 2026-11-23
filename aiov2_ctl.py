@@ -2859,7 +2859,7 @@ def setup_sudoers(remove=False):
         print("Could not work out a safe username to grant. Run this with sudo from your own account.")
         return 1
 
-    visudo = shutil.which("visudo")
+    visudo = shutil.which("visudo", path=os.environ.get("PATH", "") + ":/usr/sbin:/sbin")
     if not visudo:
         print("visudo not found, so the rules cannot be validated. Nothing written.")
         return 1
