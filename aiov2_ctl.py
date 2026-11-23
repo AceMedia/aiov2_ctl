@@ -328,6 +328,7 @@ _aiov2_ctl()
         --setup-sudoers
         --companions
         --flipper
+        --marauder
         --fix-sdr
         --sdr-biastee
         --wifi-monitor
@@ -542,6 +543,7 @@ COMMANDS:
   --remove-apps   Remove HackerGadgets AIO apps
   --companions    Detect a Flipper Zero or ESP32 board on USB (detection only)
   --flipper       Flipper info, ls, apps, open (see: aiov2_ctl --flipper)
+  --marauder      Passive ESP32 Marauder scanning and logging (see: aiov2_ctl --marauder)
   --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
   --update --yes  Apply updates without the confirmation prompt
 
@@ -2425,6 +2427,258 @@ def flipper_command(args):
     return 0
 
 
+# ==============================
+# ESP32 Marauder (phase 3: passive scanning and logging only)
+# ==============================
+# Talks to Marauder's serial command line (documented as 115200 baud) on an
+# ESP32 board, either plugged in directly or through the Flipper's USB-UART
+# Bridge app. Only a short allow list of passive commands is built in. There
+# is deliberately no way to send attack, spoofing or portal commands from
+# here: anything that transmits frames is a separate, explicit decision.
+#
+# The Marauder wiki does not document the line ending or the output format,
+# so those parts are unverified on real hardware.
+MARAUDER_BAUD = termios.B115200
+MARAUDER_EOL = b"\n"
+MARAUDER_LOG_DIR = os.path.expanduser("~/aiov2-captures")
+MARAUDER_SCAN_MODES = {"all": "scanall", "beacon": "sniffbeacon"}
+MARAUDER_LISTS = {"aps": "list -a", "stations": "list -c"}
+
+
+class MarauderError(Exception):
+    pass
+
+
+class MarauderSerial:
+    """Raw line oriented serial client. One command at a time."""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = None
+        self._partial = b""
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def open(self):
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except PermissionError:
+            raise MarauderError(
+                f"No permission to open {self.path}. Run 'sudo aiov2_ctl --install' "
+                "to add the udev rule, then replug the device."
+            )
+        except OSError as exc:
+            raise MarauderError(f"Could not open {self.path}: {exc}")
+        try:
+            tty.setraw(self.fd)
+            attrs = termios.tcgetattr(self.fd)
+            attrs[4] = attrs[5] = MARAUDER_BAUD  # ispeed, ospeed
+            termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+            fcntl.ioctl(self.fd, termios.TIOCEXCL)
+        except (OSError, termios.error) as exc:
+            self.close()
+            raise MarauderError(f"Could not set up {self.path}: {exc}")
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            finally:
+                self.fd = None
+
+    def send(self, command):
+        if "\r" in command or "\n" in command:
+            raise MarauderError("Command may not contain line breaks.")
+        os.write(self.fd, command.encode() + MARAUDER_EOL)
+
+    def read_lines(self, wait):
+        """Lines that arrive within `wait` seconds (may be empty)."""
+        lines = []
+        ready, _, _ = select.select([self.fd], [], [], wait)
+        while ready:
+            try:
+                chunk = os.read(self.fd, 4096)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                raise MarauderError(f"Lost the device: {exc}")
+            if not chunk:
+                raise MarauderError("The device closed the connection.")
+            self._partial += chunk
+            ready, _, _ = select.select([self.fd], [], [], 0)
+        *complete, self._partial = self._partial.split(b"\n")
+        for raw in complete:
+            text = _ANSI_RE.sub("", raw.decode("utf-8", "replace")).strip("\r ")
+            if text:
+                lines.append(text)
+        return lines
+
+    def collect(self, command, idle=1.0, limit=8.0):
+        """Send a command and gather output until it goes quiet."""
+        self.send(command)
+        out = []
+        end = time.monotonic() + limit
+        while time.monotonic() < end:
+            got = self.read_lines(idle)
+            if not got:
+                break
+            out += got
+        return out
+
+
+class MarauderLog:
+    """Capture log. Output can contain SSIDs and MAC addresses, so keep it private."""
+
+    def __init__(self, directory=None):
+        directory = directory or MARAUDER_LOG_DIR
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        self.path = os.path.join(
+            directory, time.strftime("marauder-%Y%m%d-%H%M%S.log"))
+        self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+    def write(self, line):
+        os.write(self.fd, (line + "\n").encode())
+
+    def close(self):
+        os.close(self.fd)
+
+
+def _marauder_port(explicit=None):
+    if explicit:
+        return explicit, None
+    devices = [d for d in detect_companions() if d["tty"]]
+    for kind in ("esp32", "possible-esp32"):
+        for dev in devices:
+            if dev["kind"] == kind:
+                return dev["tty"], None
+    for dev in devices:
+        if dev["kind"] == "flipper":
+            return dev["tty"], (
+                "Using the Flipper's port. This only works with the Flipper's "
+                "USB-UART Bridge app running (channel 0, 115200 baud)."
+            )
+    raise MarauderError(
+        "No Marauder board found. Plug it in (and turn the USB rail on), "
+        "or pass --port /dev/ttyXXX. 'aiov2_ctl --companions' shows what is detected."
+    )
+
+
+def marauder_scan(ser, mode, seconds, log, say=print):
+    """Run a passive scan, stream and log what comes back, always stop it."""
+    command = MARAUDER_SCAN_MODES[mode]
+    ser.send(command)
+    log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} started: {command} for {seconds}s")
+    end = time.monotonic() + seconds
+    try:
+        while time.monotonic() < end:
+            for line in ser.read_lines(min(0.5, max(0.0, end - time.monotonic()))):
+                say(line)
+                log.write(line)
+    except KeyboardInterrupt:
+        say("\nStopping…")
+    finally:
+        # Never leave the board scanning, even on Ctrl+C or an error.
+        try:
+            ser.send("stopscan")
+        except (OSError, MarauderError):
+            pass
+        time.sleep(0.3)
+    log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} stopped")
+
+
+def marauder_command(args):
+    usage = (
+        "Usage: aiov2_ctl --marauder <command> [--port /dev/ttyXXX]\n"
+        "  info                       board and firmware info\n"
+        "  help                       list the firmware's own commands\n"
+        "  scan [all|beacon] [--seconds N]\n"
+        "                             passive scan, streamed and saved to ~/aiov2-captures\n"
+        "  list [aps|stations]        show what the board has found\n"
+        "  channel [N]                show or set the Wi-Fi channel (1-14)\n"
+        "  stop                       stop any running scan\n"
+        "Passive commands only. Attack, spoofing and portal commands are not available."
+    )
+    args = list(args)
+    port = None
+    if "--port" in args:
+        i = args.index("--port")
+        if i + 1 >= len(args):
+            print(usage)
+            return 1
+        port = args[i + 1]
+        del args[i:i + 2]
+
+    seconds = 30.0
+    if "--seconds" in args:
+        i = args.index("--seconds")
+        try:
+            seconds = float(args[i + 1])
+            if not 1 <= seconds <= 3600:
+                raise ValueError
+        except (IndexError, ValueError):
+            print("--seconds needs a number between 1 and 3600.")
+            return 1
+        del args[i:i + 2]
+
+    if not args:
+        print(usage)
+        return 1
+    sub, rest = args[0], args[1:]
+
+    # Work out the exact device commands up front and refuse anything else
+    # before a port is even opened.
+    simple = {"info": "info", "help": "help", "stop": "stopscan"}
+    if sub in simple and not rest:
+        plan = ("simple", simple[sub])
+    elif sub == "scan" and len(rest) <= 1 and (not rest or rest[0] in MARAUDER_SCAN_MODES):
+        plan = ("scan", rest[0] if rest else "all")
+    elif sub == "list" and len(rest) <= 1 and (not rest or rest[0] in MARAUDER_LISTS):
+        plan = ("simple", MARAUDER_LISTS[rest[0] if rest else "aps"])
+    elif sub == "channel" and len(rest) <= 1:
+        if rest:
+            if not rest[0].isdigit() or not 1 <= int(rest[0]) <= 14:
+                print("Channel must be a number from 1 to 14.")
+                return 1
+            plan = ("simple", f"channel -s {int(rest[0])}")
+        else:
+            plan = ("simple", "channel")
+    else:
+        print(usage)
+        return 1
+
+    try:
+        path, note = _marauder_port(port)
+        if note:
+            print(note)
+        with MarauderSerial(path) as ser:
+            if plan[0] == "scan":
+                log = MarauderLog()
+                try:
+                    print(f"Scanning ({plan[1]}) for {seconds:g}s on {path}. Ctrl+C stops early.")
+                    marauder_scan(ser, plan[1], seconds, log)
+                    # Show what the board collected, and keep it in the log.
+                    for cmd in MARAUDER_LISTS.values():
+                        log.write(f"# {cmd}")
+                        for line in ser.collect(cmd):
+                            print(line)
+                            log.write(line)
+                finally:
+                    log.close()
+                print(f"\nSaved to {log.path} (private, mode 600).")
+            else:
+                for line in ser.collect(plan[1]):
+                    print(line)
+    except MarauderError as exc:
+        print(f"Error: {exc}")
+        return 1
+    return 0
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -3537,6 +3791,9 @@ def main():
 
     elif arg == "--add-apps":
         sys.exit(add_apps())
+
+    elif arg == "--marauder":
+        sys.exit(marauder_command(sys.argv[2:]))
 
     elif arg == "--flipper":
         sys.exit(flipper_command(sys.argv[2:]))
