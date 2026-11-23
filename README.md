@@ -343,6 +343,15 @@ python3 -m unittest discover -s tests
 
 ---
 
+## Privileges and updates
+
+- Anything run as root only ever executes a copy that root alone can modify (the installed `/usr/local/bin/aiov2_ctl`). If you run a boot-rail or similar command from a user writable checkout without installing first, it refuses and tells you to install.
+- `aiov2_ctl --update` fetches first, shows the incoming commits and diffstat, and asks before it runs the new code as root. Use `--update --yes` to skip the question. Set `"require_signed_updates": true` in the system config to refuse any update whose newest commit is not validly signed.
+- `sudo aiov2_ctl --setup-sudoers` is optional. It adds `/etc/sudoers.d/aiov2_ctl` so the tray can change boot rails, boot device and the meshtasticd/readsb services without a password. The rules are exact commands with no wildcards, are validated with `visudo -cf` before being written, and `sudo aiov2_ctl --setup-sudoers --remove` takes them away.
+- `--remove-apps` no longer runs `apt autoremove -y`. It shows apt's list and asks, or skips it when not interactive.
+
+---
+
 ## Safety notes
 
 - GPIO writes happen immediately

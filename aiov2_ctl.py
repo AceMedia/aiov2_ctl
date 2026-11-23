@@ -6,6 +6,7 @@ import time
 import json
 import shutil
 import re
+import stat
 import pwd
 import tempfile
 import threading
@@ -17,10 +18,48 @@ USER_CONFIG_PATH = os.path.expanduser("~/.config/aiov2_ctl/config.json")
 RAILS_BOOT_SERVICE = "aiov2-rails-boot.service"
 RAILS_BOOT_SERVICE_PATH = f"/etc/systemd/system/{RAILS_BOOT_SERVICE}"
 
-def rerun_with_sudo(extra_args=None):
+INSTALLED_PATH = "/usr/local/bin/aiov2_ctl"
+
+
+def is_trusted_file(path):
+    """True if only root can modify this file (and it lives in a root owned dir)."""
+    try:
+        st = os.stat(path)
+        parent = os.stat(os.path.dirname(os.path.realpath(path)))
+    except OSError:
+        return False
+    unsafe = stat.S_IWGRP | stat.S_IWOTH
+    return (
+        st.st_uid == 0 and not st.st_mode & unsafe
+        and parent.st_uid == 0 and not parent.st_mode & unsafe
+    )
+
+
+def rerun_with_sudo(extra_args=None, allow_untrusted=False):
+    """
+    Re-run this tool as root. Root only ever executes a copy that root alone
+    can modify (the installed one, or this file if it is root owned), so a
+    user writable checkout cannot be used to escalate. The update flow is
+    the one exception, and passes allow_untrusted after the user has
+    reviewed and confirmed the incoming changes.
+    """
     python3 = shutil.which("python3") or "/usr/bin/python3"
 
-    cmd = ["sudo", python3, os.path.realpath(__file__)]
+    script = None
+    if is_trusted_file(INSTALLED_PATH):
+        script = INSTALLED_PATH
+    elif is_trusted_file(os.path.realpath(__file__)):
+        script = os.path.realpath(__file__)
+    elif allow_untrusted:
+        script = os.path.realpath(__file__)
+
+    if script is None:
+        print("Refusing to run this from a user writable location as root.")
+        print("Install first:  sudo python3 ./aiov2_ctl.py --install")
+        print("Then re-run:    sudo aiov2_ctl " + " ".join(extra_args or sys.argv[1:]))
+        sys.exit(1)
+
+    cmd = ["sudo", python3, script]
     if extra_args:
         cmd += extra_args
     else:
@@ -282,6 +321,7 @@ _aiov2_ctl()
         --boot-device
         --add-apps
         --remove-apps
+        --setup-sudoers
         --fix-sdr
         --sdr-biastee
         --wifi-monitor
@@ -494,6 +534,8 @@ COMMANDS:
   --wifi-monitor Keep NetworkManager off the USB WiFi for monitor mode
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
+  --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
+  --update --yes  Apply updates without the confirmation prompt
 
 NOTES:
   • Battery power is the truth source
@@ -1310,10 +1352,13 @@ def remove_apps():
         "-y"
     ])
 
-    subprocess.call([
-        "apt", "autoremove",
-        "-y"
-    ])
+    # No -y here: autoremove can pick up packages unrelated to this tool,
+    # so let apt show the list and ask. Skipped when not interactive.
+    if sys.stdin.isatty():
+        print("\nRunning apt autoremove. Check the list before agreeing.")
+        subprocess.call(["apt", "autoremove"])
+    else:
+        print("\nSkipping apt autoremove (not interactive). Run it yourself if wanted.")
 
     print("=== Starting readsb Cleanup Process ===")
     print("Removing binary programs, logs, and configuration directories...")
@@ -2301,7 +2346,7 @@ def run_gui():
             if rc != 0:
                 tray.showMessage(
                     "AIOv2 Boot Rails",
-                    "Boot rail changes require sudo in terminal.",
+                    "Boot rail changes need permission. Run once: sudo aiov2_ctl --setup-sudoers",
                     QSystemTrayIcon.MessageIcon.Warning,
                     5000,
                 )
@@ -2341,7 +2386,7 @@ def run_gui():
             if rc != 0:
                 tray.showMessage(
                     "AIOv2 Boot Device",
-                    "Boot device changes require sudo in terminal.",
+                    "Boot device changes need permission. Run once: sudo aiov2_ctl --setup-sudoers",
                     QSystemTrayIcon.MessageIcon.Warning,
                     5000,
                 )
@@ -2758,7 +2803,91 @@ def install_self():
     return 0
 
 
-def update_self():
+SUDOERS_PATH = "/etc/sudoers.d/aiov2_ctl"
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+_SUDOERS_SERVICES = ("meshtasticd", "meshtasticd.service", "readsb", "readsb.service")
+
+
+def build_sudoers(user):
+    """
+    Exact, argument-by-argument rules for what the tray needs. No wildcards,
+    so the user cannot smuggle extra arguments past sudo.
+    """
+    systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
+    cmds = []
+    for feature in GPIO_MAP:
+        for state in ("on", "off"):
+            cmds.append(f"{INSTALLED_PATH} --boot-rail {feature} {state}")
+    for mode in ("sd", "nvme"):
+        cmds.append(f"{INSTALLED_PATH} --boot-device {mode}")
+    for svc in _SUDOERS_SERVICES:
+        for action in ("start", "stop", "restart", "reset-failed"):
+            cmds.append(f"{systemctl} {action} {svc}")
+    cmds.append(f"{systemctl} enable meshtasticd")
+    cmds.append(f"{systemctl} disable --now meshtasticd")
+
+    lines = [
+        "# Managed by aiov2_ctl --setup-sudoers. Remove with --setup-sudoers --remove.",
+        "# Lets the tray GUI change rails and services without a password prompt.",
+        f"{user} ALL=(root) NOPASSWD: " + ", \\\n    ".join(cmds),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def setup_sudoers(remove=False):
+    if os.geteuid() != 0:
+        print("This command requires sudo.")
+        print("Run: sudo aiov2_ctl --setup-sudoers" + (" --remove" if remove else ""))
+        return 1
+
+    if remove:
+        try:
+            os.remove(SUDOERS_PATH)
+            print(f"Removed {SUDOERS_PATH}")
+        except FileNotFoundError:
+            print("Nothing to remove.")
+        return 0
+
+    if not is_trusted_file(INSTALLED_PATH):
+        print(f"{INSTALLED_PATH} must be installed and owned by root first.")
+        print("Run: sudo python3 ./aiov2_ctl.py --install")
+        return 1
+
+    user = target_user()
+    if not user or not _USERNAME_RE.match(user):
+        print("Could not work out a safe username to grant. Run this with sudo from your own account.")
+        return 1
+
+    visudo = shutil.which("visudo")
+    if not visudo:
+        print("visudo not found, so the rules cannot be validated. Nothing written.")
+        return 1
+
+    content = build_sudoers(user)
+    # Names containing '.' or '~' are ignored by sudo, so a half written temp
+    # file in this directory can never take effect.
+    fd, tmp = tempfile.mkstemp(prefix="aiov2_ctl.", dir="/etc/sudoers.d")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.chmod(tmp, 0o440)
+        if subprocess.call([visudo, "-cf", tmp], stdout=subprocess.DEVNULL) != 0:
+            print("Generated sudoers rules failed validation. Nothing written.")
+            return 1
+        os.replace(tmp, SUDOERS_PATH)
+        tmp = None
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+    print(f"Installed {SUDOERS_PATH} for user '{user}'.")
+    print("The tray can now change boot rails, boot device and the meshtasticd/readsb services without a password.")
+    print("Remove it any time with: sudo aiov2_ctl --setup-sudoers --remove")
+    return 0
+
+
+def update_self(confirmed=False):
     if os.geteuid() == 0:
         print("Do not run --update with sudo.")
         print("Run: aiov2_ctl --update")
@@ -2780,8 +2909,43 @@ def update_self():
 
     branch = meta.get("branch") or get_git_branch(repo) or "main"
     print(f"Current branch: {branch}\n")
-    print("Pulling latest changes…\n")
 
+    # The install step runs the new code as root, so look before pulling.
+    print("Fetching…\n")
+    if not run_cmd(["git", "fetch", "--quiet", "origin", branch], cwd=repo):
+        print("Git fetch failed.")
+        return 1
+
+    incoming = f"HEAD..origin/{branch}"
+    summary = subprocess.run(
+        ["git", "log", "--oneline", "--no-decorate", incoming],
+        cwd=repo, text=True, capture_output=True,
+    ).stdout.strip()
+    if not summary:
+        print("Already up to date.")
+        return 0
+
+    print("Incoming changes:\n")
+    print(summary)
+    run_cmd(["git", "diff", "--stat", incoming], cwd=repo)
+
+    if load_config().get("require_signed_updates"):
+        if not run_cmd(["git", "verify-commit", f"origin/{branch}"], cwd=repo):
+            print("\nrequire_signed_updates is on and the newest commit is not "
+                  "validly signed. Not updating.")
+            return 1
+        print("\nSignature on origin/%s verified." % branch)
+
+    if not confirmed and "--yes" not in sys.argv:
+        if not sys.stdin.isatty():
+            print("\nNot interactive. Re-run with --yes to apply these changes as root.")
+            return 1
+        resp = input("\nThis will run the new code as root to install it. Continue? [y/N]: ")
+        if resp.strip().lower() not in ("y", "yes"):
+            print("Update cancelled.")
+            return 0
+
+    print("\nPulling latest changes…\n")
     if not run_cmd(["git", "pull", "--ff-only", "origin", branch], cwd=repo):
         print("Git pull failed. Resolve manually.")
         return 1
@@ -2790,8 +2954,8 @@ def update_self():
 
     report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
 
-    # escalate only for install
-    rerun_with_sudo(["--install", "--show-mesh-status"])
+    # escalate only for install; the user has just reviewed the changes
+    rerun_with_sudo(["--install", "--show-mesh-status"], allow_untrusted=True)
     return 0
 
 def check_update_interactive():
@@ -2860,7 +3024,7 @@ def check_update_interactive():
 
     if response in ("", "y", "yes"):
         print("\nStarting update...\n")
-        return update_self()
+        return update_self(confirmed=True)
     else:
         print("\nUpdate cancelled.")
         return 0
@@ -3004,6 +3168,9 @@ def main():
 
     elif arg == "--add-apps":
         sys.exit(add_apps())
+
+    elif arg == "--setup-sudoers":
+        sys.exit(setup_sudoers(remove="--remove" in sys.argv[2:]))
 
     elif arg == "--remove-apps":
         sys.exit(remove_apps())
