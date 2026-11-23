@@ -366,6 +366,21 @@ Talks to the Flipper's own serial CLI using only the standard library, so nothin
 
 These commands follow the published CLI but have not been checked on a real Flipper yet.
 
+### ESP32 Marauder (passive only)
+
+```bash
+aiov2_ctl --marauder info
+aiov2_ctl --marauder scan [all|beacon] [--seconds N]
+aiov2_ctl --marauder list [aps|stations]
+aiov2_ctl --marauder channel [N]
+aiov2_ctl --marauder stop
+```n
+Drives the Marauder firmware's serial command line (115200 baud) on an ESP32 board, either plugged in directly or through the Flipper's USB-UART Bridge app. `scan` streams what the board hears, saves it to `~/aiov2-captures` (folder 700, files 600) and always sends `stopscan` afterwards, even if you hit Ctrl+C.
+
+Only a short list of passive commands is built in. There is no way to send attack, spoofing or portal commands from here. The log can contain SSIDs and MAC addresses, so treat it as private. This is for looking at your own networks and equipment, and the law where you live applies.
+
+The Marauder wiki does not document the line ending or the output format, so those parts are unverified until I have a board to try it on.
+
 A Flipper charging from a uConsole port draws from the battery, so keep an eye on that until the revised board is in. Future phases (RPC, Marauder) are planned in the issue tracker.
 
 ---
