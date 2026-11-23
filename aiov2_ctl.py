@@ -2787,8 +2787,9 @@ def flipper_command(args):
 # is deliberately no way to send attack, spoofing or portal commands from
 # here: anything that transmits frames is a separate, explicit decision.
 #
-# The Marauder wiki does not document the line ending or the output format,
-# so those parts are unverified on real hardware.
+# The Marauder wiki does not document the line ending or the output format.
+# Checked on a Flipper WiFi dev board running v1.21.0: "\n" works, and the
+# output is streamed as raw lines, so the exact format does not matter here.
 MARAUDER_BAUD = termios.B115200
 MARAUDER_EOL = b"\n"
 CAPTURES_DIR = os.path.expanduser("~/aiov2-captures")
@@ -2952,7 +2953,7 @@ def marauder_command(args):
         "Usage: aiov2_ctl --marauder <command> [--port /dev/ttyXXX]\n"
         "  info                       board and firmware info\n"
         "  help                       list the firmware's own commands\n"
-        "  scan [all|beacon] [--seconds N]\n"
+        "  scan [all|beacon] [--seconds N]   (default 30; under about 15 may hear nothing)\n"
         "                             passive scan, streamed and saved to ~/aiov2-captures\n"
         "  list [aps|stations]        show what the board has found\n"
         "  channel [N]                show or set the Wi-Fi channel (1-14)\n"
