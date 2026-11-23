@@ -169,6 +169,32 @@ class BootRailTests(unittest.TestCase):
             self.assertNotIn(word, src)
 
 
+class MeshTests(unittest.TestCase):
+    def test_not_set_up_says_nothing(self):
+        self.assertEqual(a.check_mesh(False, False, "off", False), [])
+        self.assertEqual(a.check_mesh(True, True, None, True), [])
+
+    def test_working(self):
+        self.assertEqual(levels(a.check_mesh(True, True, "on", True)), ["ok"])
+
+    def test_rail_on_but_service_stopped(self):
+        r = a.check_mesh(True, False, "on", True)
+        self.assertEqual(levels(r), ["warn"])
+        self.assertIn("systemctl start meshtasticd", text(r))
+
+    def test_service_running_without_power(self):
+        r = a.check_mesh(True, True, "off", True)
+        self.assertEqual(levels(r), ["warn"])
+        self.assertIn("LORA on", text(r))
+
+    def test_everything_off_is_only_info(self):
+        self.assertEqual(levels(a.check_mesh(True, False, "off", True)), ["info"])
+
+    def test_missing_spi_node(self):
+        r = a.check_mesh(True, True, "on", False)
+        self.assertIn("spi1-1cs", text(r))
+
+
 class CommandTests(unittest.TestCase):
     def test_runs_end_to_end_and_never_writes(self):
         out = io.StringIO()

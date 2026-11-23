@@ -1,0 +1,233 @@
+WIKI UPDATE INSERTS (TODAY'S FEATURES)
+=====================================
+
+Scope
+-----
+Update these wiki pages only:
+- Installation
+- CLI-Usage
+- GUI
+- Power-&-Telemetry
+- Troubleshooting
+
+Do NOT update Home for this pass.
+
+How to apply
+------------
+For each page below:
+1) Open the page in the GitHub wiki editor.
+2) Find the exact "Insert location" heading.
+3) Paste the markdown chunk immediately under that heading (or at the end of that section, as noted).
+4) Save with a concise commit message (example: "docs: add rail boot service and GPIO state source docs").
+
+
+============================================================
+1) PAGE: Installation
+============================================================
+Insert location A:
+- Section: "Install"
+- Place this directly after the existing bullet list that explains what --install does.
+
+Markdown chunk:
+```markdown
+### Rail Boot Service (installed automatically)
+
+`--install` also installs and enables a systemd oneshot unit:
+
+- `aiov2-rails-boot.service`
+- Unit path: `/etc/systemd/system/aiov2-rails-boot.service`
+- Purpose: apply configured GPIO rail boot states at startup via:
+  - `aiov2_ctl --apply-boot-rails`
+
+Verify after install:
+
+```bash
+systemctl is-enabled aiov2-rails-boot.service
+systemctl status aiov2-rails-boot.service --no-pager
+aiov2_ctl --boot-rails-status
+```
+```
+
+Insert location B:
+- Section: "Uninstall"
+- Add these lines to the uninstall command block near other system files.
+
+Markdown chunk:
+```markdown
+# Remove rail boot service
+sudo systemctl disable aiov2-rails-boot.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/aiov2-rails-boot.service
+sudo systemctl daemon-reload
+```
+
+
+============================================================
+2) PAGE: CLI-Usage
+============================================================
+Insert location:
+- Add a new top-level section near other command sections (after feature on/off commands is ideal).
+
+Markdown chunk:
+```markdown
+## Rail Boot State Commands
+
+Set per-feature rail state to apply at system boot:
+
+```bash
+aiov2_ctl --boot-rail <FEATURE> on
+aiov2_ctl --boot-rail <FEATURE> off
+aiov2_ctl --boot-rail <FEATURE> status
+aiov2_ctl --boot-rails-status
+```
+
+Supported features:
+
+- `GPS`
+- `LORA`
+- `SDR`
+- `USB`
+
+Examples:
+
+```bash
+aiov2_ctl --boot-rail SDR on
+aiov2_ctl --boot-rail LORA off
+aiov2_ctl --boot-rail SDR status
+aiov2_ctl --boot-rails-status
+```
+
+Notes:
+
+- `on/off` updates effective boot configuration used by the boot service.
+- Settings are applied at startup by `aiov2-rails-boot.service`.
+```
+
+
+============================================================
+3) PAGE: GUI
+============================================================
+Insert location A:
+- Section: "Right-click (Context Menu)"
+- Add this under the existing menu behavior bullets.
+
+Markdown chunk:
+```markdown
+### Rails on boot submenu
+
+The right-click menu includes a **Rails on boot** submenu for per-feature boot preferences.
+
+Important distinction:
+
+- Main feature toggles = **live rail state now**
+- **Rails on boot** toggles = **persisted boot preference**
+
+So a feature may be OFF in the main live toggle while still set ON in boot preference (or vice versa), depending on current runtime state.
+```
+
+Insert location B:
+- Section: "Live Refresh Model"
+- Add this short note at the end of that section.
+
+Markdown chunk:
+```markdown
+When debugging status/source mismatches, compare:
+
+```bash
+pinctrl get <pin>
+AIOV2_CTL_DEBUG=1 aiov2_ctl --status
+```
+```
+
+
+============================================================
+4) PAGE: Power-&-Telemetry
+============================================================
+Insert location:
+- Add a new section after "GPIO-Controlled Power Domains" (or before "Summary").
+
+Markdown chunk:
+```markdown
+## GPIO State Interpretation
+
+GPIO on/off state is interpreted in this order:
+
+1. `hi` => ON (`pinctrl` source)
+2. `lo` => OFF (`pinctrl` source)
+3. `--` (not driven) => per-pin boot fallback (`boot_default` source)
+
+This keeps runtime state truth-first and only uses boot fallback when the pin is not actively driven.
+
+### Debug source labels
+
+To show source labels in status output:
+
+```bash
+AIOV2_CTL_DEBUG=1 aiov2_ctl --status
+```
+
+Source labels:
+
+- `(pinctrl)` from explicit `hi/lo`
+- `(boot_default)` from `--` fallback
+- `(unknown)` unparseable/failed read path
+```
+
+
+============================================================
+5) PAGE: Troubleshooting
+============================================================
+Insert location:
+- Add a new section near other operational checks (after "Power & Telemetry" is ideal).
+
+Markdown chunk:
+```markdown
+## Boot preference set but live rail OFF
+
+If a feature is configured ON at boot but appears OFF live, check the boot apply path end-to-end.
+
+### 1) Check configured boot preferences
+
+```bash
+aiov2_ctl --boot-rails-status
+```
+
+### 2) Check boot service state
+
+```bash
+systemctl status aiov2-rails-boot.service --no-pager
+systemctl is-enabled aiov2-rails-boot.service
+```
+
+### 3) Check boot service logs for current boot
+
+```bash
+journalctl -u aiov2-rails-boot.service -b --no-pager
+```
+
+### 4) Check raw pin state and interpreted status
+
+```bash
+pinctrl get <pin>
+AIOV2_CTL_DEBUG=1 aiov2_ctl --status
+```
+
+Interpretation:
+
+- `hi/lo` should report source `(pinctrl)`
+- `--` should report source `(boot_default)`
+
+If needed, apply configured boot states immediately (without reboot):
+
+```bash
+sudo aiov2_ctl --apply-boot-rails
+```
+```
+
+
+Suggested wiki commit messages
+-----------------------------
+- docs(installation): document rail boot service install/verify/uninstall
+- docs(cli): add rail boot command usage and examples
+- docs(gui): explain live toggles vs Rails on boot submenu
+- docs(power): document GPIO state interpretation and debug source labels
+- docs(troubleshooting): add boot preference set but live rail OFF checks

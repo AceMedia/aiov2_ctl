@@ -3377,6 +3377,29 @@ def check_storage(root_options, dmesg_text):
     return out
 
 
+def check_mesh(known, active, rail, spi_node):
+    """
+    The LoRa radio needs two things: the LORA rail on and meshtasticd running.
+    known: meshtasticd has a unit file (None or False means it is not set up,
+    so say nothing). active: the service is running. rail: 'on', 'off' or None.
+    """
+    if not known or rail is None:
+        return []
+    if rail == "on" and active:
+        if not spi_node:
+            return [("warn", "Mesh: LORA rail is on and meshtasticd is running, but /dev/spidev1.0 "
+                             "is missing. Check 'dtoverlay=spi1-1cs' in /boot/firmware/config.txt.")]
+        return [("ok", "Mesh: LORA rail on and meshtasticd running.")]
+    if rail == "on":
+        return [("warn", "Mesh: LORA rail is on but meshtasticd is not running. "
+                         "Start it with: sudo systemctl start meshtasticd")]
+    if active:
+        return [("warn", "Mesh: meshtasticd is running but the LORA rail is off, so the radio has no power. "
+                         "Turn it on with: aiov2_ctl LORA on")]
+    return [("info", "Mesh: idle (LORA rail off, meshtasticd stopped). Turn the rail on, then "
+                     "start meshtasticd, to use it.")]
+
+
 def doctor_command():
     config = None
     try:
@@ -3414,6 +3437,16 @@ def doctor_command():
         user_cfg = None
     results += check_boot_rails(load_system_config(), user_cfg)
     results += check_storage(root_opts, dmesg)
+    units = _doctor_cmd(["systemctl", "list-unit-files", "meshtasticd.service"]) or ""
+    state = (_doctor_cmd(["systemctl", "is-active", "meshtasticd"]) or "").strip()
+    lora_pin = GPIO_MAP.get("LORA")
+    try:
+        lora_level = GpioController.get_gpio(lora_pin) if lora_pin is not None else None
+    except Exception:
+        lora_level = None
+    lora_rail = None if lora_level is None else ("on" if lora_level else "off")
+    results += check_mesh("meshtasticd.service" in units, state == "active", lora_rail,
+                          os.path.exists("/dev/spidev1.0"))
 
     print("aiov2_ctl doctor (read only)")
     print("----------------------------")
