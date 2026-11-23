@@ -136,6 +136,39 @@ class OtherChecks(unittest.TestCase):
         self.assertIn("warn", levels(a.check_storage("rw", bad)))
 
 
+class BootRailTests(unittest.TestCase):
+    SYSTEM_OFF = {"rails_on_boot": {"GPS": False, "LORA": False, "SDR": False, "USB": False}}
+
+    def test_no_user_entry_is_fine(self):
+        for user in (None, {}, {"mesh_on_boot": False}):
+            self.assertEqual(levels(a.check_boot_rails(self.SYSTEM_OFF, user)), ["ok"])
+
+    def test_agreeing_files_are_fine(self):
+        r = a.check_boot_rails(self.SYSTEM_OFF, self.SYSTEM_OFF)
+        self.assertEqual(levels(r), ["ok"])
+        self.assertIn("agree", text(r))
+
+    def test_stale_user_entry_is_reported_but_not_alarming(self):
+        # What was found on the uConsole: user file says LORA and SDR on, system file all off.
+        user = {"rails_on_boot": {"GPS": False, "LORA": True, "SDR": True, "USB": False}}
+        r = a.check_boot_rails(self.SYSTEM_OFF, user)
+        self.assertEqual(levels(r), ["info"])
+        self.assertIn("LORA on", text(r))
+        self.assertIn("SDR on", text(r))
+        self.assertIn("system config", text(r))
+        self.assertNotIn("GPS", text(r).split("says")[1].split("but")[0])
+
+    def test_missing_system_config_counts_as_all_off(self):
+        user = {"rails_on_boot": {"USB": True}}
+        self.assertEqual(levels(a.check_boot_rails(None, user)), ["info"])
+
+    def test_it_never_writes_either_file(self):
+        import inspect
+        src = inspect.getsource(a.check_boot_rails)
+        for word in ("open(", "write", "remove", "save_config"):
+            self.assertNotIn(word, src)
+
+
 class CommandTests(unittest.TestCase):
     def test_runs_end_to_end_and_never_writes(self):
         out = io.StringIO()

@@ -3202,6 +3202,26 @@ def check_battery(summary, throttled):
     return out
 
 
+def check_boot_rails(system_cfg, user_cfg):
+    """
+    The boot service only reads the system config. A rails_on_boot entry in the
+    user config (left by a --boot-rail run without sudo) is ignored at boot, so
+    say when the two disagree. Reports only, never edits either file.
+    """
+    if not isinstance(user_cfg, dict) or "rails_on_boot" not in user_cfg:
+        return [("ok", "Boot rails: no stray boot settings in your user config.")]
+    system = _rails_on_boot_from_config(system_cfg or {})
+    user = _rails_on_boot_from_config(user_cfg)
+    differ = [f for f in GPIO_MAP if system.get(f) != user.get(f)]
+    if not differ:
+        return [("ok", "Boot rails: user and system boot settings agree.")]
+    wants = ", ".join(f"{f} {'on' if user[f] else 'off'}" for f in differ)
+    has = ", ".join(f"{f} {'on' if system[f] else 'off'}" for f in differ)
+    return [("info", f"Boot rails: your user config ({USER_CONFIG_PATH}) says {wants}, but the system config "
+                     f"({CONFIG_PATH}) says {has}. The boot service only reads the system config, so the user "
+                     "entry is ignored. Boot states are set with: sudo aiov2_ctl --boot-rail <RAIL> on|off")]
+
+
 def check_storage(root_options, dmesg_text):
     out = []
     if root_options and "ro" in root_options.split(","):
@@ -3246,6 +3266,12 @@ def doctor_command():
     results += check_config(config)
     results += check_alsa(alsa)
     results += check_battery(Telemetry.power_summary(), throttled)
+    try:
+        with open(USER_CONFIG_PATH) as f:
+            user_cfg = json.load(f)
+    except (OSError, ValueError):
+        user_cfg = None
+    results += check_boot_rails(load_system_config(), user_cfg)
     results += check_storage(root_opts, dmesg)
 
     print("aiov2_ctl doctor (read only)")
