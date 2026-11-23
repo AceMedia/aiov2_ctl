@@ -2245,6 +2245,8 @@ def show_companions(as_json=False):
         print(f"  Serial : {d['serial'] or 'n/a'}")
         tty = d["tty"]
         print(f"  Port   : {tty or 'no serial port found'}")
+        if d["kind"] == "flipper":
+            print("  Next   : aiov2_ctl --flipper status   (battery, SD card, apps, Wi-Fi board, tips)")
         if tty and not os.access(tty, os.R_OK | os.W_OK):
             print("  Access : no permission. Run 'sudo aiov2_ctl --install' to add the udev rule, "
                   "then replug the device.")
@@ -2699,9 +2701,138 @@ def flipper_transfer(cli, sub, rest, force):
             print(f"Saved {len(data)} bytes to {local}")
 
 
+# ---- Status, module detection and suggestions -------------------------------
+# Read only. The Flipper cannot say what is on its GPIO header, so the Wi-Fi
+# dev board is only confirmed when the USB-UART Bridge app is running and the
+# board answers Marauder's "info". Otherwise it is reported as unchecked.
+FLIPPER_KNOWN_MODULES = ("wifi-devboard", "nrf24", "gps", "cc1101", "other")
+FLIPPER_APP_HINTS = (
+    ("marauder", "ESP32 Marauder"),
+    ("uart_terminal", "UART Terminal"),
+    ("nrf24", "NRF24 tools"),
+    ("gps", "GPS"),
+)
+
+
+def flipper_declared_modules(config=None):
+    """Modules the user says are fitted ('flipper_modules' in the config)."""
+    config = load_config() if config is None else config
+    raw = config.get("flipper_modules", [])
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, str) and m in FLIPPER_KNOWN_MODULES]
+
+
+def gather_flipper_status(cli, declared=()):
+    """Facts from a Flipper whose CLI is open. Each part fails on its own."""
+    status = {"mode": "cli", "device": {}, "battery": {}, "sd_card": "unknown",
+              "apps": [], "declared_modules": list(declared)}
+    try:
+        status["device"] = parse_flipper_kv(cli.run("device_info"))
+    except FlipperError:
+        pass
+    try:
+        pwr = parse_flipper_kv(cli.run("info power"))
+        if not any(k.startswith(("charge", "battery")) for k in pwr):
+            pwr = parse_flipper_kv(cli.run("power info"))
+        status["battery"] = {k: v for k, v in pwr.items()
+                             if k.startswith(("charge", "battery", "gauge", "capacity"))}
+    except FlipperError:
+        pass
+    try:
+        parse_flipper_storage_list(cli.run("storage list /ext"))
+        status["sd_card"] = "present"
+    except FlipperError:
+        status["sd_card"] = "missing"
+    if status["sd_card"] == "present":
+        try:
+            cats = [n for k, n, _ in parse_flipper_storage_list(cli.run("storage list /ext/apps"))
+                    if k == "dir"]
+            for cat in cats[:20]:
+                for kind, name, _ in parse_flipper_storage_list(
+                        cli.run(f"storage list /ext/apps/{flipper_safe_arg(cat)}")):
+                    if kind == "file" and name.lower().endswith(".fap"):
+                        status["apps"].append(name[:-4])
+        except FlipperError:
+            pass
+    return status
+
+
+def probe_wifi_board(path):
+    """'present' or 'not-detected' for a Marauder board behind the bridge app."""
+    try:
+        with MarauderSerial(path) as ser:
+            lines = ser.collect("info", idle=1.0, limit=4.0)
+    except MarauderError:
+        return "not-detected"
+    blob = " ".join(lines).lower()
+    return "present" if ("marauder" in blob or "esp32" in blob) else "not-detected"
+
+
+def flipper_suggestions(status):
+    """Plain sentences with the exact command to run. Pure, so it is easy to test."""
+    tips = []
+    mode = status.get("mode")
+    if mode == "bridge":
+        tips.append("The Flipper looks to be in USB-UART Bridge mode. Press Back on it to get the "
+                    "CLI back for 'aiov2_ctl --flipper info' and file transfers.")
+        if status.get("wifi_board") == "present":
+            tips.append("The Wi-Fi dev board answers. Try: aiov2_ctl --marauder scan")
+        return tips
+    if status.get("sd_card") == "missing":
+        tips.append("No SD card was found. Apps and captures need one.")
+    apps = " ".join(a.lower() for a in status.get("apps", []))
+    if status.get("sd_card") == "present":
+        if "marauder" not in apps and "wifi-devboard" in status.get("declared_modules", []):
+            tips.append("You say a Wi-Fi dev board is fitted but no Marauder app is on the SD card. "
+                        "Install it from the Flipper's own app catalogue, then flash the board.")
+        tips.append("Copy a file over with: aiov2_ctl --flipper put LOCAL /ext/NAME")
+    if status.get("wifi_board") in (None, "unchecked"):
+        tips.append("Wi-Fi dev board: not checked. Open GPIO > USB-UART Bridge on the Flipper, "
+                    "then run: aiov2_ctl --flipper status")
+    return tips
+
+
+def flipper_status(port=None, as_json=False):
+    declared = flipper_declared_modules()
+    path = _flipper_port(port)
+    try:
+        with FlipperCli(path) as cli:
+            status = gather_flipper_status(cli, declared)
+        status["wifi_board"] = "unchecked"
+    except FlipperError as exc:
+        if "No CLI prompt" not in str(exc):
+            raise
+        status = {"mode": "bridge", "device": {}, "battery": {}, "sd_card": "unknown",
+                  "apps": [], "declared_modules": list(declared),
+                  "wifi_board": probe_wifi_board(path)}
+    status["port"] = path
+    status["suggestions"] = flipper_suggestions(status)
+    if as_json:
+        print(json.dumps(status, indent=2))
+        return status
+    print("Flipper status")
+    print("--------------")
+    dev = status["device"]
+    if dev:
+        print(f"Firmware : {dev.get('firmware_version', 'n/a')} ({dev.get('firmware_origin_fork', 'n/a')})")
+    print(f"Mode     : {'USB-UART Bridge' if status['mode'] == 'bridge' else 'CLI'}")
+    if status["battery"].get("charge.level"):
+        print(f"Battery  : {status['battery']['charge.level']}% ({status['battery'].get('charge.state', 'n/a')})")
+    print(f"SD card  : {status['sd_card']}")
+    print(f"Apps     : {', '.join(status['apps']) if status['apps'] else 'none seen'}")
+    print(f"Wi-Fi board: {status['wifi_board']}")
+    if status["declared_modules"]:
+        print(f"Declared modules: {', '.join(status['declared_modules'])}")
+    for tip in status["suggestions"]:
+        print(f"Tip: {tip}")
+    return status
+
+
 def flipper_command(args):
     usage = (
         "Usage: aiov2_ctl --flipper <command> [--port /dev/ttyACMx]\n"
+        "  status [--json]       mode, battery, SD card, apps, Wi-Fi board and next steps\n"
         "  info                  name, firmware and battery\n"
         "  ls [PATH]             list files (default /ext, the SD card)\n"
         "  apps                  list apps the Flipper can launch\n"
@@ -2725,7 +2856,10 @@ def flipper_command(args):
     if force:
         args.remove("--force")
 
-    arity = {"info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
+    as_json = "--json" in args
+    if as_json:
+        args.remove("--json")
+    arity = {"status": (0, 0), "info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
              "put": (2, 2), "get": (1, 2), "mkdir": (1, 1)}
     if not args or args[0] not in arity:
         print(usage)
@@ -2736,6 +2870,13 @@ def flipper_command(args):
         print(usage)
         return 1
 
+    if sub == "status":
+        try:
+            flipper_status(port, as_json)
+        except FlipperError as exc:
+            print(f"Error: {exc}")
+            return 1
+        return 0
     try:
         with FlipperCli(_flipper_port(port)) as cli:
             if sub in ("put", "get", "mkdir"):
