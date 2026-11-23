@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 import sys
 import os
 import subprocess
@@ -6,6 +6,7 @@ import time
 import json
 import shutil
 import re
+import threading
 from statistics import mean
 
 INSTALL_META_PATH = "/usr/local/share/aiov2_ctl/install.json"
@@ -101,6 +102,13 @@ def save_config(config):
     except PermissionError:
         pass
 
+    print(
+        f"Warning: could not write {CONFIG_PATH} (permission denied).\n"
+        f"Saved to {USER_CONFIG_PATH} instead. The boot service only reads the "
+        "system config, so boot settings saved this way will NOT apply at boot. "
+        "Re-run with sudo to fix.",
+        file=sys.stderr,
+    )
     os.makedirs(os.path.dirname(USER_CONFIG_PATH), exist_ok=True)
     with open(USER_CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=2)
@@ -380,7 +388,7 @@ SDR++ (Brown)
 A lightweight, open-source SDR application.
 
  • Launch: sdrpp
- • Select reminding RTL-SDR from Sources (top-left)
+ • Select the RTL-SDR from Sources (top-left)
  • Click ▶ Play to start receiving
 
 Audio on Debian Trixie (PipeWire):
@@ -419,7 +427,7 @@ General
 # ==============================
 HELP_TEXT = (
     APP_HEADER
-    + """
+    + f"""
 USAGE:
   aiov2_ctl
   aiov2_ctl --status
@@ -486,7 +494,7 @@ Comment=GPIO tray controller
 Exec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --gui
 Terminal=false
 X-GNOME-Autostart-enabled=true
-XDG_AUTOSTART_DELAY=5
+X-GNOME-Autostart-Delay=5
 """
 
 SYSTEM_DESKTOP_ENTRY = """[Desktop Entry]
@@ -625,7 +633,10 @@ def sync_rtc():
         return 1
 
     print("Syncing system time to RTC…")
-    subprocess.call(["hwclock", "-w"])
+    rc = subprocess.call(["hwclock", "-w"])
+    if rc != 0:
+        print(f"hwclock failed (exit code {rc}). RTC was not updated.")
+        return 1
     print("RTC updated and synced.")
     return 0
 
@@ -916,18 +927,23 @@ def measure_feature(feature, seconds=3.0, settle=1.0, interval=0.2):
     print(f"Power source: {'AC online' if Telemetry.ac_online() else 'Battery'}")
     print(f"Current state: {'ON' if orig else 'OFF'}")
 
-    if orig:
-        on = sample_battery_power(seconds, interval)
-        GpioController.set_feature(feature, False)
-        time.sleep(settle)
-        off = sample_battery_power(seconds, interval)
-        GpioController.set_feature(feature, True)
-    else:
-        off = sample_battery_power(seconds, interval)
-        GpioController.set_feature(feature, True)
-        time.sleep(settle)
-        on = sample_battery_power(seconds, interval)
-        GpioController.set_feature(feature, False)
+    try:
+        if orig:
+            on = sample_battery_power(seconds, interval)
+            GpioController.set_feature(feature, False)
+            time.sleep(settle)
+            off = sample_battery_power(seconds, interval)
+        else:
+            off = sample_battery_power(seconds, interval)
+            GpioController.set_feature(feature, True)
+            time.sleep(settle)
+            on = sample_battery_power(seconds, interval)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        return 130
+    finally:
+        # Always put the rail back how we found it.
+        GpioController.set_feature(feature, orig)
 
     if not on or not off:
         print("Sampling failed.")
@@ -1019,21 +1035,47 @@ def run_gui():
             QWidget, QVBoxLayout, QLabel, QCheckBox
         )
         from PyQt6.QtGui import QAction, QIcon, QCursor
-        from PyQt6.QtCore import Qt, QTimer, QSharedMemory
+        from PyQt6.QtCore import Qt, QTimer, QLockFile, QObject, pyqtSignal
     except ImportError:
-        print("PyQt6 is not installed.")
+        # PyQt6 from apt lives in the system Python's dist-packages. If a venv
+        # python (e.g. ~/.pygpsclient/bin) is first on PATH it can't see it,
+        # so retry once with the system interpreter before giving up.
+        system_python = "/usr/bin/python3"
+        if (
+            os.path.exists(system_python)
+            and os.path.realpath(sys.executable) != os.path.realpath(system_python)
+            and not os.environ.get("AIOV2_CTL_REEXEC")
+        ):
+            os.environ["AIOV2_CTL_REEXEC"] = "1"
+            os.execv(system_python, [system_python, os.path.realpath(__file__), *sys.argv[1:]])
+
+        print("PyQt6 could not be imported.")
+        print(f"Python in use: {sys.executable}")
         print("Install it with:")
         print("  sudo apt install python3-pyqt6")
+        print("If it is already installed, a virtualenv python may be first on your PATH.")
+        print("Check with: which python3  (expected: /usr/bin/python3)")
         sys.exit(1)
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setDesktopFileName("aiov2_ctl")
 
-    shared = QSharedMemory("aiov2_ctl_gui")
-    if not shared.create(1):
+    # QLockFile detects stale locks left by a crashed process, unlike
+    # QSharedMemory which can stay claimed on Linux after a crash.
+    lock_dir = os.path.expanduser("~/.cache/aiov2_ctl")
+    os.makedirs(lock_dir, exist_ok=True)
+    instance_lock = QLockFile(os.path.join(lock_dir, "gui.lock"))
+    instance_lock.setStaleLockTime(0)
+    if not instance_lock.tryLock(100):
         print("AIOv2 GUI already running.")
         return
+
+    if not QSystemTrayIcon.isSystemTrayAvailable():
+        print("No system tray available in this session.")
+        print("On GNOME (e.g. Ubuntu) install the AppIndicator extension:")
+        print("  sudo apt install gnome-shell-extension-appindicator")
+        sys.exit(1)
 
     tray = QSystemTrayIcon()
 
@@ -1180,38 +1222,51 @@ def run_gui():
     timer.start(1000)
 
 
-    def update_check():
-        if not repo:
-            update_action.setText("Not installed from git")
-            return
+    class UpdateSignal(QObject):
+        result = pyqtSignal(bool)
 
-        if check_update_available(repo):
+    update_signal = UpdateSignal()
+
+    def run_update():
+        subprocess.Popen([
+            "x-terminal-emulator",
+            "-e",
+            "aiov2_ctl --update"
+        ])
+        update_action.setText("Updating...")
+        update_action.setEnabled(False)
+        # Recheck after 30 seconds (time for update to complete)
+        QTimer.singleShot(30000, update_check)
+
+    # Connected once. Connecting inside update_check stacked handlers.
+    update_action.triggered.connect(run_update)
+
+    def on_update_result(available):
+        if available:
             update_action.setText("Update available → Install")
             update_action.setEnabled(True)
-            
-            # Show notification
             tray.showMessage(
                 "AIOv2 Update",
                 "A new version is available. Right-click to install.",
                 QSystemTrayIcon.MessageIcon.Information,
                 30000  # Show for 30 seconds
             )
-
-            def run_update():
-                subprocess.Popen([
-                    "x-terminal-emulator",
-                    "-e",
-                    "aiov2_ctl --update"
-                ])
-                update_action.setText("Updating...")
-                update_action.setEnabled(False)
-                # Recheck after 30 seconds (time for update to complete)
-                QTimer.singleShot(30000, update_check)
-
-            update_action.triggered.connect(run_update)
         else:
             update_action.setText("Up to date")
             update_action.setEnabled(False)
+
+    update_signal.result.connect(on_update_result)
+
+    def update_check():
+        if not repo:
+            update_action.setText("Not installed from git")
+            return
+
+        # git fetch can take seconds, so keep it off the Qt main thread.
+        threading.Thread(
+            target=lambda: update_signal.result.emit(check_update_available(repo)),
+            daemon=True,
+        ).start()
 
     # Initial check after 10 seconds
     QTimer.singleShot(10000, update_check)
@@ -1508,8 +1563,11 @@ def main():
 
     elif arg == "--mesh-on-boot":
         state = None
-        if len(sys.argv) > 2 and sys.argv[2].lower() in ("on", "off", "status"):
+        if len(sys.argv) > 2:
             state = sys.argv[2].lower()
+            if state not in ("on", "off", "status"):
+                print("Usage: aiov2_ctl --mesh-on-boot [on|off|status]")
+                sys.exit(1)
         if state == "status":
             print_mesh_on_boot_status()
             return
@@ -1607,6 +1665,7 @@ def main():
 
     else:
         print("Use --help")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

@@ -280,4 +280,14 @@ State source visibility:
   - `(boot_default)` for `--` fallback
   - `(unknown)` for unparseable/failed reads
 
+Fresh install defaults:
+
+- The boot service sets every rail to **off** until you choose otherwise with `--boot-rail <FEATURE> on`. This includes SDR, even though the SDR rail is on by default in hardware before Linux boots.
+- Boot settings are read from the system config (`/usr/local/share/aiov2_ctl/config.json`), so set them with sudo. If the tool has to fall back to your user config it will warn you, because the boot service will not see it.
+
+Troubleshooting the GUI:
+
+- `PyQt6 could not be imported` even though `python3-pyqt6` is installed usually means a virtualenv Python is first on your `PATH` (the PyGPSClient installer can do this). Check `which python3`. The tool now retries with `/usr/bin/python3` automatically.
+- On GNOME (Ubuntu) the tray needs the AppIndicator extension: `sudo apt install gnome-shell-extension-appindicator`.
+
 Maintained for **HackerGadgets uConsole AIO v2** users.
