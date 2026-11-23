@@ -2100,10 +2100,31 @@ COMPANION_UDEV_PATH = "/etc/udev/rules.d/99-aiov2-companions.rules"
 # nodes), and ID_MM_DEVICE_IGNORE stops ModemManager grabbing it.
 COMPANION_UDEV_RULES = """# Managed by aiov2_ctl --install
 # Flipper Zero
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", SYMLINK+="aiov2-flipper"
 # Espressif native USB (ESP32-S2 and friends)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1", SYMLINK+="aiov2-esp32"
 """
+
+
+def usb_rail_state():
+    """'on', 'off' or None when it cannot be read (not a uConsole, no pinctrl)."""
+    pin = GPIO_MAP.get("USB")
+    if pin is None:
+        return None
+    try:
+        level = GpioController.get_gpio(pin)
+    except Exception:
+        return None
+    if level is None:
+        return None
+    return "on" if level else "off"
+
+
+def usb_rail_hint():
+    """A sentence to add to 'not found' errors, or '' if the rail looks fine."""
+    if usb_rail_state() == "off":
+        return " The USB rail is OFF, so turn it on with: aiov2_ctl USB on."
+    return ""
 
 
 def _tty_nodes(dev_path):
@@ -2173,15 +2194,19 @@ def companions_summary_line(devices):
     return "Companions: " + ", ".join(parts)
 
 
-def show_companions():
+def show_companions(as_json=False):
     devices = detect_companions()
+    if as_json:
+        import json
+        print(json.dumps({"usb_rail": usb_rail_state(), "devices": devices}, indent=2))
+        return 0
     print("Companion devices")
     print("-----------------")
     if not devices:
         print("None found.")
-        usb_pin = GPIO_MAP.get("USB")
-        if usb_pin is not None and not GpioController.get_gpio(usb_pin):
-            print("The USB rail is OFF. Turn it on with: aiov2_ctl USB on")
+        hint = usb_rail_hint()
+        if hint:
+            print(hint.strip())
         print("Plug the device in and check the cable carries data, not just power.")
         return 0
 
@@ -2366,8 +2391,8 @@ def _flipper_port(explicit=None):
         if dev["kind"] == "flipper" and dev["tty"]:
             return dev["tty"]
     raise FlipperError(
-        "No Flipper found. Plug it in (and turn the USB rail on), "
-        "or pass --port /dev/ttyACMx. 'aiov2_ctl --companions' shows what is detected."
+        "No Flipper found. Plug it in, or pass --port /dev/ttyACMx. "
+        "'aiov2_ctl --companions' shows what is detected." + usb_rail_hint()
     )
 
 
@@ -2629,7 +2654,14 @@ def flipper_transfer(cli, sub, rest, force):
                 raise FlipperError("Checksum mismatch after sending. The copy on the Flipper is not trusted.")
             print("Done. Checksum verified.")
         elif sub == "get":
-            remote, local = flipper_sd_path(rest[0]), rest[1]
+            remote = flipper_sd_path(rest[0])
+            if len(rest) > 1:
+                local = rest[1]
+            else:
+                # No destination given: keep it in the private captures folder.
+                folder = os.path.join(CAPTURES_DIR, "flipper")
+                os.makedirs(folder, mode=0o700, exist_ok=True)
+                local = os.path.join(folder, os.path.basename(remote))
             if os.path.exists(local):
                 raise FlipperError(f"{local} already exists. Choose a new name.")
             data = rpc.read(remote, _progress_printer("received"))
@@ -2647,7 +2679,7 @@ def flipper_command(args):
         "  apps                  list apps the Flipper can launch\n"
         "  open APP              launch an app on the Flipper\n"
         "  put LOCAL REMOTE [--force]   send a file to the SD card (checksum verified)\n"
-        "  get REMOTE LOCAL      copy a file from the SD card\n"
+        "  get REMOTE [LOCAL]    copy a file from the SD card (default: ~/aiov2-captures/flipper/)\n"
         "  mkdir REMOTE          make a folder on the SD card\n"
         "Transfers only touch /ext (the SD card), never overwrite without --force "
         "and never overwrite local files."
@@ -2666,7 +2698,7 @@ def flipper_command(args):
         args.remove("--force")
 
     arity = {"info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
-             "put": (2, 2), "get": (2, 2), "mkdir": (1, 1)}
+             "put": (2, 2), "get": (1, 2), "mkdir": (1, 1)}
     if not args or args[0] not in arity:
         print(usage)
         return 1
@@ -2727,7 +2759,8 @@ def flipper_command(args):
 # so those parts are unverified on real hardware.
 MARAUDER_BAUD = termios.B115200
 MARAUDER_EOL = b"\n"
-MARAUDER_LOG_DIR = os.path.expanduser("~/aiov2-captures")
+CAPTURES_DIR = os.path.expanduser("~/aiov2-captures")
+MARAUDER_LOG_DIR = CAPTURES_DIR
 MARAUDER_SCAN_MODES = {"all": "scanall", "beacon": "sniffbeacon"}
 MARAUDER_LISTS = {"aps": "list -a", "stations": "list -c"}
 
@@ -2854,8 +2887,8 @@ def _marauder_port(explicit=None):
                 "USB-UART Bridge app running (channel 0, 115200 baud)."
             )
     raise MarauderError(
-        "No Marauder board found. Plug it in (and turn the USB rail on), "
-        "or pass --port /dev/ttyXXX. 'aiov2_ctl --companions' shows what is detected."
+        "No Marauder board found. Plug it in, or pass --port /dev/ttyXXX. "
+        "'aiov2_ctl --companions' shows what is detected." + usb_rail_hint()
     )
 
 
@@ -4090,7 +4123,7 @@ def main():
         sys.exit(flipper_command(sys.argv[2:]))
 
     elif arg == "--companions":
-        sys.exit(show_companions())
+        sys.exit(show_companions(as_json="--json" in sys.argv[2:]))
 
     elif arg == "--setup-sudoers":
         sys.exit(setup_sudoers(remove="--remove" in sys.argv[2:]))

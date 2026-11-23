@@ -349,10 +349,16 @@ Detection only for now. Nothing is opened, written to or reset.
 
 ```bash
 aiov2_ctl --companions
-```n
+```
 Looks on the USB bus for a Flipper Zero (`0483:5740`) and ESP32 style boards (Espressif native USB, plus a hint for generic CP210x/CH340 chips, which are reported as "possible"). It shows the serial port and warns if the USB rail is off or if your user cannot open the port. The same line appears in `--status` and in the tray menu.
 
-`--install` adds `/etc/udev/rules.d/99-aiov2-companions.rules`, which gives the logged in user access to the port with `uaccess` (no world writable devices) and tells ModemManager to leave it alone. Replug the device afterwards.
+`--install` adds `/etc/udev/rules.d/99-aiov2-companions.rules`, which gives the logged in user access to the port with `uaccess` (no world writable devices) and tells ModemManager to leave it alone. Replug the device afterwards. The rule also adds stable names, `/dev/aiov2-flipper` and `/dev/aiov2-esp32`, so scripts do not have to guess between `ttyACM0` and `ttyACM1`.
+
+`aiov2_ctl --companions --json` prints the same information for other tools to read, including the USB rail state (`on`, `off`, or `null` if it cannot be read). If a Flipper or Marauder command cannot find a device and the rail is off, the error says so.
+
+Captures from the Flipper (`get REMOTE` with no destination) and Marauder scans both go to `~/aiov2-captures` (folder 700, files 600).
+
+One thing to watch: the ops console looks for a LoRa radio on `ttyACM0`, `ttyUSB0` and `ttyACM1`. A Flipper plugged in first can take `ttyACM0`, so use the `/dev/aiov2-*` names for the companions and check `--companions` if LoRa will not connect.
 
 ### Flipper basics (read mostly)
 
@@ -361,7 +367,7 @@ aiov2_ctl --flipper info
 aiov2_ctl --flipper ls [/ext]
 aiov2_ctl --flipper apps
 aiov2_ctl --flipper open <APP>
-```n
+```
 Talks to the Flipper's own serial CLI using only the standard library, so nothing extra to install. `info` shows hardware, firmware and battery, `ls` lists files (default is the SD card), `apps` lists what it can launch and `open` starts one. Add `--port /dev/ttyACMx` to pick a port. Paths and app names are checked before they reach the Flipper, so they cannot carry a second command. Close qFlipper first: the port is opened exclusively.
 
 File transfer uses the Flipper's RPC protocol with a small built-in client (no protobuf package needed):
@@ -369,7 +375,10 @@ File transfer uses the Flipper's RPC protocol with a small built-in client (no p
 ```bash
 aiov2_ctl --flipper put ./payload.sub /ext/subghz/payload.sub [--force]
 aiov2_ctl --flipper get /ext/subghz/payload.sub ./copy.sub
-aiov2_ctl --flipper mkdir /ext/mine```n
+aiov2_ctl --flipper get /ext/subghz/payload.sub    # saves under ~/aiov2-captures/flipper/
+aiov2_ctl --flipper mkdir /ext/mine
+```
+
 Transfers only touch the SD card (`/ext`), never the Flipper's internal storage. `put` refuses to overwrite without `--force`, checks the MD5 afterwards and reports a mismatch, `get` never overwrites a local file and saves with mode 600. Files are limited to 64 MiB. The RPC session is always ended, even after an error.
 
 The protocol messages follow the official `flipperzero-protobuf` definitions and the tests use a simulated Flipper, so this is unverified on a real device.
@@ -384,7 +393,7 @@ aiov2_ctl --marauder scan [all|beacon] [--seconds N]
 aiov2_ctl --marauder list [aps|stations]
 aiov2_ctl --marauder channel [N]
 aiov2_ctl --marauder stop
-```n
+```
 Drives the Marauder firmware's serial command line (115200 baud) on an ESP32 board, either plugged in directly or through the Flipper's USB-UART Bridge app. `scan` streams what the board hears, saves it to `~/aiov2-captures` (folder 700, files 600) and always sends `stopscan` afterwards, even if you hit Ctrl+C.
 
 Only a short list of passive commands is built in. There is no way to send attack, spoofing or portal commands from here. The log can contain SSIDs and MAC addresses, so treat it as private. This is for looking at your own networks and equipment, and the law where you live applies.
