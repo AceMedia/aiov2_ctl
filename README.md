@@ -343,6 +343,24 @@ python3 -m unittest discover -s tests
 
 ---
 
+## Health check (uConsole)
+
+```bash
+aiov2_ctl --doctor
+```
+
+A read only check that changes nothing. It looks at:
+
+- **RTC**: `dtparam=rtc=off` is meant to be paired with the AIO board's `i2c-rtc,pcf85063a` overlay, because the CM5's own clock has no battery. It checks both are there and that the clock registered. A power on reset message at boot usually means the CR1220 is flat, loose or missing.
+- **Kernel**: that a `clockworkpi-kernel` or `akrex-kernel` package is installed, and (with a dry run of `apt-get -s full-upgrade`) that an upgrade would not remove a kernel or firmware package. Some upgrades have left uConsoles unbootable. Never run `rpi-update` on these.
+- **EEPROM**: the bootloader date. A CM5 Lite wants one newer than 2025-01-06. It reports only and never writes to the EEPROM.
+- **config.txt**: known bad settings, for example `dtparam=spi=on` disables the backlight on the CM5 (use `dtoverlay=spi1-1cs`).
+- **Battery and power**: whether the gauge percentage and the cell voltage agree, and any undervoltage since boot.
+- **Storage**: a read only root filesystem or filesystem and card errors in this boot's log.
+- **Audio**: a note about the harmless `alsa_restore_std` udev warning from alsa-utils 1.2.14-1 (Debian bug 1093057).
+
+Each line is `OK`, `INFO` or `WARN`. The checks come from ClockworkPi forum posts, the Raspberry Pi documentation and the Debian bug tracker, so treat them as advice, not gospel.
+
 ## Companion devices (Flipper Zero, ESP32 boards)
 
 Detection only for now. Nothing is opened, written to or reset.
