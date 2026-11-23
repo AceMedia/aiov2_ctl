@@ -2743,14 +2743,18 @@ def flipper_command(args):
                 return 0
             if sub == "info":
                 dev = parse_flipper_kv(cli.run("device_info"))
-                pwr = parse_flipper_kv(cli.run("power info"))
+                # Newer firmware (checked on Unleashed unlshd-095) uses "info power".
+                # Older firmware used "power info", which newer builds answer with a usage message.
+                pwr = parse_flipper_kv(cli.run("info power"))
+                if not any(k.startswith(("charge", "battery")) for k in pwr):
+                    pwr = parse_flipper_kv(cli.run("power info"))
                 print("Flipper Zero")
                 print("------------")
                 for key in ("hardware_name", "hardware_ver", "firmware_version",
                             "firmware_origin_fork", "firmware_commit"):
                     if key in dev:
                         print(f"{key:<22}: {dev[key]}")
-                shown = [k for k in pwr if k.startswith(("charge", "battery", "gauge"))]
+                shown = [k for k in pwr if k.startswith(("charge", "battery", "gauge", "capacity"))]
                 if shown:
                     print("Battery")
                     for key in shown:

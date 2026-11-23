@@ -20,7 +20,11 @@ import aiov2_ctl as a  # noqa: E402
 
 RESPONSES = {
     "device_info": "hardware_name : Aceflip\r\nhardware_ver : 12\r\nfirmware_version : 1.4.3\r\n",
-    "power info": "charge.level : 83\r\ncharge.state : discharging\r\nsomething.else : x\r\n",
+    # Captured from Unleashed unlshd-095: "info power" has the data, "power info" is only a usage message.
+    "info power": "charge.level                  : 83\r\ncharge.state                  : discharging\r\n"
+                  "battery.voltage               : 3575\r\ncapacity.remain               : 13\r\n"
+                  "something.else : x\r\n",
+    "power info": "Usage:\r\npower <cmd> <args>\r\nCmd list:\r\n\toff\t - shutdown power\r\n",
     "storage list /ext": "[D] apps\r\n[F] notes.txt 123b\r\n",
     "storage list /nope": "Storage error: invalid name\r\n",
     "loader list": "Applications:\r\n\tClock\r\n",
@@ -118,6 +122,17 @@ class FlipperCommandTests(unittest.TestCase):
         self.assertIn("1.4.3", out)
         self.assertIn("charge.level", out)
         self.assertNotIn("something.else", out)
+        self.assertIn("capacity.remain", out)
+        self.assertNotIn("Cmd list", out)
+
+    def test_info_falls_back_to_old_power_info_command(self):
+        old = dict(RESPONSES)
+        old["info power"] = "Usage:\r\ninfo <cmd> <args>\r\n"
+        old["power info"] = "charge.level : 55\r\ncharge.state : discharging\r\n"
+        with mock.patch.dict(RESPONSES, old, clear=True):
+            rc, out = self.run_cmd("info")
+        self.assertEqual(rc, 0)
+        self.assertIn("55", out)
 
     def test_ls_default_and_parsing(self):
         rc, out = self.run_cmd("ls")
