@@ -1,0 +1,98 @@
+AIOV2 GPIO STATE TEST TODO (uConsole)
+===================================
+
+Goal
+----
+Validate that aiov2_ctl GPIO state logic is:
+1) truth-first from pinctrl level (hi/lo),
+2) fallback to boot_default only when level is --,
+3) no global heuristic behavior.
+
+Prerequisites
+-------------
+- New aiov2_ctl.py already installed with:
+  sudo python3 aiov2_ctl.py --install
+- Test script exists and is executable:
+  chmod +x ./gpio_state_selftest.sh
+
+Quick install verification (run now)
+------------------------------------
+[ ] command -v aiov2_ctl
+    Expected: /usr/local/bin/aiov2_ctl
+
+[ ] AIOV2_CTL_DEBUG=1 aiov2_ctl --status
+    Expected: GPIO lines include source labels in parentheses:
+    (pinctrl), (boot_default), or (unknown)
+
+
+Phase 1: Runtime toggle validation (NO reboot yet)
+--------------------------------------------------
+[ ] ./gpio_state_selftest.sh runtime
+
+What to look for:
+- PASS lines for each feature ON and OFF transitions
+- ON check expects: level hi + source pinctrl
+- OFF check expects: level lo + source pinctrl
+- End summary should be FAIL: 0
+
+If failures occur:
+- Re-run with slightly longer settle time:
+  AIOV2_GPIO_SLEEP_ON=2.0 AIOV2_GPIO_SLEEP_OFF=2.0 ./gpio_state_selftest.sh runtime
+
+
+Phase 2: Boot-state validation (THIS is when to reboot)
+------------------------------------------------------
+[ ] Reboot now
+    sudo reboot
+
+After login, run this immediately (before manually toggling rails):
+[ ] ./gpio_state_selftest.sh boot
+
+What to look for:
+- Script prints Boot Snapshot rows for GPS/LORA/SDR/USB
+- If pinctrl level is hi/lo -> source should be pinctrl
+- If pinctrl level is -- -> source should be boot_default
+- End summary should be FAIL: 0
+
+Notes:
+- Do NOT manually set SDR on/off before this boot test.
+- Boot test is meant to observe natural startup behavior.
+
+
+Phase 3: Optional combined pass
+-------------------------------
+[ ] ./gpio_state_selftest.sh all
+
+What to look for:
+- Includes both Boot Snapshot and Runtime Toggle Test
+- End summary should be FAIL: 0
+
+
+Manual spot checks (optional)
+-----------------------------
+[ ] pinctrl get 7
+[ ] pinctrl get 16
+[ ] pinctrl get 23
+[ ] pinctrl get 27
+[ ] AIOV2_CTL_DEBUG=1 aiov2_ctl --status
+
+Compare raw pinctrl lines vs reported source:
+- hi/lo => pinctrl
+- -- => boot_default
+- unparsed/command issues => unknown
+
+
+Pass criteria
+-------------
+- Runtime phase: all feature toggles pass hi/lo checks (source pinctrl)
+- Boot phase: source attribution matches pinctrl output semantics
+- No unexplained unknown states
+
+
+If you need logs for review
+---------------------------
+Run and save output:
+  ./gpio_state_selftest.sh runtime | tee runtime_test.log
+  ./gpio_state_selftest.sh boot | tee boot_test.log
+
+Share those two log files for quick diagnosis.
