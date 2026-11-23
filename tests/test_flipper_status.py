@@ -108,5 +108,46 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("No Flipper found", out.getvalue())
 
 
+class ProbeRetryTests(unittest.TestCase):
+    def fake(self, outputs):
+        """MarauderSerial stand-in that answers each probe from the list in turn."""
+        replies = iter(outputs)
+
+        class Ser:
+            def __init__(self_, path):
+                pass
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *exc):
+                return False
+
+            def collect(self_, command, idle=1.0, limit=4.0):
+                reply = next(replies)
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+
+        return Ser
+
+    def run_probe(self, outputs, **kw):
+        with mock.patch.object(a, "MarauderSerial", self.fake(outputs)),                 mock.patch.object(a.time, "sleep", lambda s: None):
+            return a.probe_wifi_board("/dev/x", **kw)
+
+    def test_first_try_is_enough(self):
+        self.assertEqual(self.run_probe([["ESP32 Marauder v1.21"]]), "present")
+
+    def test_second_try_rescues_a_miss(self):
+        self.assertEqual(self.run_probe([[], ["ESP32 Marauder v1.21"]]), "present")
+        self.assertEqual(self.run_probe([a.MarauderError("busy"), ["marauder"]]), "present")
+
+    def test_gives_up_after_the_attempts(self):
+        self.assertEqual(self.run_probe([[], []]), "not-detected")
+        self.assertEqual(self.run_probe([a.MarauderError("x"), a.MarauderError("x")]), "not-detected")
+
+    def test_only_one_try_when_asked(self):
+        self.assertEqual(self.run_probe([[]], attempts=1), "not-detected")
+
 if __name__ == "__main__":
     unittest.main()

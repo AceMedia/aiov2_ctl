@@ -2918,15 +2918,23 @@ def gather_flipper_status(cli, declared=()):
     return status
 
 
-def probe_wifi_board(path):
-    """'present' or 'not-detected' for a Marauder board behind the bridge app."""
-    try:
-        with MarauderSerial(path) as ser:
-            lines = ser.collect("info", idle=1.0, limit=4.0)
-    except MarauderError:
-        return "not-detected"
-    blob = " ".join(lines).lower()
-    return "present" if ("marauder" in blob or "esp32" in blob) else "not-detected"
+def probe_wifi_board(path, attempts=2):
+    """'present' or 'not-detected' for a Marauder board behind the bridge app.
+
+    The board can miss one "info" if it is still busy from an earlier command, so
+    it gets one more try before it is reported as not detected."""
+    for attempt in range(attempts):
+        try:
+            with MarauderSerial(path) as ser:
+                lines = ser.collect("info", idle=1.0, limit=4.0)
+        except MarauderError:
+            lines = []
+        blob = " ".join(lines).lower()
+        if "marauder" in blob or "esp32" in blob:
+            return "present"
+        if attempt + 1 < attempts:
+            time.sleep(0.5)
+    return "not-detected"
 
 
 def flipper_suggestions(status):
