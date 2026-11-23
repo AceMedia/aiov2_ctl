@@ -354,6 +354,18 @@ Looks on the USB bus for a Flipper Zero (`0483:5740`) and ESP32 style boards (Es
 
 `--install` adds `/etc/udev/rules.d/99-aiov2-companions.rules`, which gives the logged in user access to the port with `uaccess` (no world writable devices) and tells ModemManager to leave it alone. Replug the device afterwards.
 
+### Flipper basics (read mostly)
+
+```bash
+aiov2_ctl --flipper info
+aiov2_ctl --flipper ls [/ext]
+aiov2_ctl --flipper apps
+aiov2_ctl --flipper open <APP>
+```n
+Talks to the Flipper's own serial CLI using only the standard library, so nothing extra to install. `info` shows hardware, firmware and battery, `ls` lists files (default is the SD card), `apps` lists what it can launch and `open` starts one. Add `--port /dev/ttyACMx` to pick a port. Paths and app names are checked before they reach the Flipper, so they cannot carry a second command. Sending files needs the RPC protocol and comes in a later phase. Close qFlipper first: the port is opened exclusively.
+
+These commands follow the published CLI but have not been checked on a real Flipper yet.
+
 A Flipper charging from a uConsole port draws from the battery, so keep an eye on that until the revised board is in. Future phases (RPC, Marauder) are planned in the issue tracker.
 
 ---

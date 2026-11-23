@@ -7,6 +7,10 @@ import json
 import shutil
 import re
 import stat
+import select
+import termios
+import fcntl
+import tty
 import pwd
 import tempfile
 import threading
@@ -323,6 +327,7 @@ _aiov2_ctl()
         --remove-apps
         --setup-sudoers
         --companions
+        --flipper
         --fix-sdr
         --sdr-biastee
         --wifi-monitor
@@ -536,6 +541,7 @@ COMMANDS:
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
   --companions    Detect a Flipper Zero or ESP32 board on USB (detection only)
+  --flipper       Flipper info, ls, apps, open (see: aiov2_ctl --flipper)
   --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
   --update --yes  Apply updates without the confirmation prompt
 
@@ -2209,6 +2215,216 @@ def ensure_companion_udev_rules():
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+# ==============================
+# Flipper Zero (phase 2: read only basics over the text CLI)
+# ==============================
+# Uses the Flipper's own serial CLI with the standard library only, so there
+# is nothing extra to install. File transfer needs the RPC protocol and is a
+# later phase. The CLI details below follow Flipper's published CLI docs but
+# have not been checked on real hardware yet.
+FLIPPER_PROMPT = ">: "
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# Anything that reaches the Flipper CLI goes through this, so a path or app
+# name can never smuggle in a second command.
+_FLIPPER_ARG_RE = re.compile(r"^[A-Za-z0-9_./ +()\-]{1,200}$")
+
+
+class FlipperError(Exception):
+    pass
+
+
+def flipper_safe_arg(value):
+    if not _FLIPPER_ARG_RE.match(value or "") or ".." in value.split("/"):
+        raise FlipperError(f"Refusing unusual argument: {value!r}")
+    return value
+
+
+class FlipperCli:
+    """Minimal client for the Flipper's serial CLI. One command at a time."""
+
+    def __init__(self, path, timeout=3.0):
+        self.path = path
+        self.timeout = timeout
+        self.fd = None
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def open(self):
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except PermissionError:
+            raise FlipperError(
+                f"No permission to open {self.path}. Run 'sudo aiov2_ctl --install' "
+                "to add the udev rule, then replug the Flipper."
+            )
+        except OSError as exc:
+            raise FlipperError(f"Could not open {self.path}: {exc}")
+
+        try:
+            tty.setraw(self.fd)
+            # Exclusive: refuse to share the port with qFlipper and friends.
+            fcntl.ioctl(self.fd, termios.TIOCEXCL)
+        except (OSError, termios.error) as exc:
+            self.close()
+            raise FlipperError(f"Could not set up {self.path}: {exc}")
+
+        # Wake the CLI and wait for its prompt.
+        os.write(self.fd, b"\r")
+        try:
+            self._read_until_prompt()
+        except FlipperError:
+            self.close()
+            raise FlipperError(
+                "No CLI prompt from the Flipper. Is another app using it "
+                "(qFlipper, the USB-UART Bridge app), or is it locked?"
+            )
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            finally:
+                self.fd = None
+
+    def _read_until_prompt(self):
+        buf = b""
+        deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FlipperError("Timed out waiting for the Flipper.")
+            ready, _, _ = select.select([self.fd], [], [], remaining)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.fd, 4096)
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                raise FlipperError(f"Lost the Flipper: {exc}")
+            if not chunk:
+                raise FlipperError("The Flipper closed the connection.")
+            buf += chunk
+            text = _ANSI_RE.sub("", buf.decode("utf-8", "replace"))
+            if text.rstrip(" ").endswith(FLIPPER_PROMPT.rstrip(" ")) or text.endswith(FLIPPER_PROMPT):
+                return text
+
+    def run(self, command):
+        if "\r" in command or "\n" in command:
+            raise FlipperError("Command may not contain line breaks.")
+        os.write(self.fd, command.encode() + b"\r")
+        text = self._read_until_prompt()
+        lines = text.replace("\r", "").split("\n")
+        # Drop the echo of what we typed and the trailing prompt.
+        while lines and (not lines[0].strip() or command in lines[0]):
+            lines.pop(0)
+        while lines and (not lines[-1].strip() or lines[-1].strip().startswith(">:")):
+            lines.pop()
+        return "\n".join(lines)
+
+
+def parse_flipper_kv(text):
+    """'key : value' lines to a dict."""
+    out = {}
+    for line in text.splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            if key.strip():
+                out[key.strip()] = value.strip()
+    return out
+
+
+def parse_flipper_storage_list(text):
+    """Lines like '[D] apps' and '[F] notes.txt 123b' to (kind, name, size)."""
+    if "storage error" in text.lower():
+        raise FlipperError(text.strip().splitlines()[0])
+    entries = []
+    for line in text.splitlines():
+        m = re.match(r"^\s*\[([DF])\]\s+(.*?)(?:\s+(\d+\s*\w*))?$", line)
+        if m:
+            kind = "dir" if m.group(1) == "D" else "file"
+            entries.append((kind, m.group(2), (m.group(3) or "").strip()))
+    return entries
+
+
+def _flipper_port(explicit=None):
+    if explicit:
+        return explicit
+    for dev in detect_companions():
+        if dev["kind"] == "flipper" and dev["tty"]:
+            return dev["tty"]
+    raise FlipperError(
+        "No Flipper found. Plug it in (and turn the USB rail on), "
+        "or pass --port /dev/ttyACMx. 'aiov2_ctl --companions' shows what is detected."
+    )
+
+
+def flipper_command(args):
+    usage = (
+        "Usage: aiov2_ctl --flipper info|ls [PATH]|apps|open APP  [--port /dev/ttyACMx]\n"
+        "  info        name, firmware and battery\n"
+        "  ls [PATH]   list files (default /ext, the SD card)\n"
+        "  apps        list apps the Flipper can launch\n"
+        "  open APP    launch an app on the Flipper"
+    )
+    args = list(args)
+    port = None
+    if "--port" in args:
+        i = args.index("--port")
+        if i + 1 >= len(args):
+            print(usage)
+            return 1
+        port = args[i + 1]
+        del args[i:i + 2]
+
+    if not args or args[0] not in ("info", "ls", "apps", "open"):
+        print(usage)
+        return 1
+    sub, rest = args[0], args[1:]
+
+    try:
+        if sub == "open" and len(rest) != 1:
+            print(usage)
+            return 1
+        with FlipperCli(_flipper_port(port)) as cli:
+            if sub == "info":
+                dev = parse_flipper_kv(cli.run("device_info"))
+                pwr = parse_flipper_kv(cli.run("power info"))
+                print("Flipper Zero")
+                print("------------")
+                for key in ("hardware_name", "hardware_ver", "firmware_version",
+                            "firmware_origin_fork", "firmware_commit"):
+                    if key in dev:
+                        print(f"{key:<22}: {dev[key]}")
+                shown = [k for k in pwr if k.startswith(("charge", "battery", "gauge"))]
+                if shown:
+                    print("Battery")
+                    for key in shown:
+                        print(f"  {key:<20}: {pwr[key]}")
+            elif sub == "ls":
+                path = flipper_safe_arg(rest[0] if rest else "/ext")
+                entries = parse_flipper_storage_list(cli.run(f"storage list {path}"))
+                if not entries:
+                    print("(empty)")
+                for kind, name, size in entries:
+                    print(f"{'d' if kind == 'dir' else '-'}  {name}" + (f"  {size}" if size else ""))
+            elif sub == "apps":
+                print(cli.run("loader list") or "(none)")
+            elif sub == "open":
+                app = flipper_safe_arg(rest[0])
+                out = cli.run(f"loader open {app}")
+                print(out or f"Asked the Flipper to open {app}.")
+    except FlipperError as exc:
+        print(f"Error: {exc}")
+        return 1
+    return 0
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -3321,6 +3537,9 @@ def main():
 
     elif arg == "--add-apps":
         sys.exit(add_apps())
+
+    elif arg == "--flipper":
+        sys.exit(flipper_command(sys.argv[2:]))
 
     elif arg == "--companions":
         sys.exit(show_companions())
