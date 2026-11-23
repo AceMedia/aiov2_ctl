@@ -343,6 +343,21 @@ python3 -m unittest discover -s tests
 
 ---
 
+## Companion devices (Flipper Zero, ESP32 boards)
+
+Detection only for now. Nothing is opened, written to or reset.
+
+```bash
+aiov2_ctl --companions
+```n
+Looks on the USB bus for a Flipper Zero (`0483:5740`) and ESP32 style boards (Espressif native USB, plus a hint for generic CP210x/CH340 chips, which are reported as "possible"). It shows the serial port and warns if the USB rail is off or if your user cannot open the port. The same line appears in `--status` and in the tray menu.
+
+`--install` adds `/etc/udev/rules.d/99-aiov2-companions.rules`, which gives the logged in user access to the port with `uaccess` (no world writable devices) and tells ModemManager to leave it alone. Replug the device afterwards.
+
+A Flipper charging from a uConsole port draws from the battery, so keep an eye on that until the revised board is in. Future phases (RPC, Marauder) are planned in the issue tracker.
+
+---
+
 ## Privileges and updates
 
 - Anything run as root only ever executes a copy that root alone can modify (the installed `/usr/local/bin/aiov2_ctl`). If you run a boot-rail or similar command from a user writable checkout without installing first, it refuses and tells you to install.

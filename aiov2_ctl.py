@@ -322,6 +322,7 @@ _aiov2_ctl()
         --add-apps
         --remove-apps
         --setup-sudoers
+        --companions
         --fix-sdr
         --sdr-biastee
         --wifi-monitor
@@ -534,6 +535,7 @@ COMMANDS:
   --wifi-monitor Keep NetworkManager off the USB WiFi for monitor mode
   --sync-rtc   Write current system time to hardware RTC
   --remove-apps   Remove HackerGadgets AIO apps
+  --companions    Detect a Flipper Zero or ESP32 board on USB (detection only)
   --setup-sudoers Let the tray change rails/services without a password (--remove to undo)
   --update --yes  Apply updates without the confirmation prompt
 
@@ -2066,6 +2068,147 @@ class Telemetry:
 # ==============================
 # Status (snapshot)
 # ==============================
+# ==============================
+# Companion devices (Flipper Zero, ESP32 boards)
+# ==============================
+# Detection only for now: nothing is opened, written to or reset.
+USB_SYSFS_BASE = "/sys/bus/usb/devices"
+
+# (vendor, product) -> (kind, label)
+COMPANION_IDS = {
+    ("0483", "5740"): ("flipper", "Flipper Zero"),
+    ("303a", "0002"): ("esp32", "ESP32-S2 (native USB)"),
+    ("303a", "1001"): ("esp32", "ESP32 (USB serial/JTAG)"),
+}
+# Generic USB-serial chips found on many ESP32 boards. Only a hint: plenty of
+# other things use these, so they are reported as "possible".
+GENERIC_SERIAL_IDS = {
+    ("10c4", "ea60"): "CP210x USB-serial",
+    ("1a86", "7523"): "CH340 USB-serial",
+}
+
+COMPANION_UDEV_PATH = "/etc/udev/rules.d/99-aiov2-companions.rules"
+# uaccess gives the logged in user access to the port (no world writable
+# nodes), and ID_MM_DEVICE_IGNORE stops ModemManager grabbing it.
+COMPANION_UDEV_RULES = """# Managed by aiov2_ctl --install
+# Flipper Zero
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+# Espressif native USB (ESP32-S2 and friends)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+"""
+
+
+def _tty_nodes(dev_path):
+    """tty names (ttyACM0, ttyUSB0...) belonging to a USB device, if any."""
+    names = []
+    try:
+        for iface in os.listdir(dev_path):
+            tty_dir = os.path.join(dev_path, iface, "tty")
+            if os.path.isdir(tty_dir):
+                names += sorted(os.listdir(tty_dir))
+    except OSError:
+        pass
+    return names
+
+
+def detect_companions():
+    """
+    Look for a Flipper Zero or ESP32 style board on the USB bus.
+
+    Returns a list of dicts: kind ('flipper', 'esp32', 'possible-esp32'),
+    name, vid, pid, tty (e.g. '/dev/ttyACM0' or None), serial.
+    """
+    found = []
+    try:
+        names = sorted(os.listdir(USB_SYSFS_BASE))
+    except OSError:
+        return found
+
+    for name in names:
+        # Skip interfaces such as "1-1:1.0"; we want whole devices.
+        if ":" in name:
+            continue
+        dev = os.path.join(USB_SYSFS_BASE, name)
+        vid = read_sysfs(os.path.join(dev, "idVendor"))
+        pid = read_sysfs(os.path.join(dev, "idProduct"))
+        if not vid or not pid:
+            continue
+
+        key = (vid.lower(), pid.lower())
+        if key in COMPANION_IDS:
+            kind, label = COMPANION_IDS[key]
+        elif key in GENERIC_SERIAL_IDS:
+            kind, label = "possible-esp32", GENERIC_SERIAL_IDS[key]
+        else:
+            continue
+
+        ttys = _tty_nodes(dev)
+        found.append({
+            "kind": kind,
+            "name": read_sysfs(os.path.join(dev, "product")) or label,
+            "label": label,
+            "vid": key[0],
+            "pid": key[1],
+            "tty": f"/dev/{ttys[0]}" if ttys else None,
+            "serial": read_sysfs(os.path.join(dev, "serial")),
+        })
+    return found
+
+
+def companions_summary_line(devices):
+    if not devices:
+        return "Companions: none"
+    parts = []
+    for d in devices:
+        tag = d["label"] + (" (possible)" if d["kind"] == "possible-esp32" else "")
+        parts.append(f"{tag}" + (f" @ {d['tty']}" if d["tty"] else ""))
+    return "Companions: " + ", ".join(parts)
+
+
+def show_companions():
+    devices = detect_companions()
+    print("Companion devices")
+    print("-----------------")
+    if not devices:
+        print("None found.")
+        usb_pin = GPIO_MAP.get("USB")
+        if usb_pin is not None and not GpioController.get_gpio(usb_pin):
+            print("The USB rail is OFF. Turn it on with: aiov2_ctl USB on")
+        print("Plug the device in and check the cable carries data, not just power.")
+        return 0
+
+    for d in devices:
+        print(f"{d['label']}" + (" (possible, generic USB-serial chip)" if d["kind"] == "possible-esp32" else ""))
+        print(f"  USB ID : {d['vid']}:{d['pid']}")
+        print(f"  Product: {d['name']}")
+        print(f"  Serial : {d['serial'] or 'n/a'}")
+        tty = d["tty"]
+        print(f"  Port   : {tty or 'no serial port found'}")
+        if tty and not os.access(tty, os.R_OK | os.W_OK):
+            print("  Access : no permission. Run 'sudo aiov2_ctl --install' to add the udev rule, "
+                  "then replug the device.")
+    return 0
+
+
+def ensure_companion_udev_rules():
+    """Install the udev rule so a logged in user can open the serial port."""
+    try:
+        with open(COMPANION_UDEV_PATH) as f:
+            if f.read() == COMPANION_UDEV_RULES:
+                return
+    except OSError:
+        pass
+
+    print(f"Installing companion device udev rules → {COMPANION_UDEV_PATH}\n")
+    with open(COMPANION_UDEV_PATH, "w") as f:
+        f.write(COMPANION_UDEV_RULES)
+    os.chmod(COMPANION_UDEV_PATH, 0o644)
+    subprocess.call(["udevadm", "control", "--reload-rules"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.call(["udevadm", "trigger", "--subsystem-match=tty"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def show_status():
     print("AIO v2 Status")
     print("====================")
@@ -2080,6 +2223,8 @@ def show_status():
         else:
             print(f"{f:<5} GPIO{p}: {state}")
 
+    print("--------------------")
+    print(companions_summary_line(detect_companions()))
     print("--------------------")
 
     summary = Telemetry.power_summary()
@@ -2452,6 +2597,10 @@ def run_gui():
     power_action.setEnabled(False)
     menu.addAction(power_action)
 
+    companion_action = QAction("Companions: --")
+    companion_action.setEnabled(False)
+    menu.addAction(companion_action)
+
     menu.addSeparator()
     menu.addAction(update_action)
 
@@ -2499,6 +2648,8 @@ def run_gui():
         else:
             power_label.setText("Power: n/a")
             power_action.setText("Power: n/a")
+
+        companion_action.setText(companions_summary_line(detect_companions()))
 
         for f, p in GPIO_MAP.items():
             state = GpioController.get_gpio(p)
@@ -2743,6 +2894,8 @@ def install_self():
     # ------------------------------
     # Install boot rail systemd unit
     # ------------------------------
+    ensure_companion_udev_rules()
+
     print(f"Installing rail boot service → {RAILS_BOOT_SERVICE_PATH}\n")
     with open(RAILS_BOOT_SERVICE_PATH, "w") as f:
         f.write(RAILS_BOOT_SERVICE_UNIT)
@@ -3168,6 +3321,9 @@ def main():
 
     elif arg == "--add-apps":
         sys.exit(add_apps())
+
+    elif arg == "--companions":
+        sys.exit(show_companions())
 
     elif arg == "--setup-sudoers":
         sys.exit(setup_sudoers(remove="--remove" in sys.argv[2:]))
