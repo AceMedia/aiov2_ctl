@@ -362,7 +362,17 @@ aiov2_ctl --flipper ls [/ext]
 aiov2_ctl --flipper apps
 aiov2_ctl --flipper open <APP>
 ```n
-Talks to the Flipper's own serial CLI using only the standard library, so nothing extra to install. `info` shows hardware, firmware and battery, `ls` lists files (default is the SD card), `apps` lists what it can launch and `open` starts one. Add `--port /dev/ttyACMx` to pick a port. Paths and app names are checked before they reach the Flipper, so they cannot carry a second command. Sending files needs the RPC protocol and comes in a later phase. Close qFlipper first: the port is opened exclusively.
+Talks to the Flipper's own serial CLI using only the standard library, so nothing extra to install. `info` shows hardware, firmware and battery, `ls` lists files (default is the SD card), `apps` lists what it can launch and `open` starts one. Add `--port /dev/ttyACMx` to pick a port. Paths and app names are checked before they reach the Flipper, so they cannot carry a second command. Close qFlipper first: the port is opened exclusively.
+
+File transfer uses the Flipper's RPC protocol with a small built-in client (no protobuf package needed):
+
+```bash
+aiov2_ctl --flipper put ./payload.sub /ext/subghz/payload.sub [--force]
+aiov2_ctl --flipper get /ext/subghz/payload.sub ./copy.sub
+aiov2_ctl --flipper mkdir /ext/mine```n
+Transfers only touch the SD card (`/ext`), never the Flipper's internal storage. `put` refuses to overwrite without `--force`, checks the MD5 afterwards and reports a mismatch, `get` never overwrites a local file and saves with mode 600. Files are limited to 64 MiB. The RPC session is always ended, even after an error.
+
+The protocol messages follow the official `flipperzero-protobuf` definitions and the tests use a simulated Flipper, so this is unverified on a real device.
 
 These commands follow the published CLI but have not been checked on a real Flipper yet.
 

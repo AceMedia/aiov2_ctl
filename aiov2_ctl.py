@@ -2289,6 +2289,11 @@ class FlipperCli:
     def close(self):
         if self.fd is not None:
             try:
+                # Give the port back explicitly so the next run can open it.
+                fcntl.ioctl(self.fd, termios.TIOCNXCL)
+            except (OSError, termios.error):
+                pass
+            try:
                 os.close(self.fd)
             finally:
                 self.fd = None
@@ -2366,13 +2371,286 @@ def _flipper_port(explicit=None):
     )
 
 
+# ---- RPC (protobuf) for file transfer -------------------------------------
+# A small hand written client for the few storage messages needed, so there is
+# no protobuf dependency. Field numbers come from flipperdevices/flipperzero-protobuf
+# (flipper.proto, storage.proto).
+RPC_MAX_FRAME = 4096          # a hostile device cannot make us allocate more
+RPC_CHUNK = 512               # File.data max_size in storage.options
+MAX_TRANSFER_BYTES = 64 * 1024 * 1024
+
+_RPC_STATUS = {
+    1: "unknown error", 2: "decode error", 3: "not implemented", 4: "busy",
+    5: "storage not ready (is the SD card in?)", 6: "already exists",
+    7: "does not exist", 8: "invalid parameter", 9: "access denied",
+    10: "invalid name", 11: "internal storage error", 13: "already open",
+    14: "transfer interrupted", 15: "invalid parameters", 17: "another app is running",
+    18: "directory not empty",
+}
+RPC_NOT_EXIST = 7
+
+
+class FlipperRpcError(FlipperError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f"Flipper replied: {_RPC_STATUS.get(status, f'error {status}')}")
+
+
+def pb_varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def pb_read_varint(buf, pos):
+    shift = result = 0
+    while True:
+        if pos >= len(buf) or shift > 63:
+            raise FlipperError("Malformed reply from the Flipper.")
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return result, pos
+        shift += 7
+
+
+def pb_varint_field(num, value):
+    return pb_varint(num << 3) + pb_varint(value) if value else b""
+
+
+def pb_bytes_field(num, data):
+    if isinstance(data, str):
+        data = data.encode()
+    return pb_varint((num << 3) | 2) + pb_varint(len(data)) + data
+
+
+def pb_parse(buf):
+    """Message to {field_number: [int or bytes]}. Varint and length-delimited only."""
+    out, pos = {}, 0
+    while pos < len(buf):
+        tag, pos = pb_read_varint(buf, pos)
+        num, wire = tag >> 3, tag & 7
+        if wire == 0:
+            value, pos = pb_read_varint(buf, pos)
+        elif wire == 2:
+            length, pos = pb_read_varint(buf, pos)
+            if pos + length > len(buf):
+                raise FlipperError("Malformed reply from the Flipper.")
+            value, pos = bytes(buf[pos:pos + length]), pos + length
+        else:
+            raise FlipperError("Unexpected data in the Flipper's reply.")
+        out.setdefault(num, []).append(value)
+    return out
+
+
+def pb_main(command_id, content_field, content, has_next=False):
+    """Encode a PB.Main message with a length prefix, ready to send."""
+    body = (pb_varint_field(1, command_id) + pb_varint_field(3, 1 if has_next else 0)
+            + pb_bytes_field(content_field, content))
+    return pb_varint(len(body)) + body
+
+
+class FlipperRpc:
+    """Storage RPC over an already open FlipperCli. Always ends the session."""
+
+    def __init__(self, cli):
+        self.cli = cli
+        self.next_id = 1
+        self.active = False
+
+    def __enter__(self):
+        fd = self.cli.fd
+        os.write(fd, b"start_rpc_session\r")
+        # The CLI echoes the command line; after that it is protobuf only.
+        deadline = time.monotonic() + self.cli.timeout
+        seen = b""
+        while b"\n" not in seen:
+            seen += self._read(1, deadline)
+        self.active = True
+        return self
+
+    def __exit__(self, *exc):
+        if self.active:
+            try:
+                os.write(self.cli.fd, pb_main(self._id(), 19, b""))  # StopSession
+                time.sleep(0.2)
+            except OSError:
+                pass
+            self.active = False
+
+    def _id(self):
+        self.next_id += 1
+        return self.next_id
+
+    def _read(self, count, deadline):
+        buf = b""
+        while len(buf) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FlipperError("Timed out waiting for the Flipper.")
+            ready, _, _ = select.select([self.cli.fd], [], [], remaining)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self.cli.fd, count - len(buf))
+            except BlockingIOError:
+                continue
+            except OSError as exc:
+                raise FlipperError(f"Lost the Flipper: {exc}")
+            if not chunk:
+                raise FlipperError("The Flipper closed the connection.")
+            buf += chunk
+        return buf
+
+    def _frame(self, timeout):
+        deadline = time.monotonic() + timeout
+        length = shift = 0
+        while True:
+            b = self._read(1, deadline)[0]
+            length |= (b & 0x7F) << shift
+            shift += 7
+            if not b & 0x80:
+                break
+            if shift > 28:
+                raise FlipperError("Malformed reply from the Flipper.")
+        if length > RPC_MAX_FRAME:
+            raise FlipperError("The Flipper sent an oversized message. Aborting.")
+        return pb_parse(self._read(length, deadline))
+
+    def request(self, command_id, field, content, timeout=None):
+        """Send one request; return the list of reply Main dicts until has_next is clear."""
+        timeout = timeout or self.cli.timeout
+        os.write(self.cli.fd, pb_main(command_id, field, content))
+        return self.replies(command_id, timeout)
+
+    def replies(self, command_id, timeout=None):
+        timeout = timeout or self.cli.timeout
+        out = []
+        while True:
+            msg = self._frame(timeout)
+            if msg.get(1, [0])[0] != command_id:
+                continue
+            status = msg.get(2, [0])[0]
+            if status:
+                raise FlipperRpcError(status)
+            out.append(msg)
+            if not msg.get(3, [0])[0]:
+                return out
+
+    # -- storage operations --
+    def exists(self, path):
+        try:
+            self.request(self._id(), 24, pb_bytes_field(1, path))  # StatRequest
+            return True
+        except FlipperRpcError as exc:
+            if exc.status == RPC_NOT_EXIST:
+                return False
+            raise
+
+    def mkdir(self, path):
+        self.request(self._id(), 13, pb_bytes_field(1, path))
+
+    def md5(self, path):
+        reply = self.request(self._id(), 14, pb_bytes_field(1, path))[0]
+        return pb_parse(reply[15][0]).get(1, [b""])[0].decode()
+
+    def write(self, path, data, progress=None):
+        cid = self._id()
+        chunks = [data[i:i + RPC_CHUNK] for i in range(0, len(data), RPC_CHUNK)] or [b""]
+        for n, chunk in enumerate(chunks):
+            last = n == len(chunks) - 1
+            file_msg = pb_bytes_field(4, chunk)
+            req = pb_bytes_field(1, path) + pb_bytes_field(2, file_msg)
+            os.write(self.cli.fd, pb_main(cid, 11, req, has_next=not last))
+            if progress:
+                progress(min(len(data), (n + 1) * RPC_CHUNK), len(data))
+        self.replies(cid, timeout=10)
+
+    def read(self, path, progress=None):
+        cid = self._id()
+        os.write(self.cli.fd, pb_main(cid, 9, pb_bytes_field(1, path)))
+        data = bytearray()
+        for msg in self.replies(cid, timeout=10):
+            if 10 in msg:
+                file_msg = pb_parse(pb_parse(msg[10][0]).get(1, [b""])[0])
+                data += file_msg.get(4, [b""])[0]
+                if len(data) > MAX_TRANSFER_BYTES:
+                    raise FlipperError("File is bigger than the transfer limit.")
+                if progress:
+                    progress(len(data), None)
+        return bytes(data)
+
+
+def flipper_sd_path(value):
+    """Transfers only touch the SD card, never the Flipper's internal storage."""
+    path = flipper_safe_arg(value)
+    if path != "/ext" and not path.startswith("/ext/"):
+        raise FlipperError("Remote paths must be on the SD card (start with /ext/).")
+    return path
+
+
+def _progress_printer(label):
+    last = [-1]
+
+    def show(done, total):
+        pct = int(done * 100 / total) if total else None
+        step = pct // 10 if pct is not None else done // (64 * 1024)
+        if step != last[0]:
+            last[0] = step
+            print(f"  {label} {pct}%" if pct is not None else f"  {label} {done} bytes")
+    return show
+
+
+def flipper_transfer(cli, sub, rest, force):
+    import hashlib
+    with FlipperRpc(cli) as rpc:
+        if sub == "mkdir":
+            rpc.mkdir(flipper_sd_path(rest[0]))
+            print(f"Created {rest[0]}")
+        elif sub == "put":
+            local, remote = rest[0], flipper_sd_path(rest[1])
+            if not os.path.isfile(local):
+                raise FlipperError(f"{local} is not a file.")
+            size = os.path.getsize(local)
+            if size > MAX_TRANSFER_BYTES:
+                raise FlipperError("File is bigger than the 64 MiB transfer limit.")
+            if rpc.exists(remote) and not force:
+                raise FlipperError(f"{remote} already exists. Use --force to overwrite.")
+            with open(local, "rb") as f:
+                data = f.read()
+            print(f"Sending {local} ({size} bytes) to {remote}")
+            rpc.write(remote, data, _progress_printer("sent"))
+            if rpc.md5(remote) != hashlib.md5(data).hexdigest():
+                raise FlipperError("Checksum mismatch after sending. The copy on the Flipper is not trusted.")
+            print("Done. Checksum verified.")
+        elif sub == "get":
+            remote, local = flipper_sd_path(rest[0]), rest[1]
+            if os.path.exists(local):
+                raise FlipperError(f"{local} already exists. Choose a new name.")
+            data = rpc.read(remote, _progress_printer("received"))
+            fd = os.open(local, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            print(f"Saved {len(data)} bytes to {local}")
+
+
 def flipper_command(args):
     usage = (
-        "Usage: aiov2_ctl --flipper info|ls [PATH]|apps|open APP  [--port /dev/ttyACMx]\n"
-        "  info        name, firmware and battery\n"
-        "  ls [PATH]   list files (default /ext, the SD card)\n"
-        "  apps        list apps the Flipper can launch\n"
-        "  open APP    launch an app on the Flipper"
+        "Usage: aiov2_ctl --flipper <command> [--port /dev/ttyACMx]\n"
+        "  info                  name, firmware and battery\n"
+        "  ls [PATH]             list files (default /ext, the SD card)\n"
+        "  apps                  list apps the Flipper can launch\n"
+        "  open APP              launch an app on the Flipper\n"
+        "  put LOCAL REMOTE [--force]   send a file to the SD card (checksum verified)\n"
+        "  get REMOTE LOCAL      copy a file from the SD card\n"
+        "  mkdir REMOTE          make a folder on the SD card\n"
+        "Transfers only touch /ext (the SD card), never overwrite without --force "
+        "and never overwrite local files."
     )
     args = list(args)
     port = None
@@ -2383,17 +2661,26 @@ def flipper_command(args):
             return 1
         port = args[i + 1]
         del args[i:i + 2]
+    force = "--force" in args
+    if force:
+        args.remove("--force")
 
-    if not args or args[0] not in ("info", "ls", "apps", "open"):
+    arity = {"info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
+             "put": (2, 2), "get": (2, 2), "mkdir": (1, 1)}
+    if not args or args[0] not in arity:
         print(usage)
         return 1
     sub, rest = args[0], args[1:]
+    low, high = arity[sub]
+    if not low <= len(rest) <= high:
+        print(usage)
+        return 1
 
     try:
-        if sub == "open" and len(rest) != 1:
-            print(usage)
-            return 1
         with FlipperCli(_flipper_port(port)) as cli:
+            if sub in ("put", "get", "mkdir"):
+                flipper_transfer(cli, sub, rest, force)
+                return 0
             if sub == "info":
                 dev = parse_flipper_kv(cli.run("device_info"))
                 pwr = parse_flipper_kv(cli.run("power info"))
@@ -2486,6 +2773,10 @@ class MarauderSerial:
 
     def close(self):
         if self.fd is not None:
+            try:
+                fcntl.ioctl(self.fd, termios.TIOCNXCL)
+            except (OSError, termios.error):
+                pass
             try:
                 os.close(self.fd)
             finally:
