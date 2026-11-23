@@ -399,7 +399,7 @@ aiov2_ctl --flipper mkdir /ext/mine
 
 Transfers only touch the SD card (`/ext`), never the Flipper's internal storage. `put` refuses to overwrite without `--force`, checks the MD5 afterwards and reports a mismatch, `get` never overwrites a local file and saves with mode 600. Files are limited to 64 MiB. The RPC session is always ended, even after an error.
 
-The protocol messages follow the official `flipperzero-protobuf` definitions and the tests use a simulated Flipper, so this is unverified on a real device.
+The protocol messages follow the official `flipperzero-protobuf` definitions. Checked on a real Flipper (Unleashed `unlshd-095`): `mkdir`, a multi chunk `put` with the MD5 check, the overwrite refusal and `get` all work.
 
 These commands follow the published CLI but have not been checked on a real Flipper yet.
 
@@ -416,7 +416,7 @@ Drives the Marauder firmware's serial command line (115200 baud) on an ESP32 boa
 
 Only a short list of passive commands is built in. There is no way to send attack, spoofing or portal commands from here. The log can contain SSIDs and MAC addresses, so treat it as private. This is for looking at your own networks and equipment, and the law where you live applies.
 
-The Marauder wiki does not document the line ending or the output format, so those parts are unverified until I have a board to try it on.
+Checked on a real Flipper WiFi dev board running Marauder v1.21.0 through the Flipper's USB-UART Bridge app (GPIO menu, USART, 115200). A plain `\n` line ending works. Scans need a little time: 10 seconds heard nothing, 30 seconds (the default) found dozens of access points and stations. While the bridge app is running the Flipper's own CLI is not available, so `--flipper` commands will not work until you leave the app. The captured logs contain the names and MAC addresses of your neighbours' networks, so they are kept private (mode 600).
 
 A Flipper charging from a uConsole port draws from the battery, so keep an eye on that until the revised board is in. Future phases (RPC, Marauder) are planned in the issue tracker.
 
