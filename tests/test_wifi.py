@@ -234,5 +234,28 @@ class NmcliRunTests(unittest.TestCase):
         self.assertIn("nmcli", err)
 
 
+class FlipperBoardRadioTests(unittest.TestCase):
+    FLIPPER = {"kind": "flipper", "tty": "/dev/ttyACM1"}
+
+    def test_listed_when_the_board_answers(self):
+        with mock.patch.object(a, "detect_companions", return_value=[self.FLIPPER]),                 mock.patch.object(a, "probe_wifi_board", return_value="present"):
+            self.assertEqual(a.flipper_board_radio()["name"], "flipper-marauder")
+
+    def test_nothing_without_a_flipper_and_the_port_is_never_probed(self):
+        with mock.patch.object(a, "detect_companions", return_value=[]),                 mock.patch.object(a, "probe_wifi_board") as probe:
+            self.assertIsNone(a.flipper_board_radio())
+        probe.assert_not_called()
+
+    def test_nothing_when_the_board_does_not_answer(self):
+        with mock.patch.object(a, "detect_companions", return_value=[self.FLIPPER]),                 mock.patch.object(a, "probe_wifi_board", return_value="not-detected"):
+            self.assertIsNone(a.flipper_board_radio())
+
+    def test_radios_command_includes_it(self):
+        out = io.StringIO()
+        board = {"name": "flipper-marauder", "kind": "flipper-marauder", "driver": "marauder", "up": True}
+        with mock.patch.object(a, "detect_wifi_radios", return_value=[]),                 mock.patch.object(a, "flipper_board_radio", return_value=board),                 redirect_stdout(out):
+            self.assertEqual(a.wifi_command(["radios", "--json"]), 0)
+        self.assertEqual([r["name"] for r in json.loads(out.getvalue())["radios"]], ["flipper-marauder"])
+
 if __name__ == "__main__":
     unittest.main()

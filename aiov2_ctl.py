@@ -3580,6 +3580,18 @@ def scan_wifi_flipper(seconds=WIFI_SCAN_SECONDS):
     return parse_marauder_aps(lines)
 
 
+def flipper_board_radio():
+    """The Flipper's Wi-Fi dev board as a radio entry, or None.
+
+    Like the scan, this never opens a port unless a Flipper is plugged in and
+    the board answers, so people without one see no change at all.
+    """
+    flippers = [d for d in detect_companions() if d["kind"] == "flipper" and d["tty"]]
+    if not flippers or probe_wifi_board(flippers[0]["tty"]) != "present":
+        return None
+    return {"name": FLIPPER_RADIO, "kind": FLIPPER_RADIO, "driver": "marauder", "up": True}
+
+
 def collect_wifi_scan(iface=None, say=None):
     """Scan every available radio. Returns the documented JSON structure."""
     radios = detect_wifi_radios()
@@ -3668,6 +3680,9 @@ def wifi_command(args):
 
     if args[0] == "radios":
         radios = detect_wifi_radios()
+        board = flipper_board_radio()
+        if board:
+            radios.append(board)
         if as_json:
             print(json.dumps({"radios": radios}, indent=2))
         else:
