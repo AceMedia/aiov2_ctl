@@ -2640,6 +2640,119 @@ class FlipperRpc:
                     progress(len(data), None)
         return bytes(data)
 
+    def screen_frames(self, seconds):
+        """
+        Yield (data, orientation) screen frames for `seconds`. Read only: this
+        only watches the display, it never sends button presses. The stream is
+        always stopped again, even on Ctrl+C or an error.
+        """
+        cid = self._id()
+        os.write(self.cli.fd, pb_main(cid, FLIPPER_START_SCREEN, b""))
+        end = time.monotonic() + seconds
+        try:
+            while time.monotonic() < end:
+                msg = self._frame(max(0.5, end - time.monotonic() + 1.0))
+                if FLIPPER_SCREEN_FRAME in msg:
+                    frame = pb_parse(msg[FLIPPER_SCREEN_FRAME][0])
+                    data = frame.get(1, [b""])[0]
+                    if len(data) == FLIPPER_SCREEN_BYTES:
+                        yield data, frame.get(2, [0])[0]
+        finally:
+            try:
+                os.write(self.cli.fd, pb_main(self._id(), FLIPPER_STOP_SCREEN, b""))
+                time.sleep(0.2)
+            except OSError:
+                pass
+
+
+# ---- Live screen -------------------------------------------------------------
+# Field numbers follow flipperdevices/flipperzero-protobuf (gui.proto).
+FLIPPER_START_SCREEN = 20
+FLIPPER_STOP_SCREEN = 21
+FLIPPER_SCREEN_FRAME = 22
+FLIPPER_SCREEN_W, FLIPPER_SCREEN_H = 128, 64
+FLIPPER_SCREEN_BYTES = FLIPPER_SCREEN_W * FLIPPER_SCREEN_H // 8
+
+
+def decode_flipper_frame(data, orientation=0):
+    """1024 bytes to 64 rows of 128 booleans (True = pixel on). Bytes are 8 pixel
+    tall columns: byte i is x = i % 128, page = i // 128, bit 0 is the top."""
+    if len(data) != FLIPPER_SCREEN_BYTES:
+        raise FlipperError("Unexpected screen frame size.")
+    rows = [[False] * FLIPPER_SCREEN_W for _ in range(FLIPPER_SCREEN_H)]
+    for i, byte in enumerate(data):
+        x, page = i % FLIPPER_SCREEN_W, i // FLIPPER_SCREEN_W
+        for bit in range(8):
+            if byte >> bit & 1:
+                rows[page * 8 + bit][x] = True
+    if orientation == 1:  # horizontal, flipped: turn it back the right way up
+        rows = [row[::-1] for row in rows[::-1]]
+    return rows
+
+
+def frame_to_braille(rows):
+    """Two by four pixels per character, so the 128x64 screen fits in 64x16."""
+    dots = ((0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08),
+            (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80))
+    lines = []
+    for y in range(0, len(rows), 4):
+        line = ""
+        for x in range(0, len(rows[0]), 2):
+            code = 0
+            for dx, dy, bit in dots:
+                if rows[y + dy][x + dx]:
+                    code |= bit
+            line += chr(0x2800 + code)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def frame_to_png(rows, scale=4):
+    """A plain black on white PNG using only the standard library."""
+    import struct
+    import zlib
+    w, h = len(rows[0]) * scale, len(rows) * scale
+    raw = bytearray()
+    for row in rows:
+        line = bytearray([0])
+        bits = [0 if px else 1 for px in row for _ in range(scale)]
+        for i in range(0, w, 8):
+            chunk = bits[i:i + 8] + [1] * (8 - len(bits[i:i + 8]))
+            line.append(int("".join(map(str, chunk)), 2))
+        raw += bytes(line) * scale
+
+    def chunk(kind, body):
+        crc = zlib.crc32(kind + body) & 0xFFFFFFFF
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", crc)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 1, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw))) + chunk(b"IEND", b""))
+
+
+def flipper_screen(cli, seconds, live, png_path):
+    """Show the Flipper's screen: one frame, live for `seconds`, or saved as a PNG."""
+    first = True
+    last = None
+    with FlipperRpc(cli) as rpc:
+        for data, orientation in rpc.screen_frames(seconds):
+            last = decode_flipper_frame(data, orientation)
+            if png_path:
+                break
+            if live:
+                print(("" if first else "\x1b[H") + frame_to_braille(last), end="\n", flush=True)
+                first = False
+            else:
+                break
+    if last is None:
+        raise FlipperError("No screen frames arrived. Is the Flipper awake and not in the bridge app?")
+    if png_path:
+        fd = os.open(png_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(frame_to_png(last))
+        print(f"Saved the Flipper screen to {png_path}")
+    elif not live:
+        print(frame_to_braille(last))
+
 
 def flipper_sd_path(value):
     """Transfers only touch the SD card, never the Flipper's internal storage."""
@@ -2833,6 +2946,7 @@ def flipper_command(args):
     usage = (
         "Usage: aiov2_ctl --flipper <command> [--port /dev/ttyACMx]\n"
         "  status [--json]       mode, battery, SD card, apps, Wi-Fi board and next steps\n"
+        "  screen [--live] [--seconds N] [--png FILE]   show the Flipper's screen (watch only)\n"
         "  info                  name, firmware and battery\n"
         "  ls [PATH]             list files (default /ext, the SD card)\n"
         "  apps                  list apps the Flipper can launch\n"
@@ -2859,7 +2973,29 @@ def flipper_command(args):
     as_json = "--json" in args
     if as_json:
         args.remove("--json")
-    arity = {"status": (0, 0), "info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
+    live = "--live" in args
+    if live:
+        args.remove("--live")
+    png_path = None
+    if "--png" in args:
+        i = args.index("--png")
+        if i + 1 >= len(args):
+            print(usage)
+            return 1
+        png_path = args[i + 1]
+        del args[i:i + 2]
+    seconds = 10.0
+    if "--seconds" in args:
+        i = args.index("--seconds")
+        try:
+            seconds = float(args[i + 1])
+            if not 1 <= seconds <= 600:
+                raise ValueError
+        except (IndexError, ValueError):
+            print("--seconds needs a number between 1 and 600.")
+            return 1
+        del args[i:i + 2]
+    arity = {"screen": (0, 0), "status": (0, 0), "info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
              "put": (2, 2), "get": (1, 2), "mkdir": (1, 1)}
     if not args or args[0] not in arity:
         print(usage)
@@ -2881,6 +3017,9 @@ def flipper_command(args):
         with FlipperCli(_flipper_port(port)) as cli:
             if sub in ("put", "get", "mkdir"):
                 flipper_transfer(cli, sub, rest, force)
+                return 0
+            if sub == "screen":
+                flipper_screen(cli, seconds if live else 5.0, live, png_path)
                 return 0
             if sub == "info":
                 dev = parse_flipper_kv(cli.run("device_info"))
