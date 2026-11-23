@@ -71,6 +71,12 @@ Install also enables the rail boot apply service:
 - `aiov2-rails-boot.service`
 - Applies configured rail boot states at startup
 
+and the readsb SDR recovery:
+
+- `/etc/systemd/system/readsb.service.d/10-aiov2-sdr-recovery.conf` — waits for the RTL-SDR before readsb starts, and power cycles the SDR rail after readsb fails (skipped if the rail is off or another app holds the SDR)
+- `aiov2-sdr-watchdog.timer` — every minute, recovers readsb if it is running but no longer receiving samples
+- Keep the SDR powered at boot for ADS-B with `sudo aiov2_ctl --boot-rail SDR on`
+
 ---
 
 ## 3) Optional: HackerGadgets AIO Companion Apps
@@ -89,7 +95,7 @@ Installs and configures:
 - **`meshtastic-mui`** — Meshtastic graphical UI for LoRa / Meshtastic devices (depends on the AIO package)
 - **`sdrpp-brown`** — Preconfigured SDR++ build for the uConsole (RF scanning/listening via SDR)
 - **`tar1090`** — ADS-B aircraft tracking web UI (visualises planes from your SDR feed)
-- **`pygpsclient`** — GPS monitoring and diagnostics GUI (position, satellites, NMEA data)
+- **`pygpsclient`** — GPS monitoring and diagnostics GUI (position, satellites, NMEA data), preset to the GPS UART (`/dev/serial0`, 9600 baud)
 
 This pulls in supporting services (RTC, GPIO helpers, and desktop menu entries) used by the HackerGadgets AIO ecosystem.
 
@@ -115,6 +121,42 @@ sudo aiov2_ctl --sync-rtc
 Writes the **current system time** to the hardware RTC using `hwclock -w`.
 
 > Only run this after confirming system time is correct (e.g. via NTP).
+
+---
+
+### RTL-SDR bias tee for readsb
+
+```bash
+sudo aiov2_ctl --sdr-biastee on
+sudo aiov2_ctl --sdr-biastee off
+aiov2_ctl --sdr-biastee status
+```
+
+Powers the SDR antenna input (bias tee) every time readsb starts, for an active antenna or inline LNA. Debian/Kali readsb builds ignore `--enable-biastee` on RTL-SDRs, so this adds `readsb.service.d/20-aiov2-sdr-biastee.conf`, which runs `rtl_biast -b 1` before readsb opens the tuner (needs the `rtl-sdr` package).
+
+> Only enable it with an antenna or LNA that expects DC power. The bias tee stays on until the SDR loses power, so turn it off before connecting a passive antenna for other SDR apps.
+
+---
+
+### USB WiFi monitor mode without losing the internet
+
+```bash
+sudo aiov2_ctl --wifi-monitor on
+sudo aiov2_ctl --wifi-monitor off
+aiov2_ctl --wifi-monitor status
+```
+
+`airmon-ng check kill` stops NetworkManager and wpa_supplicant, which also takes the onboard WiFi (`wlan0`) offline. `--wifi-monitor on` adds `/etc/NetworkManager/conf.d/99-aiov2-usb-wifi-unmanaged.conf`, telling NetworkManager to leave the USB WiFi (MT7961, `mt7921u`) alone, and reloads its configuration without dropping connections. Then skip `check kill`:
+
+```bash
+sudo airmon-ng start wlan1
+sudo airodump-ng wlan1mon
+sudo airmon-ng stop wlan1mon
+```
+
+- `airmon-ng check` still lists NetworkManager; it no longer touches `wlan1`, so ignore it
+- While on, NetworkManager will not connect `wlan1` to networks; `--wifi-monitor off` hands it back
+- The USB rail powers this adapter; keep it on at boot with `sudo aiov2_ctl --boot-rail USB on`
 
 ---
 
@@ -286,6 +328,18 @@ Behaviour:
 - The tool escalates **only** for the install step
 - Clean exit if already up to date
 - Update path re-runs install, including boot rail service install/enable
+
+---
+
+## 9) Running the tests
+
+The tests mock all GPIO, sysfs and systemd access, so they run on any machine without touching the board:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+`python3 -m pytest tests` works too if pytest is installed.
 
 ---
 
