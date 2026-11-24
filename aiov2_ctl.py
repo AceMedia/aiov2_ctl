@@ -4815,7 +4815,8 @@ class Survey:
                      "last": round(a["last"], 1)} for b, a in aps],
             "stations": [{"mac": m, "bssid": s["bssid"], "rssi": round(s["rssi"], 1), "frames": s["frames"],
                           "last": round(s["last"], 1)} for m, s in stas],
-            "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1)} for m, p in probes],
+            "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1),
+                        "last": round(p["last"], 1)} for m, p in probes],
             "deauth": sorted(floods, key=lambda f: -f["frames"]),
             "channels": {str(c): v for c, v in sorted(self.channels.items())},
         }

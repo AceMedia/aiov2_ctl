@@ -141,6 +141,7 @@ class FrameTests(unittest.TestCase):
         s.see(frame(wild), 2.0)
         p = s.probes["02:11:22:33:44:55"]
         self.assertEqual((p["ssids"], p["count"]), (["MyPhoneHotspot"], 2))
+        self.assertEqual(s.snapshot(3.0)["probes"][0]["last"], 2.0)
 
     def test_deauth_flood_needs_a_burst(self):
         s = a.Survey()
