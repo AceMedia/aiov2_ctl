@@ -8,6 +8,7 @@ import shutil
 import re
 import stat
 import select
+import socket
 import termios
 import fcntl
 import tty
@@ -525,6 +526,7 @@ USAGE:
     aiov2_ctl --mesh-on-boot [on|off|status]
     aiov2_ctl --boot-rail <FEATURE> on|off|status
     aiov2_ctl --boot-rails-status
+    aiov2_ctl --net status|neighbors|listen|sweep|ports   (wired network, passive first)
   sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
@@ -3891,6 +3893,487 @@ def wifi_command(args):
     return 0
 
 
+# ---- Wired network: link, neighbours, passive listening, and an opt-in look around your own LAN ------------------
+# Passive first. `status` and `neighbors` only read. `listen` opens a raw socket and just listens for the
+# announcements hosts make on their own (ARP, mDNS, DHCP, LLDP), so it needs root but sends nothing.
+# `sweep` and `ports` are active (they send ARP requests or open TCP connections), so they need --yes, only
+# work on private address ranges of an interface this machine is on, and are rate limited. Nothing here attacks,
+# spoofs, guesses passwords or goes beyond your own subnet.
+import ipaddress
+import struct
+
+NET_PRIVATE = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16")]
+NET_SWEEP_LIMIT = 1024            # hosts: a /22 at most
+NET_SWEEP_RATE = 100              # ARP requests per second
+NET_PORT_LIMIT = 200
+NET_COMMON_PORTS = (21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 554, 631, 1883, 3389, 5900, 8000, 8080, 8443, 9100)
+OUI_PATH = "/usr/share/ieee-data/oui.txt"
+_OUI = {}
+
+
+def is_private_ip(text):
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return ip.version == 4 and any(ip in n for n in NET_PRIVATE)
+
+
+def ethernet_interfaces(base=SYS_NET):
+    """Names of real wired interfaces: ethernet type, not wireless, not virtual (docker, bridges, tunnels)."""
+    out = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(base, name)
+        if read_sysfs(os.path.join(path, "type")) != "1" or os.path.isdir(os.path.join(path, "wireless")):
+            continue
+        try:
+            target = os.path.realpath(path)
+        except OSError:
+            continue
+        if "/devices/virtual/" in target:
+            continue
+        out.append(name)
+    return out
+
+
+def link_info(name, base=SYS_NET):
+    """Link facts for one interface from sysfs: up or down, carrier, speed, duplex, address and driver."""
+    path = os.path.join(base, name)
+    carrier = read_sysfs(os.path.join(path, "carrier")) == "1"
+    speed = read_sysfs(os.path.join(path, "speed"))
+    try:
+        speed = int(speed) if speed and int(speed) > 0 else None
+    except ValueError:
+        speed = None
+    driver = ""
+    try:
+        driver = os.path.basename(os.readlink(os.path.join(path, "device", "driver")))
+    except OSError:
+        pass
+    return {"name": name, "state": read_sysfs(os.path.join(path, "operstate")) or "unknown", "carrier": carrier,
+            "speed_mbps": speed if carrier else None, "duplex": read_sysfs(os.path.join(path, "duplex")) if carrier else None,
+            "mac": read_sysfs(os.path.join(path, "address")) or "", "driver": driver}
+
+
+def parse_ip_addr4(text):
+    """[(address, prefix length)] from `ip -4 -o addr show dev X`."""
+    out = []
+    for line in (text or "").splitlines():
+        m = re.search(r"\binet (\d+\.\d+\.\d+\.\d+)/(\d+)", line)
+        if m:
+            out.append((m.group(1), int(m.group(2))))
+    return out
+
+
+def parse_ip_neigh(text):
+    """[{ip, mac, state, dev}] from `ip -4 neigh`, skipping entries with no address."""
+    out = []
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if not parts or not re.match(r"^\d+\.\d+\.\d+\.\d+$", parts[0]):
+            continue
+        mac = parts[parts.index("lladdr") + 1] if "lladdr" in parts and parts.index("lladdr") + 1 < len(parts) else ""
+        dev = parts[parts.index("dev") + 1] if "dev" in parts and parts.index("dev") + 1 < len(parts) else ""
+        if mac:
+            out.append({"ip": parts[0], "mac": mac.lower(), "state": parts[-1], "dev": dev})
+    return out
+
+
+def oui_vendor(mac, path=OUI_PATH):
+    """The maker of a network card from its address (needs the ieee-data package), or ''."""
+    if not _OUI.get(path):
+        table = {}
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = re.match(r"^([0-9A-F]{2})-([0-9A-F]{2})-([0-9A-F]{2})\s+\(hex\)\s+(.+)$", line)
+                    if m:
+                        table["".join(m.groups()[:3]).lower()] = m.group(4).strip()
+        except OSError:
+            pass
+        _OUI[path] = table
+    key = re.sub(r"[^0-9a-f]", "", (mac or "").lower())[:6]
+    return _OUI[path].get(key, "")
+
+
+def _mac(b):
+    return ":".join(f"{x:02x}" for x in b)
+
+
+def _dns_name(data, off, depth=0):
+    """A DNS name starting at `off`, following compression pointers a few times. (name, next offset)."""
+    labels, jumped, end = [], False, off
+    for _ in range(40):
+        if off >= len(data):
+            return ".".join(labels), end
+        n = data[off]
+        if n == 0:
+            return ".".join(labels), (end if jumped else off + 1)
+        if n & 0xC0 == 0xC0 and off + 1 < len(data) and depth < 4:
+            ptr = ((n & 0x3F) << 8) | data[off + 1]
+            if not jumped:
+                end = off + 2
+            jumped = True
+            off = ptr
+            depth += 1
+            continue
+        labels.append(data[off + 1:off + 1 + n].decode("ascii", "replace"))
+        off += 1 + n
+    return ".".join(labels), end
+
+
+def parse_frame(raw):
+    """What a captured Ethernet frame tells us about a host, as {mac, ip, name, proto}, or None.
+
+    Understands ARP, LLDP, mDNS (names the host announces) and DHCP (the host's own name for itself)."""
+    if len(raw) < 14:
+        return None
+    src, ethertype = _mac(raw[6:12]), struct.unpack("!H", raw[12:14])[0]
+    body = raw[14:]
+    if ethertype == 0x0806 and len(body) >= 28:
+        op = struct.unpack("!H", body[6:8])[0]
+        sip = ".".join(str(b) for b in body[14:18])
+        if sip != "0.0.0.0":
+            return {"mac": _mac(body[8:14]), "ip": sip, "name": "", "proto": "arp" if op in (1, 2) else "arp?"}
+        return None
+    if ethertype == 0x88CC:
+        name, pos = "", 0
+        while pos + 2 <= len(body):
+            head = struct.unpack("!H", body[pos:pos + 2])[0]
+            kind, length = head >> 9, head & 0x1FF
+            if kind == 0:
+                break
+            if kind == 5:
+                name = body[pos + 2:pos + 2 + length].decode("ascii", "replace")
+            pos += 2 + length
+        return {"mac": src, "ip": "", "name": name, "proto": "lldp"}
+    if ethertype == 0x0800 and len(body) >= 20:
+        ihl = (body[0] & 0x0F) * 4
+        proto, sip = body[9], ".".join(str(b) for b in body[12:16])
+        if proto == 17 and len(body) >= ihl + 8:
+            sport, dport = struct.unpack("!HH", body[ihl:ihl + 4])
+            payload = body[ihl + 8:]
+            if 5353 in (sport, dport) and len(payload) >= 12:
+                qd, an = struct.unpack("!HH", payload[4:8])
+                off = 12
+                name = ""
+                for _ in range(qd):
+                    name, off = _dns_name(payload, off)
+                    off += 4
+                if an and not name:
+                    name, off = _dns_name(payload, off)
+                if an:
+                    n2, _off = _dns_name(payload, 12) if qd == 0 else (name, off)
+                    name = n2 or name
+                return {"mac": src, "ip": sip, "name": name if an else "", "proto": "mdns"}
+            if 68 in (sport, dport) and len(payload) >= 240 and payload[236:240] == b"\x63\x82\x53\x63":
+                opts, pos, host = payload[240:], 0, ""
+                while pos + 2 <= len(opts) and opts[pos] != 255:
+                    if opts[pos] == 0:
+                        pos += 1
+                        continue
+                    code, length = opts[pos], opts[pos + 1]
+                    if code == 12:
+                        host = opts[pos + 2:pos + 2 + length].decode("ascii", "replace")
+                    pos += 2 + length
+                return {"mac": src, "ip": sip if sip != "0.0.0.0" else "", "name": host, "proto": "dhcp"}
+        if sip != "0.0.0.0":
+            return {"mac": src, "ip": sip, "name": "", "proto": "ip"}
+    return None
+
+
+class HostTable:
+    """Hosts seen on the wire, one per MAC address, with everything learned about each."""
+
+    def __init__(self, own_macs=()):
+        self.hosts, self.own = {}, {m.lower() for m in own_macs}
+
+    def see(self, obs, now=None):
+        if not obs or not obs.get("mac") or obs["mac"] in self.own or obs["mac"] == "ff:ff:ff:ff:ff:ff":
+            return
+        h = self.hosts.setdefault(obs["mac"], {"mac": obs["mac"], "ips": [], "names": [], "protos": [], "count": 0})
+        h["count"] += 1
+        h["seen"] = now if now is not None else time.time()
+        for key, field in (("ip", "ips"), ("name", "names"), ("proto", "protos")):
+            val = obs.get(key)
+            if val and val not in h[field]:
+                h[field].append(val)
+
+    def rows(self):
+        out = []
+        for h in self.hosts.values():
+            out.append({"mac": h["mac"], "ip": ", ".join(h["ips"]), "name": ", ".join(h["names"]),
+                        "via": ", ".join(h["protos"]), "packets": h["count"], "vendor": oui_vendor(h["mac"])})
+        return sorted(out, key=lambda r: (ipaddress.ip_address(r["ip"].split(", ")[0]) if r["ip"] else ipaddress.ip_address("255.255.255.255"), r["mac"]))
+
+
+def sweep_targets(address, prefix, limit=NET_SWEEP_LIMIT):
+    """The host addresses an ARP sweep of this subnet would ask about, or [] when it is not allowed:
+    only private ranges, at most `limit` hosts, never our own address."""
+    if not is_private_ip(address):
+        return []
+    net = ipaddress.ip_network(f"{address}/{prefix}", strict=False)
+    if net.num_addresses - 2 > limit or net.prefixlen < 16:
+        return []
+    return [str(h) for h in net.hosts() if str(h) != address]
+
+
+def arp_request(src_mac, src_ip, target_ip):
+    """A raw ARP 'who has' frame, the same thing any computer sends before talking to a neighbour."""
+    mac = bytes(int(x, 16) for x in src_mac.split(":"))
+    return (b"\xff" * 6 + mac + b"\x08\x06" + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1) + mac +
+            socket.inet_aton(src_ip) + b"\x00" * 6 + socket.inet_aton(target_ip))
+
+
+def parse_ports(text):
+    """A sorted list of ports from '22,80,8000-8010', or None when it is not valid or too long."""
+    ports = set()
+    try:
+        for part in (text or "").split(","):
+            part = part.strip()
+            if "-" in part:
+                a, b = (int(x) for x in part.split("-", 1))
+                ports.update(range(a, b + 1))
+            elif part:
+                ports.add(int(part))
+    except ValueError:
+        return None
+    if not ports or min(ports) < 1 or max(ports) > 65535 or len(ports) > NET_PORT_LIMIT:
+        return None
+    return sorted(ports)
+
+
+def host_in_our_subnets(host, subnets):
+    """True only when `host` is a private address inside one of our own interface subnets."""
+    if not is_private_ip(host):
+        return False
+    ip = ipaddress.ip_address(host)
+    return any(ip in net for net in subnets)
+
+
+def _net_iface_addrs(name):
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show", "dev", name], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_ip_addr4(out)
+
+
+def net_status():
+    """Every wired interface: link, speed, addresses, and a plain next step when there is no cable."""
+    rows = []
+    for name in ethernet_interfaces():
+        info = link_info(name)
+        info["addresses"] = [f"{a}/{p}" for a, p in _net_iface_addrs(name)]
+        info["hint"] = "" if info["carrier"] else "No link. Plug a cable into the port and check the switch or router is on."
+        rows.append(info)
+    return rows
+
+
+def net_neighbors(dev=None):
+    try:
+        out = subprocess.run(["ip", "-4", "neigh"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = parse_ip_neigh(out)
+    for r in rows:
+        r["vendor"] = oui_vendor(r["mac"])
+    return [r for r in rows if not dev or r["dev"] == dev]
+
+
+def _pick_iface(iface):
+    names = ethernet_interfaces()
+    if iface:
+        if iface not in names:
+            raise OSError(f"{iface} is not a wired interface. Found: {', '.join(names) or 'none'}.")
+        return iface
+    for name in names:
+        if link_info(name)["carrier"]:
+            return name
+    raise OSError("No wired interface has a link. Plug in a cable (or pass --iface).")
+
+
+def net_listen(iface, seconds, say=print):
+    """Listen without sending anything and return the hosts that announced themselves. Needs root."""
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+    except PermissionError:
+        raise OSError("Listening needs root: run it as 'sudo aiov2_ctl --net listen'.")
+    own = [link_info(iface)["mac"]]
+    table = HostTable(own)
+    try:
+        sock.bind((iface, 0))
+        sock.settimeout(0.5)
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                raw = sock.recv(2048)
+            except socket.timeout:
+                continue
+            table.see(parse_frame(raw))
+    finally:
+        sock.close()
+    return table.rows()
+
+
+def net_sweep(iface, say=print):
+    """Ask every address on our own subnet 'who has it?' with ARP, at a gentle rate, and return who answers."""
+    addrs = _net_iface_addrs(iface)
+    if not addrs:
+        raise OSError(f"{iface} has no IPv4 address yet, so there is nothing to sweep.")
+    address, prefix = addrs[0]
+    targets = sweep_targets(address, prefix)
+    if not targets:
+        raise OSError(f"{address}/{prefix} is not a private subnet of 1022 hosts or fewer, so it is not swept.")
+    mac = link_info(iface)["mac"]
+    try:
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+    except PermissionError:
+        raise OSError("Sweeping needs root: run it as 'sudo aiov2_ctl --net sweep --yes'.")
+    table = HostTable([mac])
+    try:
+        sock.bind((iface, 0))
+        sock.settimeout(0.05)
+        for i, target in enumerate(targets):
+            sock.send(arp_request(mac, address, target))
+            deadline = time.monotonic() + 1.0 / NET_SWEEP_RATE
+            while time.monotonic() < deadline:
+                try:
+                    obs = parse_frame(sock.recv(2048))
+                except socket.timeout:
+                    break
+                if obs and obs["proto"] == "arp" and obs["ip"] in targets:
+                    table.see(obs)
+        end = time.monotonic() + 2.0                      # let the stragglers answer
+        while time.monotonic() < end:
+            try:
+                obs = parse_frame(sock.recv(2048))
+            except socket.timeout:
+                continue
+            if obs and obs["proto"] == "arp" and obs["ip"] in targets:
+                table.see(obs)
+    finally:
+        sock.close()
+    return table.rows()
+
+
+def net_ports(host, ports):
+    """Which of `ports` accept a normal TCP connection on a host in our own subnet. Needs no root."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def probe(port):
+        try:
+            with socket.create_connection((host, port), timeout=0.6):
+                return port
+        except OSError:
+            return None
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        return [p for p in pool.map(probe, ports) if p]
+
+
+def net_command(args):
+    usage = (
+        "Usage: aiov2_ctl --net status [--json]\n"
+        "       aiov2_ctl --net neighbors [--json]\n"
+        "       aiov2_ctl --net listen [--iface eth0] [--seconds 30] [--json]   (passive, needs root)\n"
+        "       aiov2_ctl --net sweep [--iface eth0] --yes [--json]             (active ARP sweep of your own subnet, needs root)\n"
+        "       aiov2_ctl --net ports HOST [--ports 22,80,443] --yes [--json]  (TCP connect check of one host on your subnet)\n"
+        "Passive by default. sweep and ports send traffic, so they need --yes and only work on private addresses\n"
+        "of a network this machine is on. Nothing here attacks, spoofs or guesses passwords."
+    )
+    args = list(args)
+    as_json = "--json" in args
+    yes = "--yes" in args
+    args = [a for a in args if a not in ("--json", "--yes")]
+
+    def take(flag, default=None):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                raise ValueError(flag)
+            value = args[i + 1]
+            del args[i:i + 2]
+            return value
+        return default
+    try:
+        iface, seconds, port_text = take("--iface"), take("--seconds", "30"), take("--ports")
+        seconds = float(seconds)
+    except ValueError:
+        print(usage)
+        return 1
+    if not args or args[0] not in ("status", "neighbors", "listen", "sweep", "ports") or not 1 <= seconds <= 600:
+        print(usage)
+        return 1
+    sub, rest = args[0], args[1:]
+
+    def show(rows, header, empty):
+        if as_json:
+            print(json.dumps(rows, indent=2))
+        elif not rows:
+            print(empty)
+        else:
+            print(header)
+            for r in rows:
+                print("  " + "  ".join(f"{v}" for v in r.values() if v not in ("", None)))
+
+    try:
+        if sub == "status" and not rest:
+            rows = net_status()
+            if as_json:
+                print(json.dumps({"interfaces": rows}, indent=2))
+            elif not rows:
+                print("No wired network interface found.")
+            for r in ([] if as_json else rows):
+                speed = f", {r['speed_mbps']} Mbit/s {r['duplex'] or ''}".rstrip() if r["speed_mbps"] else ""
+                print(f"{r['name']}: {'link up' if r['carrier'] else 'no link'}{speed}  {', '.join(r['addresses']) or 'no address'}  ({r['driver'] or 'unknown driver'})")
+                if r["hint"]:
+                    print(f"  {r['hint']}")
+            return 0
+        if sub == "neighbors" and not rest:
+            show(net_neighbors(), "Neighbours the system already knows (nothing was sent):", "No neighbours known yet.")
+            return 0
+        if sub == "listen" and not rest:
+            name = _pick_iface(iface)
+            print(f"Listening on {name} for {seconds:g}s. Nothing is sent.", file=sys.stderr if as_json else sys.stdout)
+            show(net_listen(name, seconds), "Hosts that announced themselves:", "Nobody announced themselves in that time.")
+            return 0
+        if sub == "sweep" and not rest:
+            if not yes:
+                print("A sweep asks every address on your subnet who it is. Add --yes if this is your own network.")
+                return 1
+            name = _pick_iface(iface)
+            print(f"Sweeping the subnet on {name} (about {NET_SWEEP_RATE} requests a second)...", file=sys.stderr if as_json else sys.stdout)
+            show(net_sweep(name), "Hosts that answered:", "Nobody answered.")
+            return 0
+        if sub == "ports" and len(rest) == 1:
+            if not yes:
+                print("A port check opens a TCP connection to each port. Add --yes if this is your own network.")
+                return 1
+            ports = parse_ports(port_text) if port_text else list(NET_COMMON_PORTS)
+            if ports is None:
+                print(f"--ports must be numbers from 1 to 65535, at most {NET_PORT_LIMIT} of them.")
+                return 1
+            subnets = [ipaddress.ip_network(f"{a}/{p}", strict=False) for n in ethernet_interfaces() for a, p in _net_iface_addrs(n)]
+            if not host_in_our_subnets(rest[0], subnets):
+                print(f"{rest[0]} is not a private address on a wired network this machine is on, so it is not checked.")
+                return 1
+            found = net_ports(rest[0], ports)
+            if as_json:
+                print(json.dumps({"host": rest[0], "open": found, "checked": len(ports)}, indent=2))
+            else:
+                print(f"{rest[0]}: {len(found)} of {len(ports)} ports open" + (": " + ", ".join(map(str, found)) if found else ""))
+            return 0
+    except OSError as exc:
+        print(f"Error: {exc}")
+        return 1
+    print(usage)
+    return 1
+
+
 def gauge_disagrees(summary):
     """True when the reported charge level cannot match the cell voltage."""
     cap, volts = summary.get("capacity"), summary.get("voltage")
@@ -4911,6 +5394,9 @@ def build_sudoers(user):
     for svc in _SUDOERS_SERVICES:
         for action in ("start", "stop", "restart", "reset-failed"):
             cmds.append(f"{systemctl} {action} {svc}")
+    # Wired network: listening is passive, the sweep is the one active command and the app asks first.
+    cmds.append(f"{INSTALLED_PATH} --net listen --seconds 30 --json")
+    cmds.append(f"{INSTALLED_PATH} --net sweep --yes --json")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -5262,6 +5748,9 @@ def main():
 
     elif arg == "--wifi":
         sys.exit(wifi_command(sys.argv[2:]))
+
+    elif arg == "--net":
+        sys.exit(net_command(sys.argv[2:]))
 
     elif arg == "--marauder":
         sys.exit(marauder_command(sys.argv[2:]))
