@@ -2333,6 +2333,51 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _FLIPPER_ARG_RE = re.compile(r"^[A-Za-z0-9_./ +()\-]{1,200}$")
 
 
+class DeviceBusy(Exception):
+    """Another aiov2_ctl process held the device for the whole wait."""
+
+
+def _lock_dir():
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not (base and os.path.isdir(base)):
+        base = os.path.join(tempfile.gettempdir(), f"aiov2_ctl-{os.getuid()}")
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        st = os.lstat(base)
+        if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077:
+            raise DeviceBusy(f"Unsafe lock directory {base}")
+    return base
+
+
+def acquire_device_lock(path, wait=15.0):
+    """Queue behind other aiov2_ctl processes using the same serial device.
+
+    The Flipper and the Marauder board only allow one opener, so two callers at
+    once used to make one of them fail or miss the board. Returns a file
+    descriptor to pass to release_device_lock.
+    """
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(path)) or "device"
+    lock_path = os.path.join(_lock_dir(), f"aiov2_ctl-{name}.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                os.close(fd)
+                raise DeviceBusy(f"{path} is in use by another aiov2_ctl command. Try again in a moment.")
+            time.sleep(0.1)
+
+
+def release_device_lock(fd):
+    if fd is not None:
+        try:
+            os.close(fd)      # closing the descriptor drops the flock
+        except OSError:
+            pass
+
+
 class FlipperError(Exception):
     pass
 
@@ -2350,6 +2395,7 @@ class FlipperCli:
         self.path = path
         self.timeout = timeout
         self.fd = None
+        self.lock_fd = None
 
     def __enter__(self):
         self.open()
@@ -2360,13 +2406,21 @@ class FlipperCli:
 
     def open(self):
         try:
+            self.lock_fd = acquire_device_lock(self.path)
+        except (DeviceBusy, OSError) as exc:
+            raise FlipperError(str(exc))
+        try:
             self.fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except PermissionError:
+            release_device_lock(self.lock_fd)
+            self.lock_fd = None
             raise FlipperError(
                 f"No permission to open {self.path}. Run 'sudo aiov2_ctl --install' "
                 "to add the udev rule, then replug the Flipper."
             )
         except OSError as exc:
+            release_device_lock(self.lock_fd)
+            self.lock_fd = None
             raise FlipperError(f"Could not open {self.path}: {exc}")
 
         try:
@@ -2399,6 +2453,8 @@ class FlipperCli:
                 os.close(self.fd)
             finally:
                 self.fd = None
+        release_device_lock(getattr(self, "lock_fd", None))
+        self.lock_fd = None
 
     def _read_until_prompt(self):
         buf = b""
@@ -3143,6 +3199,7 @@ class MarauderSerial:
     def __init__(self, path):
         self.path = path
         self.fd = None
+        self.lock_fd = None
         self._partial = b""
 
     def __enter__(self):
@@ -3154,13 +3211,21 @@ class MarauderSerial:
 
     def open(self):
         try:
+            self.lock_fd = acquire_device_lock(self.path)
+        except (DeviceBusy, OSError) as exc:
+            raise MarauderError(str(exc))
+        try:
             self.fd = os.open(self.path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except PermissionError:
+            release_device_lock(self.lock_fd)
+            self.lock_fd = None
             raise MarauderError(
                 f"No permission to open {self.path}. Run 'sudo aiov2_ctl --install' "
                 "to add the udev rule, then replug the device."
             )
         except OSError as exc:
+            release_device_lock(self.lock_fd)
+            self.lock_fd = None
             raise MarauderError(f"Could not open {self.path}: {exc}")
         try:
             # TCSANOW: the default (TCSAFLUSH) waits for queued output to drain and can block
@@ -3184,6 +3249,8 @@ class MarauderSerial:
                 os.close(self.fd)
             finally:
                 self.fd = None
+        release_device_lock(getattr(self, "lock_fd", None))
+        self.lock_fd = None
 
     def send(self, command):
         if "\r" in command or "\n" in command:
