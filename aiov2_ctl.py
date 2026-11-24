@@ -528,6 +528,7 @@ USAGE:
     aiov2_ctl --boot-rails-status
     aiov2_ctl --net status|neighbors|listen|sweep|ports   (wired network, passive first)
     aiov2_ctl --wifi-listen [--channel 6]                (passive Wi-Fi signal listening for Sense, needs root)
+    aiov2_ctl --wifi-survey [--band all] [--pcap]        (passive survey: access points, stations, probes, deauth floods; needs root)
   sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
@@ -4427,6 +4428,12 @@ SYSTEM_PACKAGES = {"iw": "/usr/sbin/iw"}      # apt package -> a file it provide
 
 def radiotap_info(raw):
     """(signal_dbm or None, bad_checksum, header_length) from a radiotap header, or None if it is not one."""
+    got = radiotap_fields(raw)
+    return got[:3] if got else None
+
+
+def radiotap_fields(raw):
+    """(signal_dbm or None, bad_checksum, header_length, freq_mhz or None) from a radiotap header, or None."""
     if len(raw) < 8 or raw[0] != 0:
         return None
     length = struct.unpack_from("<H", raw, 2)[0]
@@ -4439,7 +4446,7 @@ def radiotap_info(raw):
             return None
         word = struct.unpack_from("<I", raw, pos)[0]
         pos += 4
-    flags, signal = 0, None
+    flags, signal, freq = 0, None, None
     for bit, (align, size) in enumerate(((8, 8), (1, 1), (1, 1), (2, 4), (2, 2), (1, 1))):
         if not present & (1 << bit):
             continue
@@ -4448,10 +4455,12 @@ def radiotap_info(raw):
             return None
         if bit == 1:
             flags = raw[pos]
+        elif bit == 3:
+            freq = struct.unpack_from("<H", raw, pos)[0]
         elif bit == 5:
             signal = struct.unpack_from("<b", raw, pos)[0]
         pos += size
-    return signal, bool(flags & 0x40), length
+    return signal, bool(flags & 0x40), length, freq
 
 
 def monitor_frame(raw):
@@ -4503,11 +4512,8 @@ def monitor_restore(iface):
         _monitor_cmd("nmcli", "device", "set", iface, "managed", "yes", check=False)
 
 
-def monitor_run(iface, channel, seconds, emit):
-    """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards."""
-    import signal
-    if os.geteuid() != 0:
-        raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-listen'.")
+def monitor_check(iface):
+    """Refuse before touching anything: needs iw, a real Wi-Fi interface, and one that is not connected."""
     iw, ip = _tool("iw"), _tool("ip")
     if not iw or not ip:
         raise OSError("'iw' is not installed. Run: sudo aiov2_ctl --install   (or: sudo apt install iw)")
@@ -4517,20 +4523,35 @@ def monitor_run(iface, channel, seconds, emit):
     if "Connected to" in link:
         raise OSError(f"{iface} is connected to a network. Disconnect it first; monitor mode would drop that connection.")
 
+
+def monitor_setup(iface, channel):
+    """Put the radio in monitor mode on a channel and return a raw socket reading it. The caller must restore."""
+    iw, ip = _tool("iw"), _tool("ip")
+    if _tool("nmcli"):
+        _monitor_cmd("nmcli", "device", "set", iface, "managed", "no", check=False)
+    _monitor_cmd(ip, "link", "set", iface, "down")
+    _monitor_cmd(iw, "dev", iface, "set", "type", "monitor")
+    _monitor_cmd(ip, "link", "set", iface, "up")
+    _monitor_cmd(iw, "dev", iface, "set", "channel", str(channel))
+    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+    sock.bind((iface, 0))
+    sock.settimeout(0.25)
+    return sock
+
+
+def monitor_run(iface, channel, seconds, emit):
+    """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards."""
+    import signal
+    if os.geteuid() != 0:
+        raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-listen'.")
+    monitor_check(iface)
+
     def stop(_sig, _frm):
         raise KeyboardInterrupt
     old = signal.signal(signal.SIGTERM, stop)
     sock = None
     try:
-        if _tool("nmcli"):
-            _monitor_cmd("nmcli", "device", "set", iface, "managed", "no", check=False)
-        _monitor_cmd(ip, "link", "set", iface, "down")
-        _monitor_cmd(iw, "dev", iface, "set", "type", "monitor")
-        _monitor_cmd(ip, "link", "set", iface, "up")
-        _monitor_cmd(iw, "dev", iface, "set", "channel", str(channel))
-        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
-        sock.bind((iface, 0))
-        sock.settimeout(0.25)
+        sock = monitor_setup(iface, channel)
         end = time.monotonic() + seconds
         bucket_end, seen = time.monotonic() + 1.0, []
         while time.monotonic() < end:
@@ -4594,6 +4615,320 @@ def monitor_command(args):
             else:
                 print(f"{rec['frames']:4d} frames  {rec['rssi'] if rec['rssi'] is not None else '--':>6} dBm  {len(rec['links'])} senders", flush=True)
         monitor_run(iface, channel, seconds, emit)
+        return 0
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+# ---- Passive survey: access points, stations, probes, deauth floods and channel use ---------------------------
+# Listens only. Hops between channels, reads the 802.11 headers of what it hears and keeps tables. The optional
+# capture file holds radiotap frames with the payload of data frames cut off (headers only), private to the user.
+SURVEY_BANDS = {"2g": tuple(range(1, 14)), "5g": (36, 40, 44, 48, 149, 153, 157, 161, 165),
+                "all": tuple(range(1, 14)) + (36, 40, 44, 48, 149, 153, 157, 161, 165)}
+SURVEY_DWELL = 0.5
+SURVEY_EVERY = 2.0
+SURVEY_ROWS = 150
+DEAUTH_WINDOW, DEAUTH_ALERT = 5.0, 10
+_SURVEY_SUBTYPES = {8: "beacon", 5: "proberesp", 4: "probereq", 12: "deauth", 10: "disassoc"}
+
+
+def freq_to_channel(freq):
+    if not freq:
+        return None
+    if freq == 2484:
+        return 14
+    if 2412 <= freq <= 2472:
+        return (freq - 2407) // 5
+    if 5000 <= freq <= 5900:
+        return (freq - 5000) // 5
+    return None
+
+
+def _mac(b):
+    return ":".join(f"{x:02x}" for x in b)
+
+
+def _ies(buf):
+    """{element id: first body} for a run of information elements (stops quietly at anything malformed)."""
+    out, pos = {}, 0
+    while pos + 2 <= len(buf):
+        eid, n = buf[pos], buf[pos + 1]
+        if pos + 2 + n > len(buf):
+            break
+        out.setdefault(eid, buf[pos + 2:pos + 2 + n])
+        if eid == 221 and n >= 4 and buf[pos + 2:pos + 6] == b"\x00\x50\xf2\x01":
+            out.setdefault("wpa", True)
+        pos += 2 + n
+    return out
+
+
+def security_of(capability, ies):
+    rsn = ies.get(48)
+    if rsn is not None:
+        akms = set()
+        try:
+            pos = 2 + 4
+            pairs = struct.unpack_from("<H", rsn, pos)[0]
+            pos += 2 + 4 * pairs
+            count = struct.unpack_from("<H", rsn, pos)[0]
+            pos += 2
+            for _ in range(count):
+                if rsn[pos:pos + 3] == b"\x00\x0f\xac":
+                    akms.add(rsn[pos + 3])
+                pos += 4
+        except (struct.error, IndexError):
+            pass
+        if akms & {1, 5, 11, 12}:
+            return "WPA3-Enterprise" if 8 in akms else "WPA2-Enterprise"
+        if 18 in akms and not akms & {2, 8}:
+            return "OWE"
+        if 8 in akms:
+            return "WPA3" if not akms & {2, 6} else "WPA2/WPA3"
+        return "WPA2"
+    if ies.get("wpa"):
+        return "WPA"
+    return "WEP" if capability & 0x10 else "Open"
+
+
+def parse_dot11(raw, off):
+    """What a frame says about who is around, or None. Never reads past the header unless it must."""
+    if len(raw) < off + 24:
+        return None
+    fc0, fc1 = raw[off], raw[off + 1]
+    ftype, sub = (fc0 >> 2) & 3, fc0 >> 4
+    a1, a2, a3 = raw[off + 4:off + 10], raw[off + 10:off + 16], raw[off + 16:off + 22]
+    if ftype == 0:
+        kind = _SURVEY_SUBTYPES.get(sub)
+        if kind in ("beacon", "proberesp"):
+            if len(raw) < off + 36 or a2[0] & 1:
+                return None
+            cap = struct.unpack_from("<H", raw, off + 34)[0]
+            ies = _ies(raw[off + 36:])
+            ssid = ies.get(0, b"")
+            ssid = "" if ssid and not any(ssid) else ssid.decode("utf-8", "replace")
+            ch = ies.get(3)[0] if ies.get(3) else (ies.get(61)[0] if ies.get(61) else None)
+            return {"kind": kind, "bssid": _mac(a3), "ssid": ssid, "channel": ch, "security": security_of(cap, ies)}
+        if kind == "probereq":
+            if a2[0] & 1:
+                return None
+            ssid = _ies(raw[off + 24:]).get(0, b"")
+            return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else ""}
+        if kind in ("deauth", "disassoc"):
+            return {"kind": kind, "src": _mac(a2), "dst": _mac(a1), "bssid": _mac(a3)}
+        return None
+    if ftype == 2:
+        to_ds, from_ds = bool(fc1 & 1), bool(fc1 & 2)
+        if to_ds == from_ds:
+            return None
+        bssid, sta = (a1, a2) if to_ds else (a2, a1)
+        if sta[0] & 1 or bssid[0] & 1 or sta == bssid:
+            return None
+        return {"kind": "data", "bssid": _mac(bssid), "sta": _mac(sta)}
+    return None
+
+
+class Survey:
+    """The tables a survey fills in. Feed it frames with see(); read it with snapshot()."""
+
+    def __init__(self):
+        self.aps, self.stations, self.probes, self.deauth, self.channels = {}, {}, {}, {}, {}
+
+    def see(self, raw, now):
+        fields = radiotap_fields(raw)
+        if not fields or fields[1]:
+            return None
+        signal, _bad, off, freq = fields
+        ch = freq_to_channel(freq)
+        if ch:
+            slot = self.channels.setdefault(ch, {"frames": 0, "bytes": 0})
+            slot["frames"] += 1
+            slot["bytes"] += max(0, len(raw) - off)
+        info = parse_dot11(raw, off)
+        if not info or signal is None or not -120 <= signal < 0:
+            return info
+        kind = info["kind"]
+        if kind in ("beacon", "proberesp"):
+            ap = self.aps.setdefault(info["bssid"], {"first": now, "beacons": 0, "ssid": "", "rssi": float(signal)})
+            ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
+            ap["last"], ap["security"] = now, info["security"]
+            ap["channel"] = info["channel"] or ch or ap.get("channel")
+            if info["ssid"]:
+                ap["ssid"] = info["ssid"]
+            if kind == "beacon":
+                ap["beacons"] += 1
+        elif kind == "data":
+            sta = self.stations.setdefault(info["sta"], {"frames": 0, "rssi": float(signal)})
+            sta.update(bssid=info["bssid"], last=now)
+            sta["frames"] += 1
+            sta["rssi"] = 0.7 * sta["rssi"] + 0.3 * signal
+        elif kind == "probereq":
+            pr = self.probes.setdefault(info["sta"], {"ssids": [], "count": 0, "rssi": float(signal)})
+            pr["count"] += 1
+            pr["last"], pr["rssi"] = now, 0.7 * pr["rssi"] + 0.3 * signal
+            if info["ssid"] and info["ssid"] not in pr["ssids"] and len(pr["ssids"]) < 8:
+                pr["ssids"].append(info["ssid"])
+        elif kind in ("deauth", "disassoc"):
+            d = self.deauth.setdefault(info["bssid"], {"total": 0, "recent": []})
+            d["total"] += 1
+            d["recent"] = [x for x in d["recent"] if now - x < DEAUTH_WINDOW] + [now]
+            d["last"] = now
+        return info
+
+    def snapshot(self, now, channel=None):
+        aps = sorted(self.aps.items(), key=lambda kv: -kv[1]["rssi"])[:SURVEY_ROWS]
+        stas = sorted(self.stations.items(), key=lambda kv: -kv[1]["last"])[:SURVEY_ROWS]
+        probes = sorted(self.probes.items(), key=lambda kv: -kv[1]["last"])[:SURVEY_ROWS]
+        floods = []
+        for bssid, d in self.deauth.items():
+            recent = len([x for x in d["recent"] if now - x < DEAUTH_WINDOW])
+            if recent >= DEAUTH_ALERT:
+                floods.append({"bssid": bssid, "frames": recent, "total": d["total"]})
+        return {
+            "t": round(now, 2), "channel": channel,
+            "aps": [{"bssid": b, "ssid": a["ssid"], "channel": a.get("channel"), "security": a.get("security", ""),
+                     "rssi": round(a["rssi"], 1), "beacons": a["beacons"], "first": round(a["first"], 1),
+                     "last": round(a["last"], 1)} for b, a in aps],
+            "stations": [{"mac": m, "bssid": s["bssid"], "rssi": round(s["rssi"], 1), "frames": s["frames"],
+                          "last": round(s["last"], 1)} for m, s in stas],
+            "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1)} for m, p in probes],
+            "deauth": sorted(floods, key=lambda f: -f["frames"]),
+            "channels": {str(c): v for c, v in sorted(self.channels.items())},
+        }
+
+
+class PcapWriter:
+    """A classic pcap file of radiotap frames. Data frames are cut after the header so no payload is kept."""
+
+    HEADER_KEEP = 34
+
+    def __init__(self, path, owner=None):
+        self.fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        if owner:
+            try:
+                os.chown(self.fd, owner.pw_uid, owner.pw_gid)
+            except OSError:
+                pass
+        os.write(self.fd, struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 127))
+
+    def write(self, raw, now):
+        fields = radiotap_fields(raw)
+        keep = len(raw)
+        if fields and len(raw) > fields[2] and ((raw[fields[2]] >> 2) & 3) == 2:
+            keep = min(len(raw), fields[2] + self.HEADER_KEEP)
+        os.write(self.fd, struct.pack("<IIII", int(now), int((now % 1) * 1e6), keep, len(raw)) + raw[:keep])
+
+    def close(self):
+        os.close(self.fd)
+
+
+def _survey_owner():
+    """The user who ran sudo, so a capture file ends up in their own folder and belongs to them."""
+    name = os.environ.get("SUDO_USER")
+    if not name or os.geteuid() != 0:
+        return None
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        return None
+
+
+def survey_run(iface, band, seconds, emit, pcap=False):
+    import signal
+    if os.geteuid() != 0:
+        raise OSError("Surveying needs root: run it as 'sudo aiov2_ctl --wifi-survey'.")
+    monitor_check(iface)
+    channels = list(SURVEY_BANDS[band])
+    owner = _survey_owner()
+    writer, survey = None, Survey()
+    if pcap:
+        home = owner.pw_dir if owner else os.path.expanduser("~")
+        folder = os.path.join(home, "aiov2-captures")
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        if owner:
+            os.chown(folder, owner.pw_uid, owner.pw_gid)
+        writer = PcapWriter(os.path.join(folder, time.strftime("survey-%Y%m%d-%H%M%S.pcap")), owner)
+
+    def stop(_sig, _frm):
+        raise KeyboardInterrupt
+    old = signal.signal(signal.SIGTERM, stop)
+    sock = None
+    try:
+        sock = monitor_setup(iface, channels[0])
+        iw = _tool("iw")
+        index, hop_at, report_at = 0, time.monotonic() + SURVEY_DWELL, time.monotonic() + SURVEY_EVERY
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                raw = sock.recv(4096)
+                survey.see(raw, time.time())
+                if writer:
+                    writer.write(raw, time.time())
+            except socket.timeout:
+                pass
+            now = time.monotonic()
+            if now >= hop_at and len(channels) > 1:
+                for _ in range(len(channels)):
+                    index = (index + 1) % len(channels)
+                    try:
+                        _monitor_cmd(iw, "dev", iface, "set", "channel", str(channels[index]))
+                        break
+                    except subprocess.CalledProcessError:
+                        channels.pop(index)         # this radio or region cannot use it
+                        if not channels:
+                            raise OSError("The radio accepted none of the channels.")
+                        index %= len(channels)
+                hop_at = now + SURVEY_DWELL
+            if now >= report_at:
+                emit(survey.snapshot(time.time(), channels[index] if channels else None))
+                report_at = now + SURVEY_EVERY
+    except KeyboardInterrupt:
+        pass
+    except subprocess.CalledProcessError as exc:
+        raise OSError(f"Could not set {iface} up for surveying: {(exc.stderr or '').strip() or exc}")
+    finally:
+        if sock:
+            sock.close()
+        if writer:
+            writer.close()
+        monitor_restore(iface)
+        signal.signal(signal.SIGTERM, old)
+
+
+def survey_command(args):
+    usage = (
+        "Usage: aiov2_ctl --wifi-survey [--iface wlan1] [--band 2g|5g|all] [--seconds 3600] [--pcap] [--json]   (passive, needs root)\n"
+        "Hops between channels and lists the access points, stations, probe requests, deauthentication floods and\n"
+        "channel use it hears. --pcap also saves a capture (data frames cut after their header) under ~/aiov2-captures.\n"
+        "Never transmits; the radio is returned to normal when it stops."
+    )
+    args = list(args)
+    as_json, pcap = "--json" in args, "--pcap" in args
+    args = [a for a in args if a not in ("--json", "--pcap")]
+    opts = {"--iface": MONITOR_IFACE, "--band": "all", "--seconds": str(MONITOR_SECONDS)}
+    while args:
+        if args[0] not in opts or len(args) < 2:
+            print(usage)
+            return 1
+        opts[args[0]] = args[1]
+        del args[:2]
+    try:
+        seconds = float(opts["--seconds"])
+    except ValueError:
+        print(usage)
+        return 1
+    if opts["--band"] not in SURVEY_BANDS or not 1 <= seconds <= MONITOR_SECONDS or not _IFACE_RE.match(opts["--iface"]):
+        print(usage)
+        return 1
+
+    def emit(snap):
+        if as_json:
+            print(json.dumps(snap), flush=True)
+        else:
+            print(f"ch {snap['channel']}: {len(snap['aps'])} access points, {len(snap['stations'])} stations, "
+                  f"{len(snap['probes'])} probing, {len(snap['deauth'])} deauth floods", flush=True)
+    try:
+        survey_run(opts["--iface"], opts["--band"], seconds, emit, pcap)
         return 0
     except OSError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -5647,6 +5982,9 @@ def build_sudoers(user):
     for ch in MONITOR_CHANNELS:
         cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
     cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
+    for band in SURVEY_BANDS:
+        for extra in ("", " --pcap"):
+            cmds.append(f"{INSTALLED_PATH} --wifi-survey --iface {MONITOR_IFACE} --band {band} --seconds {MONITOR_SECONDS}{extra} --json")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -6001,6 +6339,9 @@ def main():
 
     elif arg == "--net":
         sys.exit(net_command(sys.argv[2:]))
+
+    elif arg == "--wifi-survey":
+        sys.exit(survey_command(sys.argv[2:]))
 
     elif arg == "--wifi-listen":
         sys.exit(monitor_command(sys.argv[2:]))
