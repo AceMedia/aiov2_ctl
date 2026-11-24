@@ -105,6 +105,34 @@ class FrameTests(unittest.TestCase):
             self.assertEqual(list(s.stations), ["02:11:22:33:44:55"])
             self.assertEqual(s.stations["02:11:22:33:44:55"]["bssid"], "aa:bb:cc:00:11:22")
 
+
+    def test_devices_from_control_frames_need_a_known_access_point(self):
+        rts = bytes([0xB4, 0, 0, 0]) + AP + STA                       # request to send, access point to device
+        back = bytes([0xB4, 0, 0, 0]) + STA + AP                      # and device to access point
+        s = a.Survey()
+        s.see(frame(rts), 1.0)
+        self.assertEqual(s.stations, {})                              # access point not heard yet
+        s.see(frame(beacon()), 2.0)
+        s.see(frame(rts), 3.0)
+        s.see(frame(back), 4.0)
+        self.assertEqual(list(s.stations), ["02:11:22:33:44:55"])
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["frames"], 2)
+        s.see(frame(bytes([0xB4, 0, 0, 0]) + BROADCAST + STA), 5.0)
+        self.assertEqual(len(s.stations), 1)
+
+    def test_devices_from_association_and_action_frames(self):
+        for sub, src, dst in ((0, STA, AP), (11, AP, STA), (13, STA, AP)):
+            s = a.Survey()
+            s.see(frame(mgmt(sub, dst, src, AP, b"\x00" * 6)), 1.0)
+            self.assertEqual(list(s.stations), ["02:11:22:33:44:55"], sub)
+            self.assertEqual(s.stations["02:11:22:33:44:55"]["bssid"], "aa:bb:cc:00:11:22")
+
+    def test_management_frames_between_two_strangers_name_nobody(self):
+        other = bytes.fromhex("0a0b0c0d0e0f")
+        s = a.Survey()
+        s.see(frame(mgmt(13, STA, other, AP, b"\x00" * 6)), 1.0)
+        self.assertEqual(s.stations, {})
+
     def test_probe_requests(self):
         s = a.Survey()
         req = mgmt(4, BROADCAST, STA, BROADCAST, ie(0, b"MyPhoneHotspot"))
