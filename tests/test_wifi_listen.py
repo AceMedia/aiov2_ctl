@@ -73,6 +73,19 @@ class FrameTests(unittest.TestCase):
         empty = a.monitor_summary([], 11.0)
         self.assertEqual((empty["frames"], empty["rssi"], empty["links"]), (0, None, {}))
 
+    def test_summary_with_times_keeps_each_reading(self):
+        rec = a.monitor_summary([("a", -50, 9.2), ("a", -60, 9.7), ("b", -70, 9.9)], 10.0)
+        self.assertEqual(rec["links"]["a"][:2], [2, -55.0])
+        self.assertEqual(rec["links"]["a"][2], [[-0.8, -50], [-0.3, -60]])
+        self.assertEqual(rec["links"]["b"][2], [[-0.1, -70]])
+        self.assertEqual(rec["rssi"], -60.0)
+
+    def test_a_busy_sender_has_its_readings_thinned(self):
+        seen = [("a", -50, 9.0 + i * 0.001) for i in range(300)]
+        entry = a.monitor_summary(seen, 10.0)["links"]["a"]
+        self.assertEqual(entry[0], 300)
+        self.assertLessEqual(len(entry[2]), a.MONITOR_READINGS_PER_LINK)
+
     def test_summary_keeps_only_the_busiest(self):
         seen = [(f"m{i}", -50) for i in range(20) for _ in range(i + 1)]
         self.assertEqual(len(a.monitor_summary(seen, 1.0)["links"]), a.MONITOR_LINKS_PER_SECOND)
