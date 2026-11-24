@@ -3291,8 +3291,30 @@ MARAUDER_BAUD = termios.B115200
 MARAUDER_EOL = b"\n"
 CAPTURES_DIR = os.path.expanduser("~/aiov2-captures")
 MARAUDER_LOG_DIR = CAPTURES_DIR
-MARAUDER_SCAN_MODES = {"all": "scanall", "beacon": "sniffbeacon"}
-MARAUDER_LISTS = {"aps": "list -a", "stations": "list -c"}
+# Every scan the tool will start, all of them listen only. mode -> (firmware command, what it listens for).
+MARAUDER_MODE_INFO = {
+    "all": ("scanall", "Everything: access points and the stations talking to them"),
+    "ap": ("scanap", "Access points only"),
+    "stations": ("scansta", "Stations (phones, laptops) and which access point they are with"),
+    "beacon": ("sniffbeacon", "Beacon frames: networks announcing themselves"),
+    "probe": ("sniffprobe", "Probe requests: devices asking for networks by name"),
+    "deauthwatch": ("sniffdeauth", "Deauthentication frames in the air (detects someone else attacking, sends nothing)"),
+    "pwn": ("sniffpwn", "Pwnagotchi devices nearby"),
+    "esp": ("sniffesp", "Other ESP32 and ESP8266 devices nearby"),
+    "bt": ("sniffbt", "Bluetooth devices nearby"),
+    "skimmer": ("sniffskim", "Bluetooth card skimmers (by their usual names)"),
+    "packets": ("packetcount", "Packet counts by type, a busy-ness meter"),
+    "motion": ("csimotion", "Movement from the board's own channel state readings"),
+    "raw": ("sniffraw", "Every raw frame, unfiltered"),
+}
+MARAUDER_SCAN_MODES = {mode: cmd for mode, (cmd, _d) in MARAUDER_MODE_INFO.items()}
+MARAUDER_LISTS = {"aps": "list -a", "stations": "list -c", "ssids": "list -s"}
+# Firmware commands that transmit, spoof, capture handshakes or attack. They are never sent, and asking for one says so.
+MARAUDER_REFUSED = frozenset({
+    "attack", "deauth", "beaconspam", "beacon-spam", "rickroll", "probeflood", "karma", "evilportal", "evil-portal",
+    "sniffpmkid", "sniffeapol", "handshake", "pmkid", "blespam", "sourapple", "swiftpair", "spoof", "join", "ping",
+    "portscan", "arpscan", "sendpacket", "ssid", "update", "reboot",
+})
 
 
 class MarauderError(Exception):
@@ -3459,13 +3481,17 @@ def marauder_scan(ser, mode, seconds, log, say=print):
 
 
 def marauder_command(args):
+    args = list(args)
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
     usage = (
         "Usage: aiov2_ctl --marauder <command> [--port /dev/ttyXXX]\n"
         "  info                       board and firmware info\n"
         "  help                       list the firmware's own commands\n"
-        "  scan [all|beacon] [--seconds N]   (default 30; under about 15 may hear nothing)\n"
+        "  scan [MODE] [--seconds N]  (default all and 30 seconds; under about 15 may hear nothing)\n"
         "                             passive scan, streamed and saved to ~/aiov2-captures\n"
-        "  list [aps|stations]        show what the board has found\n"
+        "  modes [--json]             every scan mode and what it listens for\n"
+        "  list [aps|stations|ssids]  show what the board has found\n"
         "  channel [N]                show or set the Wi-Fi channel (1-14)\n"
         "  stop                       stop any running scan\n"
         "Passive commands only. Attack, spoofing and portal commands are not available."
@@ -3496,6 +3522,18 @@ def marauder_command(args):
         print(usage)
         return 1
     sub, rest = args[0], args[1:]
+    if sub in MARAUDER_REFUSED or (sub == "scan" and rest and rest[0] in MARAUDER_REFUSED):
+        name = rest[0] if sub == "scan" and rest else sub
+        print(f"'{name}' is not available: it transmits, spoofs or captures handshakes. "
+              "This tool only listens. 'aiov2_ctl --marauder modes' shows what it can do.")
+        return 1
+    if sub == "modes" and not rest:
+        if as_json:
+            print(json.dumps([{"mode": m, "command": c, "listens_for": d} for m, (c, d) in MARAUDER_MODE_INFO.items()], indent=2))
+        else:
+            for m, (c, d) in MARAUDER_MODE_INFO.items():
+                print(f"  {m:<9} {d}")
+        return 0
 
     # Work out the exact device commands up front and refuse anything else
     # before a port is even opened.
