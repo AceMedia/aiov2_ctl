@@ -3305,7 +3305,9 @@ MARAUDER_MODE_INFO = {
     "bt": ("sniffbt", "Bluetooth devices nearby"),
     "skimmer": ("sniffskim", "Bluetooth card skimmers (by their usual names)"),
     "packets": ("packetcount", "Packet counts by type, a busy-ness meter"),
-    "motion": ("csimotion", "Movement from the board's own channel state readings"),
+    "pineapple": ("sniffpinescan", "Wi-Fi Pineapple devices nearby (detects them, sends nothing)"),
+    "multissid": ("sniffmultissid", "One device announcing many network names (detects beacon spam)"),
+    "remoteid": ("remoteid scan", "Drone Remote ID broadcasts"),
     "raw": ("sniffraw", "Every raw frame, unfiltered"),
 }
 MARAUDER_SCAN_MODES = {mode: cmd for mode, (cmd, _d) in MARAUDER_MODE_INFO.items()}
@@ -3314,7 +3316,7 @@ MARAUDER_LISTS = {"aps": "list -a", "stations": "list -c", "ssids": "list -s"}
 MARAUDER_REFUSED = frozenset({
     "attack", "deauth", "beaconspam", "beacon-spam", "rickroll", "probeflood", "karma", "evilportal", "evil-portal",
     "sniffpmkid", "sniffeapol", "handshake", "pmkid", "blespam", "sourapple", "swiftpair", "spoof", "join", "ping",
-    "portscan", "arpscan", "sendpacket", "ssid", "update", "reboot",
+    "portscan", "arpscan", "sendpacket", "ssid", "update", "reboot", "sniffsae", "sae", "wardrive-attack",
 })
 
 
@@ -3464,11 +3466,14 @@ def marauder_scan(ser, mode, seconds, log, say=print):
     ser.send(command)
     log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} started: {command} for {seconds}s")
     end = time.monotonic() + seconds
+    unsupported = False
     try:
-        while time.monotonic() < end:
+        while time.monotonic() < end and not unsupported:
             for line in ser.read_lines(min(0.5, max(0.0, end - time.monotonic()))):
                 say(line)
                 log.write(line)
+                if "not supported" in line.lower():
+                    unsupported = True
     except KeyboardInterrupt:
         say("\nStopping…")
     finally:
@@ -3479,6 +3484,8 @@ def marauder_scan(ser, mode, seconds, log, say=print):
             pass
         time.sleep(0.3)
     log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} stopped")
+    if unsupported:
+        raise MarauderError(f"This board cannot do '{mode}' (it said: not supported). The Flipper Wi-Fi board has no Bluetooth.")
 
 
 def marauder_command(args):
