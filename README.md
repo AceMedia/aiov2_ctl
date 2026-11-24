@@ -466,3 +466,13 @@ Troubleshooting the GUI:
 - On GNOME (Ubuntu) the tray needs the AppIndicator extension: `sudo apt install gnome-shell-extension-appindicator`.
 
 Maintained for **HackerGadgets uConsole AIO v2** users.
+
+## Wi-Fi monitor mode for Sense (passive)
+
+```
+sudo aiov2_ctl --wifi-listen --iface wlan1 --channel 6 --seconds 60 --json
+sudo aiov2_ctl --wifi-listen --restore          # put the radio back to normal if anything went wrong
+```
+
+Puts a Wi-Fi radio into monitor mode, listens to the traffic in the air on one channel and prints, once a second, how many frames it heard, the average signal strength and the signal per sender (`{"t", "frames", "rssi", "links": {mac: [count, dbm]}}`). It never transmits, refuses a radio that is connected to a network, and always puts the radio back (managed, NetworkManager in charge again) when it stops, including on Ctrl+C or a termination signal. It needs root and the `iw` package; `aiov2_ctl --install` (and so `--update`) installs `iw` for you. The sudoers rules from `--setup-sudoers` allow exactly `wlan1`, one listed channel and a fixed duration, with no wildcards. Frame contents are never read beyond the sender address, and nothing is saved.
+

@@ -527,6 +527,7 @@ USAGE:
     aiov2_ctl --boot-rail <FEATURE> on|off|status
     aiov2_ctl --boot-rails-status
     aiov2_ctl --net status|neighbors|listen|sweep|ports   (wired network, passive first)
+    aiov2_ctl --wifi-listen [--channel 6]                (passive Wi-Fi signal listening for Sense, needs root)
   sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
@@ -4374,6 +4375,208 @@ def net_command(args):
     return 1
 
 
+# ---- Wi-Fi monitor mode, for Sense -------------------------------------------
+# Passive only: the radio is put in monitor mode, every frame it hears is read
+# for its signal strength and who sent it, and nothing is ever transmitted.
+# The radio is always put back (managed, NetworkManager in charge again) when
+# this stops, however it stops. Needs root and the 'iw' package.
+MONITOR_IFACE = "wlan1"
+MONITOR_CHANNELS = tuple(range(1, 14)) + (36, 40, 44, 48, 149, 153, 157, 161, 165)
+MONITOR_SECONDS = 3600
+MONITOR_LINKS_PER_SECOND = 8
+SYSTEM_PACKAGES = {"iw": "/usr/sbin/iw"}      # apt package -> a file it provides
+
+
+def radiotap_info(raw):
+    """(signal_dbm or None, bad_checksum, header_length) from a radiotap header, or None if it is not one."""
+    if len(raw) < 8 or raw[0] != 0:
+        return None
+    length = struct.unpack_from("<H", raw, 2)[0]
+    if length < 8 or length > len(raw):
+        return None
+    present = struct.unpack_from("<I", raw, 4)[0]
+    pos, word = 8, present
+    while word & 0x80000000:
+        if pos + 4 > length:
+            return None
+        word = struct.unpack_from("<I", raw, pos)[0]
+        pos += 4
+    flags, signal = 0, None
+    for bit, (align, size) in enumerate(((8, 8), (1, 1), (1, 1), (2, 4), (2, 2), (1, 1))):
+        if not present & (1 << bit):
+            continue
+        pos = (pos + align - 1) // align * align
+        if pos + size > length:
+            return None
+        if bit == 1:
+            flags = raw[pos]
+        elif bit == 5:
+            signal = struct.unpack_from("<b", raw, pos)[0]
+        pos += size
+    return signal, bool(flags & 0x40), length
+
+
+def monitor_frame(raw):
+    """(transmitter MAC, signal dBm) for a good frame that carries both, else None."""
+    info = radiotap_info(raw)
+    if not info or info[0] is None or info[1]:
+        return None
+    signal, _bad, off = info
+    if not -120 <= signal < 0 or len(raw) < off + 16:
+        return None
+    if (raw[off] >> 2) & 3 == 1:               # control frames mostly lack a transmitter address
+        return None
+    mac = raw[off + 10:off + 16]
+    if mac[0] & 1:                             # a transmitter is never a group address
+        return None
+    return ":".join(f"{b:02x}" for b in mac), signal
+
+
+def monitor_summary(seen, now):
+    """One second of (mac, dbm) pairs as a record the Sense page can read."""
+    per = {}
+    for mac, dbm in seen:
+        per.setdefault(mac, []).append(dbm)
+    links = sorted(per.items(), key=lambda kv: -len(kv[1]))[:MONITOR_LINKS_PER_SECOND]
+    return {
+        "t": round(now, 2),
+        "frames": len(seen),
+        "rssi": round(mean(d for _m, d in seen), 1) if seen else None,
+        "links": {m: [len(v), round(mean(v), 1)] for m, v in links},
+    }
+
+
+def _tool(name):
+    return shutil.which(name) or shutil.which(name, path="/usr/sbin:/sbin:/usr/bin:/bin")
+
+
+def _monitor_cmd(*cmd, check=True):
+    return subprocess.run(list(cmd), check=check, capture_output=True, text=True, timeout=15)
+
+
+def monitor_restore(iface):
+    """Put the radio back the way NetworkManager expects it. Safe to run any time."""
+    ip, iw = _tool("ip"), _tool("iw")
+    if iw and ip:
+        _monitor_cmd(ip, "link", "set", iface, "down", check=False)
+        _monitor_cmd(iw, "dev", iface, "set", "type", "managed", check=False)
+        _monitor_cmd(ip, "link", "set", iface, "up", check=False)
+    if _tool("nmcli"):
+        _monitor_cmd("nmcli", "device", "set", iface, "managed", "yes", check=False)
+
+
+def monitor_run(iface, channel, seconds, emit):
+    """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards."""
+    import signal
+    if os.geteuid() != 0:
+        raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-listen'.")
+    iw, ip = _tool("iw"), _tool("ip")
+    if not iw or not ip:
+        raise OSError("'iw' is not installed. Run: sudo aiov2_ctl --install   (or: sudo apt install iw)")
+    if not _IFACE_RE.match(iface) or not os.path.isdir(os.path.join(SYS_NET, iface, "wireless")):
+        raise OSError(f"{iface} is not a Wi-Fi interface on this machine.")
+    link = _monitor_cmd(iw, "dev", iface, "link", check=False).stdout
+    if "Connected to" in link:
+        raise OSError(f"{iface} is connected to a network. Disconnect it first; monitor mode would drop that connection.")
+
+    def stop(_sig, _frm):
+        raise KeyboardInterrupt
+    old = signal.signal(signal.SIGTERM, stop)
+    sock = None
+    try:
+        if _tool("nmcli"):
+            _monitor_cmd("nmcli", "device", "set", iface, "managed", "no", check=False)
+        _monitor_cmd(ip, "link", "set", iface, "down")
+        _monitor_cmd(iw, "dev", iface, "set", "type", "monitor")
+        _monitor_cmd(ip, "link", "set", iface, "up")
+        _monitor_cmd(iw, "dev", iface, "set", "channel", str(channel))
+        sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
+        sock.bind((iface, 0))
+        sock.settimeout(0.25)
+        end = time.monotonic() + seconds
+        bucket_end, seen = time.monotonic() + 1.0, []
+        while time.monotonic() < end:
+            try:
+                got = monitor_frame(sock.recv(4096))
+                if got:
+                    seen.append(got)
+            except socket.timeout:
+                pass
+            if time.monotonic() >= bucket_end:
+                emit(monitor_summary(seen, time.time()))
+                bucket_end, seen = bucket_end + 1.0, []
+    except KeyboardInterrupt:
+        pass
+    except subprocess.CalledProcessError as exc:
+        raise OSError(f"Could not set {iface} up for monitoring: {(exc.stderr or '').strip() or exc}")
+    finally:
+        if sock:
+            sock.close()
+        monitor_restore(iface)
+        signal.signal(signal.SIGTERM, old)
+
+
+def monitor_command(args):
+    usage = (
+        "Usage: aiov2_ctl --wifi-listen [--iface wlan1] [--channel 6] [--seconds 3600] [--json]   (passive, needs root)\n"
+        "       aiov2_ctl --wifi-listen --restore [--iface wlan1]                                  (put the radio back to normal)\n"
+        "Listens to the Wi-Fi traffic in the air on one channel and reports its signal strength once a second.\n"
+        "Never transmits. The radio is returned to normal mode when it stops."
+    )
+    args = list(args)
+    as_json, restore = "--json" in args, "--restore" in args
+    args = [a for a in args if a not in ("--json", "--restore")]
+    opts = {"--iface": MONITOR_IFACE, "--channel": "6", "--seconds": str(MONITOR_SECONDS)}
+    while args:
+        if args[0] not in opts or len(args) < 2:
+            print(usage)
+            return 1
+        opts[args[0]] = args[1]
+        del args[:2]
+    try:
+        channel, seconds = int(opts["--channel"]), float(opts["--seconds"])
+    except ValueError:
+        print(usage)
+        return 1
+    iface = opts["--iface"]
+    if channel not in MONITOR_CHANNELS or not 1 <= seconds <= MONITOR_SECONDS or not _IFACE_RE.match(iface):
+        print(usage)
+        return 1
+    try:
+        if restore:
+            if os.geteuid() != 0:
+                raise OSError("Restoring needs root: run it as 'sudo aiov2_ctl --wifi-listen --restore'.")
+            monitor_restore(iface)
+            print(f"{iface} put back to normal.")
+            return 0
+
+        def emit(rec):
+            if as_json:
+                print(json.dumps(rec), flush=True)
+            else:
+                print(f"{rec['frames']:4d} frames  {rec['rssi'] if rec['rssi'] is not None else '--':>6} dBm  {len(rec['links'])} senders", flush=True)
+        monitor_run(iface, channel, seconds, emit)
+        return 0
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def ensure_system_packages(say=print):
+    """Install the apt packages this program relies on, if they are missing. Never fatal."""
+    missing = [pkg for pkg, path in SYSTEM_PACKAGES.items() if not os.path.exists(path)]
+    if not missing:
+        return True
+    say(f"Installing required packages: {', '.join(missing)}\n")
+    try:
+        subprocess.check_call(["apt-get", "install", "-y", *missing])
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        say(f"Could not install {', '.join(missing)}. Run: sudo apt install {' '.join(missing)}\n")
+        return False
+
+
+
 def gauge_disagrees(summary):
     """True when the reported charge level cannot match the cell voltage."""
     cap, volts = summary.get("capacity"), summary.get("voltage")
@@ -5288,6 +5491,11 @@ def install_self():
         meta["branch"] = get_git_branch(repo) or "main"
 
     # ------------------------------
+    # Packages this program relies on
+    # ------------------------------
+    ensure_system_packages()
+
+    # ------------------------------
     # Install executable
     # ------------------------------
     print(f"Installing executable → {dst}\n")
@@ -5397,6 +5605,10 @@ def build_sudoers(user):
     # Wired network: listening is passive, the sweep is the one active command and the app asks first.
     cmds.append(f"{INSTALLED_PATH} --net listen --seconds 30 --json")
     cmds.append(f"{INSTALLED_PATH} --net sweep --yes --json")
+    # Wi-Fi monitor mode for Sense: passive, fixed radio and duration, one rule per channel.
+    for ch in MONITOR_CHANNELS:
+        cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
+    cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -5751,6 +5963,9 @@ def main():
 
     elif arg == "--net":
         sys.exit(net_command(sys.argv[2:]))
+
+    elif arg == "--wifi-listen":
+        sys.exit(monitor_command(sys.argv[2:]))
 
     elif arg == "--marauder":
         sys.exit(marauder_command(sys.argv[2:]))
