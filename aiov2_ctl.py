@@ -527,7 +527,7 @@ USAGE:
     aiov2_ctl --boot-rail <FEATURE> on|off|status
     aiov2_ctl --boot-rails-status
     aiov2_ctl --net status|neighbors|listen|sweep|ports   (wired network, passive first)
-    aiov2_ctl --wifi-monitor [--channel 6]                (passive Wi-Fi signal listening for Sense, needs root)
+    aiov2_ctl --wifi-listen [--channel 6]                (passive Wi-Fi signal listening for Sense, needs root)
   sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
@@ -4469,7 +4469,7 @@ def monitor_run(iface, channel, seconds, emit):
     """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards."""
     import signal
     if os.geteuid() != 0:
-        raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-monitor'.")
+        raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-listen'.")
     iw, ip = _tool("iw"), _tool("ip")
     if not iw or not ip:
         raise OSError("'iw' is not installed. Run: sudo aiov2_ctl --install   (or: sudo apt install iw)")
@@ -4518,8 +4518,8 @@ def monitor_run(iface, channel, seconds, emit):
 
 def monitor_command(args):
     usage = (
-        "Usage: aiov2_ctl --wifi-monitor [--iface wlan1] [--channel 6] [--seconds 3600] [--json]   (passive, needs root)\n"
-        "       aiov2_ctl --wifi-monitor --restore [--iface wlan1]                                  (put the radio back to normal)\n"
+        "Usage: aiov2_ctl --wifi-listen [--iface wlan1] [--channel 6] [--seconds 3600] [--json]   (passive, needs root)\n"
+        "       aiov2_ctl --wifi-listen --restore [--iface wlan1]                                  (put the radio back to normal)\n"
         "Listens to the Wi-Fi traffic in the air on one channel and reports its signal strength once a second.\n"
         "Never transmits. The radio is returned to normal mode when it stops."
     )
@@ -4545,7 +4545,7 @@ def monitor_command(args):
     try:
         if restore:
             if os.geteuid() != 0:
-                raise OSError("Restoring needs root: run it as 'sudo aiov2_ctl --wifi-monitor --restore'.")
+                raise OSError("Restoring needs root: run it as 'sudo aiov2_ctl --wifi-listen --restore'.")
             monitor_restore(iface)
             print(f"{iface} put back to normal.")
             return 0
@@ -5607,8 +5607,8 @@ def build_sudoers(user):
     cmds.append(f"{INSTALLED_PATH} --net sweep --yes --json")
     # Wi-Fi monitor mode for Sense: passive, fixed radio and duration, one rule per channel.
     for ch in MONITOR_CHANNELS:
-        cmds.append(f"{INSTALLED_PATH} --wifi-monitor --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
-    cmds.append(f"{INSTALLED_PATH} --wifi-monitor --restore --iface {MONITOR_IFACE}")
+        cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
+    cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -5964,7 +5964,7 @@ def main():
     elif arg == "--net":
         sys.exit(net_command(sys.argv[2:]))
 
-    elif arg == "--wifi-monitor":
+    elif arg == "--wifi-listen":
         sys.exit(monitor_command(sys.argv[2:]))
 
     elif arg == "--marauder":

@@ -141,9 +141,9 @@ class CommandTests(unittest.TestCase):
 class InstallTests(unittest.TestCase):
     def test_sudoers_has_exact_monitor_rules(self):
         text = a.build_sudoers("shane")
-        self.assertIn(f"{a.INSTALLED_PATH} --wifi-monitor --iface wlan1 --channel 6 --seconds {a.MONITOR_SECONDS} --json", text)
-        self.assertIn(f"{a.INSTALLED_PATH} --wifi-monitor --restore --iface wlan1", text)
-        self.assertNotIn("--wifi-monitor *", text)
+        self.assertIn(f"{a.INSTALLED_PATH} --wifi-listen --iface wlan1 --channel 6 --seconds {a.MONITOR_SECONDS} --json", text)
+        self.assertIn(f"{a.INSTALLED_PATH} --wifi-listen --restore --iface wlan1", text)
+        self.assertNotIn("--wifi-listen *", text)
 
     def test_install_adds_missing_packages(self):
         with mock.patch.object(a.os.path, "exists", return_value=False), \
