@@ -3053,6 +3053,90 @@ def flipper_status(port=None, as_json=False):
     return status
 
 
+# ---- Installing apps and the header pins (phase: Flipper as an extension) ---------------------------
+# Apps are .fap files, which are ELF programs that run on the Flipper. They are only ever written to
+# /ext/apps/<Category>/ on the SD card, only when the file really is an ELF, and never over an existing
+# file without --force. The header pins are limited to the ones on the Flipper's GPIO connector, and
+# driving one needs --yes because it puts a voltage on whatever is attached (the Wi-Fi board included).
+FLIPPER_APP_CATEGORIES = ("Bluetooth", "GPIO", "Games", "Infrared", "Media", "NFC", "RFID", "Sub-GHz",
+                          "Tools", "USB", "iButton", "Misc")
+FLIPPER_MAX_APP_BYTES = 8 * 1024 * 1024
+FLIPPER_GPIO_PINS = ("PA7", "PA6", "PA4", "PB3", "PB2", "PC3", "PC1", "PC0")
+FLIPPER_GPIO_HEADER = {"PA7": 2, "PA6": 3, "PA4": 4, "PB3": 5, "PB2": 6, "PC3": 7, "PC1": 15, "PC0": 16}
+FLIPPER_BUSY_TEXT = "cannot be run while an application is open"
+
+
+def flipper_check_app(local, category):
+    """(remote path, bytes) for a .fap about to be installed, or FlipperError."""
+    if category not in FLIPPER_APP_CATEGORIES:
+        raise FlipperError(f"Category must be one of: {', '.join(FLIPPER_APP_CATEGORIES)}.")
+    if not local.lower().endswith(".fap") or not os.path.isfile(local):
+        raise FlipperError(f"{local} is not a .fap file.")
+    if os.path.getsize(local) > FLIPPER_MAX_APP_BYTES:
+        raise FlipperError("That app is bigger than the 8 MiB limit.")
+    with open(local, "rb") as f:
+        data = f.read()
+    if data[:4] != b"\x7fELF":
+        raise FlipperError("That file is not a Flipper app (it is not an ELF program).")
+    name = flipper_safe_arg(os.path.basename(local))
+    return f"/ext/apps/{category}/{name}", data
+
+
+def flipper_install(cli, local, category="Tools", force=False):
+    import hashlib
+    remote, data = flipper_check_app(local, category)
+    folder = remote.rsplit("/", 1)[0]
+    with FlipperRpc(cli) as rpc:
+        if not rpc.exists(folder):
+            rpc.mkdir(folder)
+        if rpc.exists(remote) and not force:
+            raise FlipperError(f"{remote} is already there. Use --force to replace it.")
+        print(f"Installing {os.path.basename(local)} ({len(data)} bytes) to {remote}")
+        rpc.write(remote, data, _progress_printer("sent"))
+        if rpc.md5(remote) != hashlib.md5(data).hexdigest():
+            raise FlipperError("Checksum mismatch after sending. The copy on the Flipper is not trusted.")
+    print("Done. Open it on the Flipper under Apps > " + category + ".")
+    return remote
+
+
+def parse_flipper_gpio(text):
+    """0 or 1 from the Flipper's answer to 'gpio read', or None when it is not recognisable."""
+    for line in reversed([l.strip() for l in (text or "").splitlines() if l.strip()]):
+        m = re.search(r"(?:=|<=|:)\s*([01])\s*$", line) or re.search(r"(?<![\w.])([01])$", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def flipper_gpio(cli, rest, yes=False):
+    if rest and rest[0] == "list":
+        for pin in FLIPPER_GPIO_PINS:
+            print(f"{pin}  header pin {FLIPPER_GPIO_HEADER[pin]}")
+        return
+    if len(rest) < 2 or rest[1] not in FLIPPER_GPIO_PINS or rest[0] not in ("read", "set"):
+        raise FlipperError("Usage: --flipper gpio list | read PIN | set PIN 0|1 --yes. "
+                           f"Pins: {', '.join(FLIPPER_GPIO_PINS)}.")
+    pin = rest[1]
+    if rest[0] == "read":
+        out = cli.run(f"gpio mode {pin} 0")          # make it an input first, so reading is harmless
+        if FLIPPER_BUSY_TEXT in out:
+            raise FlipperError("Close the app on the Flipper (go to its home screen) before using the pins.")
+        out = cli.run(f"gpio read {pin}")
+        value = parse_flipper_gpio(out)
+        print(f"{pin} reads {value}" if value is not None else out or f"No answer for {pin}.")
+        return
+    if len(rest) != 3 or rest[2] not in ("0", "1"):
+        raise FlipperError("Usage: --flipper gpio set PIN 0|1 --yes")
+    if not yes:
+        raise FlipperError(f"Driving {pin} puts a voltage on whatever is plugged into that pin. "
+                           "Add --yes if you are sure.")
+    out = cli.run(f"gpio mode {pin} 1")
+    if FLIPPER_BUSY_TEXT in out:
+        raise FlipperError("Close the app on the Flipper (go to its home screen) before using the pins.")
+    cli.run(f"gpio set {pin} {rest[2]}")
+    print(f"{pin} is now an output set to {rest[2]}. Use 'gpio read {pin}' to turn it back into an input.")
+
+
 def flipper_command(args):
     usage = (
         "Usage: aiov2_ctl --flipper <command> [--port /dev/ttyACMx]\n"
@@ -3065,6 +3149,8 @@ def flipper_command(args):
         "  put LOCAL REMOTE [--force]   send a file to the SD card (checksum verified)\n"
         "  get REMOTE [LOCAL]    copy a file from the SD card (default: ~/aiov2-captures/flipper/)\n"
         "  mkdir REMOTE          make a folder on the SD card\n"
+        "  install APP.fap [--category Tools] [--force]   put an app in /ext/apps/<Category>\n"
+        "  gpio list | read PIN | set PIN 0|1 --yes       the Flipper's header pins (home screen only)\n"
         "Transfers only touch /ext (the SD card), never overwrite without --force "
         "and never overwrite local files."
     )
@@ -3080,6 +3166,17 @@ def flipper_command(args):
     force = "--force" in args
     if force:
         args.remove("--force")
+    yes = "--yes" in args
+    if yes:
+        args.remove("--yes")
+    category = "Tools"
+    if "--category" in args:
+        i = args.index("--category")
+        if i + 1 >= len(args):
+            print(usage)
+            return 1
+        category = args[i + 1]
+        del args[i:i + 2]
 
     as_json = "--json" in args
     if as_json:
@@ -3107,7 +3204,7 @@ def flipper_command(args):
             return 1
         del args[i:i + 2]
     arity = {"screen": (0, 0), "status": (0, 0), "info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
-             "put": (2, 2), "get": (1, 2), "mkdir": (1, 1)}
+             "put": (2, 2), "get": (1, 2), "mkdir": (1, 1), "install": (1, 1), "gpio": (1, 3)}
     if not args or args[0] not in arity:
         print(usage)
         return 1
@@ -3128,6 +3225,12 @@ def flipper_command(args):
         with FlipperCli(_flipper_port(port)) as cli:
             if sub in ("put", "get", "mkdir"):
                 flipper_transfer(cli, sub, rest, force)
+                return 0
+            if sub == "install":
+                flipper_install(cli, rest[0], category, force)
+                return 0
+            if sub == "gpio":
+                flipper_gpio(cli, rest, yes)
                 return 0
             if sub == "screen":
                 flipper_screen(cli, seconds if live else 5.0, live, png_path)
