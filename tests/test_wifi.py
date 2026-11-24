@@ -257,5 +257,20 @@ class FlipperBoardRadioTests(unittest.TestCase):
             self.assertEqual(a.wifi_command(["radios", "--json"]), 0)
         self.assertEqual([r["name"] for r in json.loads(out.getvalue())["radios"]], ["flipper-marauder"])
 
+class MarauderOpenTests(unittest.TestCase):
+    def test_open_never_waits_for_output_to_drain(self):
+        seen = []
+        with mock.patch.object(a.os, "open", return_value=99), \
+                mock.patch.object(a.tty, "setraw", side_effect=lambda fd, when=None: seen.append(when)), \
+                mock.patch.object(a.termios, "tcgetattr", return_value=[0] * 7), \
+                mock.patch.object(a.termios, "tcsetattr"), \
+                mock.patch.object(a.fcntl, "ioctl"), \
+                mock.patch.object(a.os, "close"):
+            ser = a.MarauderSerial("/dev/null")
+            ser.open()
+            ser.close()
+        self.assertEqual(seen, [a.termios.TCSANOW])
+
+
 if __name__ == "__main__":
     unittest.main()

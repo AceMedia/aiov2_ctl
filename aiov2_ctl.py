@@ -3163,7 +3163,9 @@ class MarauderSerial:
         except OSError as exc:
             raise MarauderError(f"Could not open {self.path}: {exc}")
         try:
-            tty.setraw(self.fd)
+            # TCSANOW: the default (TCSAFLUSH) waits for queued output to drain and can block
+            # forever when the board is not reading, which hung --wifi radios.
+            tty.setraw(self.fd, termios.TCSANOW)
             attrs = termios.tcgetattr(self.fd)
             attrs[4] = attrs[5] = MARAUDER_BAUD  # ispeed, ospeed
             termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
