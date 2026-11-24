@@ -4693,11 +4693,20 @@ def security_of(capability, ies):
 
 def parse_dot11(raw, off):
     """What a frame says about who is around, or None. Never reads past the header unless it must."""
-    if len(raw) < off + 24:
+    if len(raw) < off + 16:
         return None
     fc0, fc1 = raw[off], raw[off + 1]
     ftype, sub = (fc0 >> 2) & 3, fc0 >> 4
-    a1, a2, a3 = raw[off + 4:off + 10], raw[off + 10:off + 16], raw[off + 16:off + 22]
+    a1, a2 = raw[off + 4:off + 10], raw[off + 10:off + 16]
+    if ftype == 1:
+        # Request to send, block ack and block ack request name both ends. Which one is the access point is
+        # decided later, from the access points already heard.
+        if sub in (8, 9, 11) and not a1[0] & 1 and not a2[0] & 1:
+            return {"kind": "pair", "a": _mac(a1), "b": _mac(a2)}
+        return None
+    if len(raw) < off + 24:
+        return None
+    a3 = raw[off + 16:off + 22]
     if ftype == 0:
         kind = _SURVEY_SUBTYPES.get(sub)
         if kind in ("beacon", "proberesp"):
@@ -4716,6 +4725,13 @@ def parse_dot11(raw, off):
             return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else ""}
         if kind in ("deauth", "disassoc"):
             return {"kind": kind, "src": _mac(a2), "dst": _mac(a1), "bssid": _mac(a3)}
+        if sub in (0, 1, 2, 3, 11, 13) and not a1[0] & 1 and not a2[0] & 1 and not a3[0] & 1:
+            # Association, reassociation, authentication and action frames: whichever end is the BSSID is the
+            # access point, the other is a device talking to it.
+            if a3 == a2:
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a1)}
+            if a3 == a1:
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a2)}
         return None
     if ftype == 2:
         to_ds, from_ds = bool(fc1 & 1), bool(fc1 & 2)
@@ -4748,6 +4764,14 @@ class Survey:
         if not info or signal is None or not -120 <= signal < 0:
             return info
         kind = info["kind"]
+        if kind == "pair":
+            if info["a"] in self.aps:
+                info = {"kind": "data", "bssid": info["a"], "sta": info["b"]}
+            elif info["b"] in self.aps:
+                info = {"kind": "data", "bssid": info["b"], "sta": info["a"]}
+            else:
+                return info
+            kind = "data"
         if kind in ("beacon", "proberesp"):
             ap = self.aps.setdefault(info["bssid"], {"first": now, "beacons": 0, "ssid": "", "rssi": float(signal)})
             ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
@@ -4791,7 +4815,8 @@ class Survey:
                      "last": round(a["last"], 1)} for b, a in aps],
             "stations": [{"mac": m, "bssid": s["bssid"], "rssi": round(s["rssi"], 1), "frames": s["frames"],
                           "last": round(s["last"], 1)} for m, s in stas],
-            "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1)} for m, p in probes],
+            "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1),
+                        "last": round(p["last"], 1)} for m, p in probes],
             "deauth": sorted(floods, key=lambda f: -f["frames"]),
             "channels": {str(c): v for c, v in sorted(self.channels.items())},
         }
