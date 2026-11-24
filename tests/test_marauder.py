@@ -4,6 +4,7 @@ Tests for the passive Marauder wrapper, using a fake board on a pty.
     python3 -m unittest discover -s tests
 """
 import io
+import json
 import os
 import stat
 import sys
@@ -133,6 +134,40 @@ class MarauderCommandTests(unittest.TestCase):
         rc, out = self.run_cmd("list")
         self.assertEqual(rc, 0)
         self.assertIn("HomeNet", out)
+
+
+    def test_every_scan_mode_is_passive_and_starts_its_own_command(self):
+        for mode, command in a.MARAUDER_SCAN_MODES.items():
+            self.assertNotIn(command, a.MARAUDER_REFUSED)
+            self.assertNotIn(mode, a.MARAUDER_REFUSED)
+            self.assertTrue(command.startswith(("scan", "sniff", "packetcount", "csimotion")), command)
+            self.assertNotIn(" ", command)
+        rc, _ = self.run_cmd("scan", "probe", "--seconds", "1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.fake.received[0], "sniffprobe")
+        self.assertIn("stopscan", self.fake.received)
+
+    def test_modes_listing(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(a.marauder_command(["modes", "--json"]), 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual({d["mode"] for d in data}, set(a.MARAUDER_MODE_INFO))
+        self.assertTrue(all(d["listens_for"] for d in data))
+
+    def test_refused_commands_say_why_and_never_reach_the_board(self):
+        before = len(self.fake.received)
+        for cmd in (("attack",), ("sniffpmkid",), ("scan", "evilportal"), ("blespam",), ("beaconspam",), ("deauth",)):
+            rc, out = self.run_cmd(*cmd)
+            self.assertEqual(rc, 1, cmd)
+            self.assertIn("only listens", out)
+        time.sleep(0.2)
+        self.assertEqual(len(self.fake.received), before)
+
+    def test_list_ssids(self):
+        rc, _ = self.run_cmd("list", "ssids")
+        self.assertEqual(rc, 0)
+        self.assertIn("list -s", self.fake.received)
 
     def test_bad_seconds(self):
         rc, out = self.run_cmd("scan", "--seconds", "0")
