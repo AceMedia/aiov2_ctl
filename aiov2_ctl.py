@@ -4486,17 +4486,34 @@ def monitor_frame(raw):
     return ":".join(f"{b:02x}" for b in mac), signal
 
 
+MONITOR_READINGS_PER_LINK = 40
+
+
 def monitor_summary(seen, now):
-    """One second of (mac, dbm) pairs as a record the Sense page can read."""
-    per = {}
-    for mac, dbm in seen:
+    """One second of readings as a record the Sense page can read.
+
+    `seen` holds (mac, dbm) pairs, or (mac, dbm, time) triples. With times, each sender also gets its individual
+    readings as [seconds before the end of the record, dbm], so Sense can follow the signal frame by frame."""
+    per, timed = {}, {}
+    for item in seen:
+        mac, dbm = item[0], item[1]
         per.setdefault(mac, []).append(dbm)
+        if len(item) > 2:
+            timed.setdefault(mac, []).append([round(item[2] - now, 2), dbm])
     links = sorted(per.items(), key=lambda kv: -len(kv[1]))[:MONITOR_LINKS_PER_SECOND]
+    out = {}
+    for m, v in links:
+        entry = [len(v), round(mean(v), 1)]
+        if m in timed:
+            readings = timed[m]
+            step = max(1, len(readings) // MONITOR_READINGS_PER_LINK)
+            entry.append(readings[::step][:MONITOR_READINGS_PER_LINK])
+        out[m] = entry
     return {
         "t": round(now, 2),
         "frames": len(seen),
-        "rssi": round(mean(d for _m, d in seen), 1) if seen else None,
-        "links": {m: [len(v), round(mean(v), 1)] for m, v in links},
+        "rssi": round(mean(item[1] for item in seen), 1) if seen else None,
+        "links": out,
     }
 
 
@@ -4565,7 +4582,7 @@ def monitor_run(iface, channel, seconds, emit):
             try:
                 got = monitor_frame(sock.recv(4096))
                 if got:
-                    seen.append(got)
+                    seen.append(got + (time.time(),))
             except socket.timeout:
                 pass
             if time.monotonic() >= bucket_end:
