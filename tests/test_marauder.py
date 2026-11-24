@@ -140,12 +140,24 @@ class MarauderCommandTests(unittest.TestCase):
         for mode, command in a.MARAUDER_SCAN_MODES.items():
             self.assertNotIn(command, a.MARAUDER_REFUSED)
             self.assertNotIn(mode, a.MARAUDER_REFUSED)
-            self.assertTrue(command.startswith(("scan", "sniff", "packetcount", "csimotion")), command)
-            self.assertNotIn(" ", command)
+            self.assertTrue(command.startswith(("scan", "sniff", "packetcount", "remoteid scan")), command)
+            self.assertNotIn(";", command)
         rc, _ = self.run_cmd("scan", "probe", "--seconds", "1")
         self.assertEqual(rc, 0)
         self.assertEqual(self.fake.received[0], "sniffprobe")
         self.assertIn("stopscan", self.fake.received)
+
+    def test_a_board_without_bluetooth_says_so_and_still_stops(self):
+        sent = []
+        ser = mock.Mock()
+        ser.send.side_effect = sent.append
+        ser.read_lines.return_value = ["Bluetooth not supported"]
+        log = a.MarauderLog(self.logdir.name)
+        with self.assertRaises(a.MarauderError) as ctx:
+            a.marauder_scan(ser, "bt", 5, log, say=lambda s: None)
+        log.close()
+        self.assertIn("no Bluetooth", str(ctx.exception))
+        self.assertEqual(sent, ["sniffbt", "stopscan"])
 
     def test_modes_listing(self):
         out = io.StringIO()
@@ -157,7 +169,7 @@ class MarauderCommandTests(unittest.TestCase):
 
     def test_refused_commands_say_why_and_never_reach_the_board(self):
         before = len(self.fake.received)
-        for cmd in (("attack",), ("sniffpmkid",), ("scan", "evilportal"), ("blespam",), ("beaconspam",), ("deauth",)):
+        for cmd in (("attack",), ("sniffpmkid",), ("scan", "evilportal"), ("blespam",), ("beaconspam",), ("deauth",), ("sniffsae",)):
             rc, out = self.run_cmd(*cmd)
             self.assertEqual(rc, 1, cmd)
             self.assertIn("only listens", out)
