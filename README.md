@@ -41,6 +41,7 @@ From a checkout, or once it is installed, the same installer is:
 aiov2_ctl --features                       # what can be installed, what is on by default, what is here now
 aiov2_ctl --install --dry-run              # the plan, in plain words; changes nothing and needs no root
 sudo aiov2_ctl --install --pick            # tick the features you want on screen, then see the plan
+aiov2_ctl --installer                      # the same as a window; run it as yourself, it asks for root when it installs
 sudo aiov2_ctl --repair                    # go over what is installed and put back what is missing
 sudo aiov2_ctl --uninstall --only flipper  # remove one feature, and whatever cannot work without it
 sudo aiov2_ctl --uninstall                 # remove everything this tool installed
