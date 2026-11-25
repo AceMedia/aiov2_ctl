@@ -2410,7 +2410,7 @@ class Telemetry:
         gauge = cap
         estimate = percent_from_voltage(viw["voltage"], cur)
         source = "gauge"
-        if gauge_unbelievable(gauge, estimate):
+        if gauge_unbelievable(gauge, estimate, amps=cur):
             cap, source = estimate, "voltage"
         full_wh = Telemetry._read_int(f"/sys/class/power_supply/{BATTERY_SUPPLY}/energy_full_design")
 
@@ -5688,11 +5688,21 @@ def percent_from_voltage(volts, amps=0.0, resistance=CELL_RESISTANCE):
     return 100
 
 
-def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE):
-    """True when the gauge's percentage is further from what the voltage says than a rough curve can explain."""
+FULL_GAUGE = 99                      # a gauge at or above this is saying "full"
+FULL_CHARGE_AMPS = 0.3               # a battery that really is full takes less charge than this
+
+
+def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE, amps=0.0):
+    """True when the gauge's percentage cannot be right. Two tests. One: it is further from what the voltage
+    says than a rough curve can explain. Two: it says full while the battery is still taking a real charging
+    current (`amps`, positive while charging). The second is needed because a charger lifts the cell voltage:
+    the stuck gauge on this board read 100% at a real 56%, and once on charge the voltage's story rose to
+    within the first test's tolerance and the 100% was believed again."""
     if gauge is None or estimate is None:
         return False
-    return abs(gauge - estimate) >= tolerance
+    if abs(gauge - estimate) >= tolerance:
+        return True
+    return gauge >= FULL_GAUGE and isinstance(amps, (int, float)) and amps >= FULL_CHARGE_AMPS and estimate < gauge
 
 
 def capacity_text(summary):
