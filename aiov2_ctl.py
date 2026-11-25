@@ -5695,6 +5695,30 @@ def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE):
     return abs(gauge - estimate) >= tolerance
 
 
+def capacity_text(summary):
+    """The percentage as --status prints it: '45%', or '~45% (estimated ...)' when it is not the gauge's."""
+    cap = summary.get("capacity")
+    if summary.get("capacity_source") == "voltage":
+        return f"~{cap}% (estimated from the cell voltage)"
+    return f"{cap}%"
+
+
+def gauge_warning_text(summary):
+    """What to say when the gauge cannot be believed, or '' when it can. Two different cases. When the
+    percentage shown is already our estimate, the sentence is about the gauge being stuck. Otherwise it is the
+    older case of a high percentage on a very low cell, which points at the battery itself."""
+    if summary.get("capacity_source") == "voltage":
+        return (f"the battery gauge says {summary.get('capacity_gauge')}%, which the cell voltage "
+                f"({summary.get('voltage')} V) rules out. The percentage above is worked out from the voltage "
+                "instead and is rough, good to about ten percent. The gauge needs calibrating: one full "
+                "charge, a full discharge, and a full charge again.")
+    if gauge_disagrees(summary):
+        return (f"the gauge says {summary.get('capacity')}% but the battery is at {summary.get('voltage')} V. "
+                "A full cell reads about 4.2 V, so one cell may be flat or not making contact. "
+                "Check the battery before running on battery power.")
+    return ""
+
+
 def gauge_disagrees(summary):
     """True when the reported charge level cannot match the cell voltage."""
     if summary.get("capacity_source") == "voltage":
@@ -5749,16 +5773,15 @@ def show_status():
 
     print(f"Source    : {summary['source']}")
     print(f"Status    : {summary['status']}")
-    print(f"Capacity  : {summary['capacity']}%")
+    print(f"Capacity  : {capacity_text(summary)}")
     print(f"Direction : {summary['direction']}")
     print(f"Mode      : {summary['mode']}")
     print(f"Voltage   : {summary['voltage']} V")
     print(f"Current   : {summary['current']} A")
     print(f"Power     : {summary['power']} W")
-    if gauge_disagrees(summary):
-        print(f"Warning   : the gauge says {summary['capacity']}% but the battery is at "
-              f"{summary['voltage']} V. A full cell reads about 4.2 V, so one cell may be flat "
-              "or not making contact. Check the battery before running on battery power.")
+    warning = gauge_warning_text(summary)
+    if warning:
+        print(f"Warning   : {warning}")
     if ignored:
         print(f"Gauge     : {ignored} of {taken} readings ignored as implausible. "
               "If this keeps happening, check the battery contacts.")
