@@ -2404,10 +2404,23 @@ class Telemetry:
         else:
             mode = "Battery powering system"
 
+        # The AXP gauge on this board has been seen stuck at 100% ("full") for a whole hour of discharging at
+        # 8 W, with the cell at 3.65 V. A percentage the voltage says cannot be true is not passed on: an
+        # estimate from the voltage is given instead, and marked as one.
+        gauge = cap
+        estimate = percent_from_voltage(viw["voltage"], cur)
+        source = "gauge"
+        if gauge_unbelievable(gauge, estimate):
+            cap, source = estimate, "voltage"
+        full_wh = Telemetry._read_int(f"/sys/class/power_supply/{BATTERY_SUPPLY}/energy_full_design")
+
         return {
             "source": "AC" if ac else "BAT",
             "status": status,
             "capacity": cap,
+            "capacity_source": source,
+            "capacity_gauge": gauge,
+            "energy_full_wh": round(full_wh / 1e6, 2) if full_wh and full_wh > 0 else None,
             "direction": direction,
             "mode": mode,
             "voltage": viw["voltage"],
@@ -5654,8 +5667,38 @@ def ensure_system_packages(say=print):
 
 
 
+# Resting voltage of a lithium-ion cell against how full it is. Rough by nature: good to ten percent or so.
+CELL_CURVE = ((3.00, 0), (3.30, 2), (3.50, 6), (3.60, 12), (3.65, 20), (3.70, 30), (3.75, 40), (3.80, 50),
+              (3.87, 60), (3.92, 70), (4.00, 80), (4.10, 90), (4.20, 100))
+CELL_RESISTANCE = 0.07               # ohms, the pack and its wiring: how far the voltage sags per amp drawn
+GAUGE_TOLERANCE = 30                 # percent the gauge may differ from the voltage's story before it is doubted
+
+
+def percent_from_voltage(volts, amps=0.0, resistance=CELL_RESISTANCE):
+    """About how full the cell is, from its voltage. `amps` is positive while charging and negative while
+    discharging; the voltage is corrected for the sag (or lift) that current causes. None with no reading."""
+    if not isinstance(volts, (int, float)) or volts <= 0:
+        return None
+    rest = volts - (amps or 0.0) * resistance
+    if rest <= CELL_CURVE[0][0]:
+        return 0
+    for (v0, p0), (v1, p1) in zip(CELL_CURVE, CELL_CURVE[1:]):
+        if rest <= v1:
+            return int(round(p0 + (p1 - p0) * (rest - v0) / (v1 - v0)))
+    return 100
+
+
+def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE):
+    """True when the gauge's percentage is further from what the voltage says than a rough curve can explain."""
+    if gauge is None or estimate is None:
+        return False
+    return abs(gauge - estimate) >= tolerance
+
+
 def gauge_disagrees(summary):
     """True when the reported charge level cannot match the cell voltage."""
+    if summary.get("capacity_source") == "voltage":
+        return True
     cap, volts = summary.get("capacity"), summary.get("voltage")
     return cap is not None and volts is not None and cap >= 90 and volts < 3.3
 
