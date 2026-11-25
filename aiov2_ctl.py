@@ -1942,6 +1942,98 @@ def mark_rails_changed(path=None, uid=None, now=None):
         return False
 
 
+STATUS_SHARE_SECONDS = 2.0          # how long one reading of the hardware serves everyone who asks
+MENU_OPEN_LIMIT = 60.0              # a tray menu "open" for longer than this is taken to have closed unseen
+
+
+def status_cache_path(environ=None, uid=None):
+    """Where the last full status reading is kept, beside the rails mark."""
+    return rails_stamp_path(environ, uid)[:-len(".rails")] + ".status.json"
+
+
+def status_cache_fresh(written, now, mark_time, max_age):
+    """True when a reading taken at `written` can still be used at `now`: it is no older than `max_age`, it is
+    not from the future, and no rail has been switched since it was taken (`mark_time` is when the rails mark
+    last changed, or None when there is no mark)."""
+    if written is None or max_age <= 0:
+        return False
+    if not 0 <= now - written <= max_age:
+        return False
+    return mark_time is None or mark_time <= written
+
+
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def read_shared_status(max_age=STATUS_SHARE_SECONDS, now=None, path=None, mark=None):
+    """The last full status reading, if someone took one recently enough; otherwise None."""
+    path = path or status_cache_path()
+    try:
+        with open(path) as f:
+            kept = json.load(f)
+        written, status = kept.get("written"), kept.get("status")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(status, dict) or "rails" not in status or not isinstance(written, (int, float)):
+        return None
+    now = time.time() if now is None else now
+    mark_time = _mtime(mark or rails_stamp_path())
+    return status if status_cache_fresh(written, now, mark_time, max_age) else None
+
+
+def write_shared_status(status, now=None, path=None):
+    """Keep a reading for the others. Private to the user, moved into place whole. Never raises."""
+    try:
+        path = path or status_cache_path()
+        tmp = f"{path}.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"written": time.time() if now is None else now, "status": status}, f)
+        if os.geteuid() == 0:
+            sudo_uid = os.environ.get("SUDO_UID", "")
+            if sudo_uid.isdigit():
+                os.chown(tmp, int(sudo_uid), -1)
+        os.replace(tmp, path)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def shared_status(max_age=STATUS_SHARE_SECONDS, build=None, now=None, path=None, mark=None):
+    """The status of the board, for the tray, the command line and the ops app alike. If one of them read the
+    hardware within `max_age` seconds and no rail has been switched since, that reading is handed out again;
+    otherwise the hardware is read once (status_data) and the reading kept for the others. max_age 0 always
+    reads the hardware."""
+    kept = read_shared_status(max_age, now, path, mark) if max_age > 0 else None
+    if kept is not None:
+        return kept
+    stamp = time.time() if now is None else now      # taken before reading: a switch during the read outdates it
+    status = (build or status_data)()
+    write_shared_status(status, stamp, path)
+    return status
+
+
+def menu_counts_as_open(active, opened_at, now, limit=MENU_OPEN_LIMIT):
+    """Whether the tray menu should still be treated as open. Some desktops never tell the tray its menu closed,
+    which left the tray reading the hardware every second for hours; an "open" menu is believed for a minute."""
+    return bool(active) and opened_at is not None and 0 <= now - opened_at <= limit
+
+
+def status_max_age(args):
+    """The --max-age SECONDS given with --status, or 0 (always read the hardware) when absent or not a number."""
+    if "--max-age" in args:
+        at = args.index("--max-age")
+        try:
+            return max(0.0, float(args[at + 1]))
+        except (IndexError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def ops_shortcut_dir(environ=None):
     env = os.environ if environ is None else environ
     base = env.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
@@ -6120,8 +6212,10 @@ def run_gui():
     menu.addSeparator()
     menu.addAction("Quit", app.quit)
     menu_active = [False]
+    menu_opened_at = [None]
     def on_menu_show():
         menu_active[0] = True
+        menu_opened_at[0] = time.monotonic()
         refresh(force=True)
     def on_menu_hide():
         menu_active[0] = False
@@ -6170,10 +6264,12 @@ def run_gui():
         refresh()
 
     def refresh(force=False):
-        visible = window.isVisible() or menu_active[0]
+        visible = window.isVisible() or menu_counts_as_open(menu_active[0], menu_opened_at[0], time.monotonic())
         if not force and not visible:
             return
-        summary = Telemetry.power_summary()
+        # one reading of the board, shared with the command line and the ops app
+        status = shared_status(0 if force else STATUS_SHARE_SECONDS)
+        summary = status.get("power")
         rails_on_boot = get_rails_on_boot_config(system_only=True)
         if summary:
             power_label.setText(
@@ -6184,11 +6280,11 @@ def run_gui():
             power_label.setText("Power: n/a")
             power_action.setText("Power: n/a")
 
-        companion_action.setText(companions_summary_line(detect_companions()))
+        companion_action.setText(companions_summary_line(status.get("companions") or []))
 
         rail_on = {}
         for f, p in GPIO_MAP.items():
-            state = GpioController.get_gpio(p)
+            state = (status.get("rails") or {}).get(f) == "on"
             rail_on[f] = bool(state)
 
             checkboxes[f].blockSignals(True)
@@ -6775,7 +6871,7 @@ def main():
 
     elif arg == "--status":
         if "--json" in sys.argv[2:]:
-            print(json.dumps(status_data(), indent=2))
+            print(json.dumps(shared_status(status_max_age(sys.argv[2:])), indent=2))
         else:
             show_status()
 
