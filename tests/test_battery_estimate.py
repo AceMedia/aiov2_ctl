@@ -71,5 +71,28 @@ class StuckGaugeTests(unittest.TestCase):
         self.assertFalse(a.gauge_disagrees(s))
 
 
+class StatusWordingTests(unittest.TestCase):
+    EST = {"capacity": 45, "capacity_source": "voltage", "capacity_gauge": 100, "voltage": 3.81}
+    REAL = {"capacity": 62, "capacity_source": "gauge", "capacity_gauge": 62, "voltage": 3.9}
+    FLAT = {"capacity": 95, "capacity_source": "gauge", "capacity_gauge": 95, "voltage": 3.1}
+
+    def test_an_estimate_is_printed_as_one(self):
+        self.assertEqual(a.capacity_text(self.EST), "~45% (estimated from the cell voltage)")
+        self.assertEqual(a.capacity_text(self.REAL), "62%")
+
+    def test_the_warning_for_an_estimate_is_about_the_gauge_not_a_flat_cell(self):
+        text = a.gauge_warning_text(self.EST)
+        self.assertIn("gauge says 100%", text)
+        self.assertIn("calibrating", text)
+        self.assertNotIn("flat", text)
+        self.assertNotIn("says 45%", text)                 # it must not quote our own estimate as the gauge's
+
+    def test_a_believable_gauge_gets_no_warning(self):
+        self.assertEqual(a.gauge_warning_text(self.REAL), "")
+
+    def test_a_high_percentage_on_a_very_low_cell_still_points_at_the_battery(self):
+        self.assertIn("flat", a.gauge_warning_text(self.FLAT))
+
+
 if __name__ == "__main__":
     unittest.main()
