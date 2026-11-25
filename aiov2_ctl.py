@@ -2157,15 +2157,10 @@ class GpioController:
 
     @staticmethod
     def _service_enabled(name):
+        # Any user may ask this, so it is asked once and plainly. It used to be asked again under sudo when the
+        # answer was no, which only repeated the answer and wrote a line in the journal each time.
         cmd = ["systemctl", "is-enabled", name]
-        if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-            return True
-
-        return subprocess.run(
-            ["sudo", "-n", *cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode == 0
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
     @staticmethod
     def _service_installed(name):
@@ -4750,8 +4745,26 @@ def monitor_restore(iface):
         _monitor_cmd("nmcli", "device", "set", iface, "managed", "yes", check=False)
 
 
+_RADIO_OWNED = {}                    # iface -> lock held by this process for as long as it listens
+
+
+def own_radio(iface, acquire=None):
+    """Make this process the one listener on a radio, or refuse. Survey and Sense both put the internal radio
+    into monitor mode; two at once fought over its channel and one's clean-up pulled the radio from under the
+    other. The claim is a lock held until this process ends, however it ends, so a crash never leaves the radio
+    claimed."""
+    if iface in _RADIO_OWNED:
+        return _RADIO_OWNED[iface]
+    try:
+        _RADIO_OWNED[iface] = (acquire or acquire_device_lock)(f"radio-{iface}", wait=0)
+    except DeviceBusy:
+        raise OSError(f"{iface} is already listening for something else (Survey or Sense). Stop that first.")
+    return _RADIO_OWNED[iface]
+
+
 def monitor_check(iface):
-    """Refuse before touching anything: needs iw, a real Wi-Fi interface, and one that is not connected."""
+    """Refuse before touching anything: needs iw, a real Wi-Fi interface, one that is not connected, and one
+    that nothing else is already listening on."""
     iw, ip = _tool("iw"), _tool("ip")
     if not iw or not ip:
         raise OSError("'iw' is not installed. Run: sudo aiov2_ctl --install   (or: sudo apt install iw)")
@@ -4760,6 +4773,7 @@ def monitor_check(iface):
     link = _monitor_cmd(iw, "dev", iface, "link", check=False).stdout
     if "Connected to" in link:
         raise OSError(f"{iface} is connected to a network. Disconnect it first; monitor mode would drop that connection.")
+    own_radio(iface)
 
 
 def monitor_setup(iface, channel):
