@@ -33,7 +33,7 @@ curl -fsSLO https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/install.sh
 sh install.sh
 ```
 
-`install.sh` downloads `aiov2_ctl.py` from this repository, checks it is a whole Python file, says what it is about to run, and then runs `sudo python3 aiov2_ctl.py --install --all`. Anything you put after `sh install.sh` is passed on to `--install` in place of `--all`.
+`install.sh` clones this repository into `~/aiov2_ctl-ace` (or updates the checkout an earlier install used), checks `aiov2_ctl.py` is a whole Python file, says what it is about to run, and then runs `sudo python3 aiov2_ctl.py --install --all`. The checkout is where the tray's icons come from and what `aiov2_ctl --update` pulls. A folder that is some other project, or a checkout with your own changes, is never changed. Without `git`, or if the clone fails, it downloads the one program file instead. Anything you put after `sh install.sh` is passed on to `--install` in place of `--all`.
 
 From a checkout, or once it is installed, the same installer is:
 
@@ -69,7 +69,7 @@ What it does and does not do:
 - The ops app lives in the home of the user who ran `sudo`, and every `git` and `python3` command in that home runs as that user, never as root. An existing checkout is updated with `git pull --ff-only`; one with your own changes, or one that has gone its own way, is reported and left alone.
 - The ops app repository is private. If the clone is refused, sign in with `gh auth login` (then `gh auth setup-git`), or clone it by hand to `~/ops-agentic`, and run the install again.
 - The console's remaining Python packages (`meshtastic`, and `textual` or `numpy` where apt does not have them) are installed by the console itself on its first run, as you. The installer never runs pip as root.
-- Installing through `install.sh` leaves no git checkout of this tool behind, so `aiov2_ctl --update` has nothing to pull from; run `install.sh` again to update, or install from a clone as in section 2.
+- If `install.sh` had to fall back to downloading the one program file (no `git`, or the clone failed), there is no checkout of this tool: the tray uses a stock icon and `aiov2_ctl --update` has nothing to pull from. Install `git` and run `install.sh` again.
 
 ---
 
