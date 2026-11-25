@@ -1924,19 +1924,77 @@ def rails_stamp_path(environ=None, uid=None):
     return os.path.join(base, "aiov2_ctl.rails") if os.path.isdir(base) else f"/tmp/aiov2_ctl-{uid}.rails"
 
 
+def shared_owner_uid(environ=None, euid=None):
+    """Whose files the mark and the kept status are: the user who ran sudo, otherwise whoever is running this."""
+    env = os.environ if environ is None else environ
+    euid = os.geteuid() if euid is None else euid
+    sudo_uid = env.get("SUDO_UID", "")
+    return int(sudo_uid) if euid == 0 and sudo_uid.isdigit() else euid
+
+
+def folder_is_private(st, uid):
+    """True for a real folder that belongs to `uid` and that nobody else can write into. Only there is it safe
+    for root to leave a file for that user: anywhere else someone could have put a trap in the way."""
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == uid and not stat.S_IMODE(st.st_mode) & 0o022
+
+
+def write_private_file(path, text, uid=None):
+    """Write `text` to `path` whole, for the user `uid`, without ever trusting a name in that folder.
+
+    This may run as root (sudo) writing into the calling user's folder. The old way wrote to a name that could be
+    guessed and then changed its owner by name, so a link planted under that name made root empty, and hand over,
+    some other file. Now: the folder is opened once and must be a real folder owned by that user and writable by
+    nobody else; the temporary file gets a random name and is only ever created new (never opened through a
+    link); its owner is changed through the open file, not its name; and it is moved over the real name inside
+    that same opened folder. Anything going wrong removes the temporary file. Raises OSError when refused."""
+    uid = shared_owner_uid() if uid is None else uid
+    folder, name = os.path.split(path)
+    if not name:
+        raise OSError("no file name")
+    dfd = os.open(folder or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if not folder_is_private(os.fstat(dfd), uid):
+            raise OSError(f"{folder} is not a private folder of user {uid}")
+        tmp = f".{name}.{os.urandom(8).hex()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        try:
+            try:
+                if os.geteuid() == 0 and uid != 0:
+                    os.fchown(fd, uid, -1)
+                os.write(fd, text.encode())
+            finally:
+                os.close(fd)
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dfd)
+
+
+def read_private_file(path, uid=None, limit=1 << 20):
+    """The text of `path`, only if it is an ordinary file (not a link, not a pipe) that belongs to `uid` or to
+    root and that nobody else can write. Raises OSError otherwise."""
+    uid = shared_owner_uid() if uid is None else uid
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid not in (uid, 0) or stat.S_IMODE(st.st_mode) & 0o022:
+            raise OSError(f"{path} is not a private file of user {uid}")
+        return os.read(fd, limit).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
 def mark_rails_changed(path=None, uid=None, now=None):
     """Leave the mark. Written beside and moved into place, so a watcher never sees half a file and a mark left
     by root can be replaced by the user. Never raises: failing to tell the others must not stop a rail switching."""
     try:
         path = path or rails_stamp_path(uid=uid)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            f.write(f"{time.time() if now is None else now:.3f}\n")
-        if os.geteuid() == 0:
-            sudo_uid = os.environ.get("SUDO_UID", "")
-            if sudo_uid.isdigit():
-                os.chown(tmp, int(sudo_uid), -1)
-        os.replace(tmp, path)
+        write_private_file(path, f"{time.time() if now is None else now:.3f}\n")
         return True
     except (OSError, ValueError):
         return False
@@ -1973,8 +2031,7 @@ def read_shared_status(max_age=STATUS_SHARE_SECONDS, now=None, path=None, mark=N
     """The last full status reading, if someone took one recently enough; otherwise None."""
     path = path or status_cache_path()
     try:
-        with open(path) as f:
-            kept = json.load(f)
+        kept = json.loads(read_private_file(path))     # never a link, never someone else's file
         written, status = kept.get("written"), kept.get("status")
     except (OSError, ValueError, AttributeError):
         return None
@@ -1989,15 +2046,7 @@ def write_shared_status(status, now=None, path=None):
     """Keep a reading for the others. Private to the user, moved into place whole. Never raises."""
     try:
         path = path or status_cache_path()
-        tmp = f"{path}.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump({"written": time.time() if now is None else now, "status": status}, f)
-        if os.geteuid() == 0:
-            sudo_uid = os.environ.get("SUDO_UID", "")
-            if sudo_uid.isdigit():
-                os.chown(tmp, int(sudo_uid), -1)
-        os.replace(tmp, path)
+        write_private_file(path, json.dumps({"written": time.time() if now is None else now, "status": status}))
         return True
     except (OSError, TypeError, ValueError):
         return False
@@ -2012,8 +2061,13 @@ def shared_status(max_age=STATUS_SHARE_SECONDS, build=None, now=None, path=None,
     if kept is not None:
         return kept
     stamp = time.time() if now is None else now      # taken before reading: a switch during the read outdates it
+    mark = mark or rails_stamp_path()
+    before = _mtime(mark)
     status = (build or status_data)()
-    write_shared_status(status, stamp, path)
+    # A rail switched while the board was being read: this reading may show it either way. The one who asked
+    # still gets it, but it is not kept for the others, so the next one to ask reads the board again.
+    if _mtime(mark) == before:
+        write_shared_status(status, stamp, path)
     return status
 
 
@@ -4638,7 +4692,9 @@ def net_command(args):
 MONITOR_IFACE = "wlan1"
 MONITOR_CHANNELS = tuple(range(1, 14)) + (36, 40, 44, 48, 149, 153, 157, 161, 165)
 MONITOR_SECONDS = 3600
-MONITOR_LINKS_PER_SECOND = 8
+MONITOR_LINKS_PER_SECOND = 8          # senders reported in full (every reading) each second: the busiest
+MONITOR_BRIEF_LINKS = 56              # further senders reported as just [frames, average], so none simply vanishes
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 SYSTEM_PACKAGES = {"iw": "/usr/sbin/iw"}      # apt package -> a file it provides
 
 
@@ -4698,22 +4754,32 @@ def monitor_frame(raw):
 MONITOR_READINGS_PER_LINK = 40
 
 
-def monitor_summary(seen, now):
+def monitor_summary(seen, now, only=None):
     """One second of readings as a record the Sense page can read.
 
     `seen` holds (mac, dbm) pairs, or (mac, dbm, time) triples. With times, each sender also gets its individual
-    readings as [seconds before the end of the record, dbm], so Sense can follow the signal frame by frame."""
+    readings as [seconds before the end of the record, dbm], so Sense can follow the signal frame by frame.
+
+    The busiest senders are reported in full. A quiet one used to be left out altogether, so an access point
+    chosen to be watched could seem not to be heard while it was. Now the next busiest are still listed, as
+    frames and average only, and `only` (one sender's address) is always reported in full when it was heard."""
     per, timed = {}, {}
     for item in seen:
         mac, dbm = item[0], item[1]
         per.setdefault(mac, []).append(dbm)
         if len(item) > 2:
             timed.setdefault(mac, []).append([round(item[2] - now, 2), dbm])
-    links = sorted(per.items(), key=lambda kv: -len(kv[1]))[:MONITOR_LINKS_PER_SECOND]
+    ranked = sorted(per.items(), key=lambda kv: -len(kv[1]))
+    links = ranked[:MONITOR_LINKS_PER_SECOND + MONITOR_BRIEF_LINKS]
+    full = {m for m, _v in ranked[:MONITOR_LINKS_PER_SECOND]}
+    if only and only in per:
+        full.add(only)
+        if only not in dict(links):
+            links.append((only, per[only]))
     out = {}
     for m, v in links:
         entry = [len(v), round(mean(v), 1)]
-        if m in timed:
+        if m in timed and m in full:
             readings = timed[m]
             step = max(1, len(readings) // MONITOR_READINGS_PER_LINK)
             entry.append(readings[::step][:MONITOR_READINGS_PER_LINK])
@@ -4791,8 +4857,9 @@ def monitor_setup(iface, channel):
     return sock
 
 
-def monitor_run(iface, channel, seconds, emit):
-    """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards."""
+def monitor_run(iface, channel, seconds, emit, only=None):
+    """Listen on one channel for `seconds`, calling emit(record) every second. Restores the radio afterwards.
+    `only` is one sender's address that is always reported in full when heard."""
     import signal
     if os.geteuid() != 0:
         raise OSError("Monitor mode needs root: run it as 'sudo aiov2_ctl --wifi-listen'.")
@@ -4814,7 +4881,7 @@ def monitor_run(iface, channel, seconds, emit):
             except socket.timeout:
                 pass
             if time.monotonic() >= bucket_end:
-                emit(monitor_summary(seen, time.time()))
+                emit(monitor_summary(seen, time.time(), only))
                 bucket_end, seen = bucket_end + 1.0, []
     except KeyboardInterrupt:
         pass
@@ -4829,15 +4896,16 @@ def monitor_run(iface, channel, seconds, emit):
 
 def monitor_command(args):
     usage = (
-        "Usage: aiov2_ctl --wifi-listen [--iface wlan1] [--channel 6] [--seconds 3600] [--json]   (passive, needs root)\n"
+        "Usage: aiov2_ctl --wifi-listen [--iface wlan1] [--channel 6] [--seconds 3600] [--only aa:bb:cc:dd:ee:ff|-] [--json]   (passive, needs root)\n"
         "       aiov2_ctl --wifi-listen --restore [--iface wlan1]                                  (put the radio back to normal)\n"
         "Listens to the Wi-Fi traffic in the air on one channel and reports its signal strength once a second.\n"
+        "--only names one sender that is always reported in full; '--only -' reads that address from standard input.\n"
         "Never transmits. The radio is returned to normal mode when it stops."
     )
     args = list(args)
     as_json, restore = "--json" in args, "--restore" in args
     args = [a for a in args if a not in ("--json", "--restore")]
-    opts = {"--iface": MONITOR_IFACE, "--channel": "6", "--seconds": str(MONITOR_SECONDS)}
+    opts = {"--iface": MONITOR_IFACE, "--channel": "6", "--seconds": str(MONITOR_SECONDS), "--only": ""}
     while args:
         if args[0] not in opts or len(args) < 2:
             print(usage)
@@ -4853,6 +4921,19 @@ def monitor_command(args):
     if channel not in MONITOR_CHANNELS or not 1 <= seconds <= MONITOR_SECONDS or not _IFACE_RE.match(iface):
         print(usage)
         return 1
+    only = opts["--only"]
+    if only == "-" and not restore:
+        # The address comes on standard input, not as an argument: the password-free sudo rules list every allowed
+        # command word for word, and an address cannot be one of a fixed list. It is only ever compared with the
+        # addresses heard, and anything that is not exactly an address is refused.
+        only = sys.stdin.readline(64).strip()
+        if not only:
+            print(usage)
+            return 1
+    only = only.lower() if only != "-" else ""
+    if only and not _MAC_RE.match(only):
+        print(usage)
+        return 1
     try:
         if restore:
             if os.geteuid() != 0:
@@ -4866,7 +4947,10 @@ def monitor_command(args):
                 print(json.dumps(rec), flush=True)
             else:
                 print(f"{rec['frames']:4d} frames  {rec['rssi'] if rec['rssi'] is not None else '--':>6} dBm  {len(rec['links'])} senders", flush=True)
-        monitor_run(iface, channel, seconds, emit)
+        if only:
+            monitor_run(iface, channel, seconds, emit, only=only)
+        else:
+            monitor_run(iface, channel, seconds, emit)
         return 0
     except OSError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -5079,8 +5163,8 @@ class PcapWriter:
 
     HEADER_KEEP = 34
 
-    def __init__(self, path, owner=None):
-        self.fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    def __init__(self, path, owner=None, dir_fd=None):
+        self.fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
         if owner:
             try:
                 os.chown(self.fd, owner.pw_uid, owner.pw_gid)
@@ -5110,6 +5194,34 @@ def _survey_owner():
         return None
 
 
+def capture_folder_fd(folder, owner=None):
+    """Open the capture folder, making it if need be, and return it as an open folder for files to be created in.
+
+    Root makes this folder inside the calling user's home. Changing its owner by name would follow a link put
+    there in its place and hand some other folder to that user, so the folder is opened without following links,
+    must be a real folder, and its owner is changed through the open folder: only when root has just made it.
+    A folder that belongs to anyone else is refused."""
+    made = False
+    try:
+        os.mkdir(folder, 0o700)
+        made = True
+    except FileExistsError:
+        pass
+    dfd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(dfd)
+        want = owner.pw_uid if owner else os.geteuid()
+        if owner and made and st.st_uid == os.geteuid() and st.st_uid != want:
+            os.fchown(dfd, owner.pw_uid, owner.pw_gid)
+            st = os.fstat(dfd)
+        if st.st_uid != want or stat.S_IMODE(st.st_mode) & 0o022:
+            raise OSError(f"{folder} is not a private folder of the user, so no capture is saved there.")
+    except BaseException:
+        os.close(dfd)
+        raise
+    return dfd
+
+
 def survey_run(iface, band, seconds, emit, pcap=False):
     import signal
     if os.geteuid() != 0:
@@ -5121,10 +5233,11 @@ def survey_run(iface, band, seconds, emit, pcap=False):
     if pcap:
         home = owner.pw_dir if owner else os.path.expanduser("~")
         folder = os.path.join(home, "aiov2-captures")
-        os.makedirs(folder, mode=0o700, exist_ok=True)
-        if owner:
-            os.chown(folder, owner.pw_uid, owner.pw_gid)
-        writer = PcapWriter(os.path.join(folder, time.strftime("survey-%Y%m%d-%H%M%S.pcap")), owner)
+        dfd = capture_folder_fd(folder, owner)
+        try:
+            writer = PcapWriter(time.strftime("survey-%Y%m%d-%H%M%S.pcap"), owner, dir_fd=dfd)
+        finally:
+            os.close(dfd)
 
     def stop(_sig, _frm):
         raise KeyboardInterrupt
@@ -6618,6 +6731,9 @@ def build_sudoers(user):
     # Wi-Fi monitor mode for Sense: passive, fixed radio and duration, one rule per channel.
     for ch in MONITOR_CHANNELS:
         cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
+        # The same, with one sender always reported. Its address is read from standard input, so this rule is
+        # still one exact command and no argument is left open.
+        cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --only - --json")
     cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
     for band in SURVEY_BANDS:
         for extra in ("", " --pcap"):

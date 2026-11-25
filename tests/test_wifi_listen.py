@@ -86,9 +86,16 @@ class FrameTests(unittest.TestCase):
         self.assertEqual(entry[0], 300)
         self.assertLessEqual(len(entry[2]), a.MONITOR_READINGS_PER_LINK)
 
-    def test_summary_keeps_only_the_busiest(self):
-        seen = [(f"m{i}", -50) for i in range(20) for _ in range(i + 1)]
-        self.assertEqual(len(a.monitor_summary(seen, 1.0)["links"]), a.MONITOR_LINKS_PER_SECOND)
+    def test_summary_keeps_every_reading_only_for_the_busiest(self):
+        seen = [(f"m{i}", -50, 0.5) for i in range(20) for _ in range(i + 1)]
+        links = a.monitor_summary(seen, 1.0)["links"]
+        self.assertEqual(len(links), 20)                             # the quiet ones are listed, briefly
+        self.assertEqual(sorted(m for m, e in links.items() if len(e) > 2), sorted(f"m{i}" for i in range(12, 20)))
+
+    def test_summary_is_still_bounded_in_a_crowd(self):
+        seen = [(f"m{i}", -50) for i in range(300) for _ in range(i % 7 + 1)]
+        self.assertEqual(len(a.monitor_summary(seen, 1.0)["links"]),
+                         a.MONITOR_LINKS_PER_SECOND + a.MONITOR_BRIEF_LINKS)
 
 
 class CommandTests(unittest.TestCase):
