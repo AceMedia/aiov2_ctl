@@ -41,6 +41,9 @@ From a checkout, or once it is installed, the same installer is:
 aiov2_ctl --features                       # what can be installed, what is on by default, what is here now
 aiov2_ctl --install --dry-run              # the plan, in plain words; changes nothing and needs no root
 sudo aiov2_ctl --install --pick            # tick the features you want on screen, then see the plan
+sudo aiov2_ctl --repair                    # go over what is installed and put back what is missing
+sudo aiov2_ctl --uninstall --only flipper  # remove one feature, and whatever cannot work without it
+sudo aiov2_ctl --uninstall                 # remove everything this tool installed
 sudo aiov2_ctl --install                   # the usual set
 sudo aiov2_ctl --install --all             # everything, including the aircraft receiver and tray at login
 sudo aiov2_ctl --install --only core,tray  # just these (and what they need)
@@ -64,6 +67,8 @@ sudo aiov2_ctl --install --yes             # do not ask; needed when there is no
 
 What it does and does not do:
 
+- `--uninstall` removes only what this tool wrote. It never removes a package, switches a rail, or stops a radio service, and your saved rail settings and the app's logs and settings are left. The ops app folder is removed only when it holds nothing of yours (no changed files, nothing unpushed, nothing stashed). Add `--dry-run` to see the plan first.
+- `--repair` goes by the installer's own record of what was installed, so it never adds a feature you did not have.
 - It prints the plan and asks once before changing anything. It ends with a line per feature: installed, already there, or failed and why. One feature failing does not stop the others.
 - It never switches a rail on or starts a radio. Nothing is made to start at boot except the tool's own rail boot service and SDR check (as install has always done) and, if you pick `autostart`, the tray. A service that a package enables as it installs (`gpsd`, `meshtasticd`, `readsb`) is switched back off when this install is what added it; one that was already there is left exactly as it is.
 - Hardware that is not found (a rail that is off, no Flipper plugged in) does not stop a feature being installed: the plan says what was not found.
