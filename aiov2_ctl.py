@@ -315,6 +315,7 @@ _aiov2_ctl()
         --gui
         --measure
         --install
+        --features
         --update
         --check-update
         --autostart
@@ -362,6 +363,11 @@ _aiov2_ctl()
 
     if [[ "${prev}" == "--mesh-on-boot" || "${prev}" == "--sdr-biastee" || "${prev}" == "--wifi-monitor" ]]; then
         COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${COMP_WORDS[1]}" == "--install" ]]; then
+        COMPREPLY=( $(compgen -W "--all --only --without --dry-run --yes" -- "${cur}") )
         return 0
     fi
 
@@ -547,7 +553,9 @@ COMMANDS:
   --watch      Compact live GPIO + power line
   --gui        System tray controller
   --measure    Measure power delta of a feature
-  --install    Install tool to /usr/local/bin
+  --install    Install everything: the controller, tray, ops app and console, and the radio packages
+               [--all | --only LIST | --without LIST] [--dry-run] [--yes]
+  --features   What can be installed, what is on by default and what is installed now
   --update     Pull latest version from git and reinstall
   --check-update     Check for updates and prompt to install
   --autostart        Enable GUI autostart on login
@@ -6645,140 +6653,1057 @@ def ensure_sudo_path_link(dst):
         return
 
 
-def install_self():
-    if os.geteuid() != 0:
-        print("Install requires sudo.")
-        print("Run: sudo aiov2_ctl --install")
-        return 1
+# ==============================
+# One installer
+# ==============================
+# Everything that can be installed is a row in FEATURES: plain data, so the command line here, and later a picker
+# and a graphical installer, all read the same list. install_plan() turns a selection into steps (also plain
+# data) without touching the machine; run_install() carries the steps out. Rules the plan keeps:
+#   - no step switches a rail on or starts a radio;
+#   - nothing is made to start at boot, except this tool's own two housekeeping units that install has always
+#     set up (OWN_BOOT_UNITS) and the tray when 'autostart' is picked. A service that a package brings with it
+#     is switched back off if this install is what added it;
+#   - root does only what needs root: git and python in the user's home run as that user.
 
-    draw_header("Installing aiov2_ctl system-wide")
+OPS_REPO_NAME = "AceMedia/uConsole-AIO-OPS"
+OPS_REPO_URL = f"https://github.com/{OPS_REPO_NAME}.git"
+OPS_CHECKOUT_NAME = "ops-agentic"
+FLIPPER_USB_ID = ("0483", "5740")
+RTLSDR_USB_IDS = (("0bda", "2832"), ("0bda", "2838"))
+ASSET_BASE = "/usr/local/share/aiov2_ctl"
+COMPLETION_PATH = "/etc/bash_completion.d/aiov2_ctl"
+SYSTEM_DESKTOP_PATH = "/usr/share/applications/aiov2_ctl.desktop"
+AIO_BOARD_PACKAGE_DOC = "/usr/share/doc/hackergadgets-uconsole-aio-board"
+# The only units an install step may enable at boot. Both are this tool's own and both were enabled by install
+# before features existed: one sets each rail to the state the owner saved (all off unless they chose otherwise),
+# the other checks once a minute whether a running readsb has lost its tuner. Neither switches on a rail that
+# was off.
+OWN_BOOT_UNITS = (RAILS_BOOT_SERVICE, SDR_WATCHDOG_TIMER)
 
-    dst = "/usr/local/bin/aiov2_ctl"
-    asset_base = "/usr/local/share/aiov2_ctl"
-    completion_path = "/etc/bash_completion.d/aiov2_ctl"
-    desktop_path = "/usr/share/applications/aiov2_ctl.desktop"
+FEATURES = (
+    {"key": "core", "title": "Controller and command line",
+     "summary": "The aiov2_ctl command, rail control, bash completion and the rules that let it work without a password.",
+     "required": True, "default": True, "apt": (), "hardware": "aio_board", "needs": ()},
+    {"key": "tray", "title": "Tray",
+     "summary": "The tray icon for rails and services (aiov2_ctl --gui) and its start-menu entry.",
+     "required": False, "default": True, "apt": ("python3-pyqt6",), "hardware": "desktop", "needs": ("core",)},
+    {"key": "app", "title": "Ops app",
+     "summary": "The uConsole Ops window: rails, radios, GPS, LoRa, SDR and the Flipper in one place.",
+     "required": False, "default": True, "apt": ("git", "python3-pyqt6", "fonts-spleen"), "hardware": "desktop",
+     "needs": ("core",)},
+    {"key": "console", "title": "Ops console",
+     "summary": "The same tools in a terminal (ops.py).",
+     "required": False, "default": True, "apt": ("git", "python3-textual", "python3-numpy"), "hardware": None,
+     "needs": ("core",)},
+    {"key": "gps", "title": "GPS",
+     "summary": "gpsd, which reads the GPS receiver for the app and the console.",
+     "required": False, "default": True, "apt": ("gpsd",), "hardware": "aio_board", "needs": ("core",)},
+    {"key": "mesh", "title": "LoRa mesh",
+     "summary": "meshtasticd, the service that runs the LoRa mesh radio.",
+     "required": False, "default": True, "apt": ("meshtasticd",), "hardware": "aio_board", "needs": ("core",)},
+    {"key": "sdr", "title": "Software radio",
+     "summary": "The RTL-SDR tools, and the recovery that brings back a tuner that has stopped answering.",
+     "required": False, "default": True, "apt": ("rtl-sdr",), "hardware": "aio_board", "needs": ("core",)},
+    {"key": "adsb", "title": "Aircraft receiver",
+     "summary": "readsb, which decodes aircraft positions from the software radio.",
+     "required": False, "default": False, "apt": ("readsb",), "hardware": "aio_board", "needs": ("sdr",)},
+    {"key": "listening", "title": "Passive Wi-Fi and Bluetooth listening",
+     "summary": "Listening only, on the internal card: --wifi-listen, --wifi-survey and --bt-scan without a password.",
+     "required": False, "default": True, "apt": ("iw",), "hardware": "internal_card", "needs": ("core",)},
+    {"key": "flipper", "title": "Flipper and Marauder",
+     "summary": "The rule that lets you, not just root, open a Flipper Zero or ESP32 board on USB.",
+     "required": False, "default": True, "apt": (), "hardware": "flipper", "needs": ("core",)},
+    {"key": "autostart", "title": "Tray at login",
+     "summary": "Start the tray when you log in.",
+     "required": False, "default": False, "apt": (), "hardware": "desktop", "needs": ("tray",)},
+)
 
-    stored_meta = load_install_meta() or {}
-    repo = get_git_root()
-    if not repo:
-        repo_from_meta = stored_meta.get("repo_path")
-        if repo_from_meta and os.path.isdir(repo_from_meta):
-            repo = repo_from_meta
+# Packages a feature can do without: where one is not in the package sources the feature still installs.
+OPTIONAL_PACKAGES = {"console": ("python3-textual", "python3-numpy")}
+# What to say when a package is not in this system's package sources.
+PACKAGE_HINTS = {
+    "meshtasticd": "It comes from the Meshtastic package source, which 'sudo aiov2_ctl --add-apps' sets up.",
+    "readsb": "'sudo aiov2_ctl --add-apps' installs it together with the map.",
+}
+# Units a package enables as it installs. This install switches them back off, and only when it is what added
+# the package: nothing starts at boot unless the owner says so.
+PACKAGE_UNITS = {
+    "gps": ("gpsd", ("gpsd.socket", "gpsd.service"), "sudo systemctl enable --now gpsd.socket"),
+    "mesh": ("meshtasticd", ("meshtasticd.service",), "aiov2_ctl --mesh-on-boot on"),
+    "adsb": ("readsb", ("readsb.service",), "sudo systemctl start readsb"),
+}
+HARDWARE_TITLES = {
+    "aio_board": "the AIO board",
+    "internal_card": "the internal Wi-Fi and Bluetooth card",
+    "flipper": "a Flipper Zero",
+    "desktop": "a desktop",
+}
+HARDWARE_MISSING = {
+    "aio_board": "No sign of the AIO board. Its radios only show while their rail is on, so this may mean nothing. "
+                 "It is installed anyway and no rail was switched on to look.",
+    "internal_card": "The internal Wi-Fi and Bluetooth card (USB 0e8d:7961) was not found. It only shows while the "
+                     "USB rail is on. It is installed anyway and the rail is left as it is.",
+    "flipper": "No Flipper is plugged in (USB 0483:5740). The rule is installed anyway and applies when one is.",
+    "desktop": "No desktop was found on this machine. It is installed anyway and needs a desktop to show.",
+}
+# What install did, in order, before features existed. The default selection must still do every one of these.
+LEGACY_INSTALL_STEPS = (
+    "listening.apt", "core.copy", "tray.assets", "core.completion", "tray.desktop-entry", "flipper.udev",
+    "core.rails-boot", "sdr.recovery", "core.sudoers", "core.meta",
+)
+NO_USER_MESSAGE = (
+    "Cannot tell whose home the ops app belongs in: this is running as root with no SUDO_USER. "
+    "Log in as yourself and run: sudo aiov2_ctl --install"
+)
+INSTALL_USAGE = (
+    "Usage: sudo aiov2_ctl --install [--all | --only LIST | --without LIST] [--dry-run] [--yes]\n"
+    "       LIST is feature keys separated by commas. See them with: aiov2_ctl --features"
+)
 
+
+class InstallError(ValueError):
+    """A selection or command line the installer refuses, with words fit to show the user."""
+
+
+def feature_keys():
+    return [f["key"] for f in FEATURES]
+
+
+def feature_row(key):
+    for f in FEATURES:
+        if f["key"] == key:
+            return f
+    raise InstallError(f"Unknown feature '{key}'. Valid features: {', '.join(feature_keys())}")
+
+
+def default_features():
+    return [f["key"] for f in FEATURES if f["required"] or f["default"]]
+
+
+def _key_list(text):
+    keys = [k.strip().lower() for k in (text or "").split(",") if k.strip()]
+    if not keys:
+        raise InstallError("A list of features is needed, for example: --only core,tray\n" + INSTALL_USAGE)
+    unknown = [k for k in keys if k not in feature_keys()]
+    if unknown:
+        raise InstallError(f"Unknown feature{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}. "
+                           f"Valid features: {', '.join(feature_keys())}")
+    return keys
+
+
+def parse_install_args(args):
+    """The words after --install as a dict. Raises InstallError for anything it does not know."""
+    opts = {"all": False, "only": None, "without": [], "dry_run": False, "yes": False, "show_mesh_status": False}
+    args = list(args or [])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--all":
+            opts["all"] = True
+        elif arg in ("--only", "--without"):
+            if i + 1 >= len(args):
+                raise InstallError(f"{arg} needs a list of features.\n" + INSTALL_USAGE)
+            keys = _key_list(args[i + 1])
+            if arg == "--only":
+                opts["only"] = (opts["only"] or []) + keys
+            else:
+                opts["without"] += keys
+            i += 1
+        elif arg == "--dry-run":
+            opts["dry_run"] = True
+        elif arg in ("--yes", "-y"):
+            opts["yes"] = True
+        elif arg == "--show-mesh-status":
+            opts["show_mesh_status"] = True
+        else:
+            raise InstallError(f"Unknown option for --install: {arg}\n" + INSTALL_USAGE)
+        i += 1
+    if opts["all"] and opts["only"] is not None:
+        raise InstallError("--all and --only cannot be used together.\n" + INSTALL_USAGE)
+    return opts
+
+
+def resolve_features(keys):
+    """The selection with everything it depends on and every required feature added, in the registry's order."""
+    wanted = set()
+    todo = [f["key"] for f in FEATURES if f["required"]] + list(keys)
+    while todo:
+        key = todo.pop()
+        if key not in wanted:
+            wanted.add(key)
+            todo += list(feature_row(key)["needs"])
+    return [k for k in feature_keys() if k in wanted]
+
+
+def select_features(args, facts=None):
+    """Which features to install, from --all, --only LIST, --without LIST, or the defaults when none is given.
+
+    `facts` is taken so a caller can pass what it knows, but missing hardware never removes a feature here: it is
+    still installed and the plan says what was not found."""
+    opts = args if isinstance(args, dict) else parse_install_args(args)
+    if opts["only"] is not None:
+        keys = list(opts["only"])
+    elif opts["all"]:
+        keys = feature_keys()
+    else:
+        keys = default_features()
+    for key in opts["without"]:
+        if feature_row(key)["required"]:
+            raise InstallError(f"'{key}' cannot be left out: everything else needs it.")
+    keys = resolve_features(keys)
+    # Leaving a feature out also leaves out whatever cannot work without it.
+    dropped = set(opts["without"])
+    changed = True
+    while changed:
+        changed = False
+        for key in keys:
+            if key not in dropped and dropped & set(feature_row(key)["needs"]):
+                dropped.add(key)
+                changed = True
+    if opts["only"] is not None:
+        clash = sorted(dropped & set(resolve_features(opts["only"])) - set(opts["without"]))
+        if clash:
+            raise InstallError(f"{', '.join(clash)} was asked for with --only but needs a feature left out "
+                               f"with --without.")
+    return [k for k in keys if k not in dropped]
+
+
+# ---- what is here: hardware and what is already installed -----------------------------------------------------
+
+def usb_ids_present(base=None):
+    """{(vendor, product)} for every device on the USB bus, from sysfs."""
+    base = base or USB_SYSFS_BASE
+    ids = set()
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return ids
+    for name in names:
+        if ":" in name:           # an interface such as 1-1:1.0, not a device
+            continue
+        vid = read_sysfs(os.path.join(base, name, "idVendor"))
+        pid = read_sysfs(os.path.join(base, name, "idProduct"))
+        if vid and pid:
+            ids.add((vid.lower(), pid.lower()))
+    return ids
+
+
+def desktop_available(environ=None, listdir=os.listdir):
+    """True with a desktop session running, or one installed to log in to. sudo drops most of the session's
+    variables, so the installed sessions are looked at as well."""
+    env = os.environ if environ is None else environ
+    if any(env.get(v) for v in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE")):
+        return True
+    for folder in ("/usr/share/xsessions", "/usr/share/wayland-sessions"):
+        try:
+            if any(name.endswith(".desktop") for name in listdir(folder)):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def hardware_facts(usb_ids=None, environ=None, exists=os.path.exists, listdir=os.listdir):
+    """Plain facts about this machine, for the planner. Read only: nothing is switched on to look, so a radio
+    whose rail is off is honestly 'not found'."""
+    ids = usb_ids_present() if usb_ids is None else set(usb_ids)
+    internal_card = MT7921_USB_ID in ids
+    aio_board = bool(internal_card or any(i in ids for i in RTLSDR_USB_IDS)
+                     or exists(AIO_BOARD_PACKAGE_DOC) or exists("/dev/spidev1.0"))
+    return {
+        "aio_board": aio_board,
+        "internal_card": internal_card,
+        "flipper": FLIPPER_USB_ID in ids,
+        "desktop": desktop_available(environ, listdir),
+    }
+
+
+def invoking_user(environ=None, euid=None, by_name=pwd.getpwnam, by_uid=pwd.getpwuid):
+    """The person this install is for, as a passwd entry, or None when that cannot be told.
+
+    Not root: whoever is running this. Root: only the user named by sudo. Plain root (a root login, su, a boot
+    script) gets None on purpose: guessing would put the ops app in the wrong home or run git as root."""
+    env = os.environ if environ is None else environ
+    euid = os.geteuid() if euid is None else euid
+    try:
+        if euid != 0:
+            return by_uid(euid)
+        name = env.get("SUDO_USER", "")
+        if not name or name == "root" or not _USERNAME_RE.match(name):
+            return None
+        entry = by_name(name)
+    except KeyError:
+        return None
+    return entry if entry.pw_uid != 0 else None
+
+
+def as_user(user, cmd, euid=None, env=None):
+    """The command line that runs `cmd` as `user`. As root that is sudo -u (with the user's own HOME); when
+    already that user it is the command itself. `env` is passed on the command line because sudo starts the
+    command with a clean environment."""
+    euid = os.geteuid() if euid is None else euid
+    cmd = list(cmd)
+    if env:
+        cmd = ["env", *[f"{k}={v}" for k, v in sorted(env.items())], *cmd]
+    if euid == 0:
+        return ["sudo", "-u", user, "-H", "--", *cmd]
+    return cmd
+
+
+def ops_checkout_path(home):
+    return os.path.join(home, OPS_CHECKOUT_NAME)
+
+
+def is_ops_remote(url):
+    """True when a git remote address is the ops repository, however it is spelled (https, ssh, with or without
+    .git)."""
+    text = (url or "").strip().lower()
+    if text.endswith(".git"):
+        text = text[:-4]
+    text = text.rstrip("/")
+    want = OPS_REPO_NAME.lower()
+    return any(text == prefix + want for prefix in (
+        "https://github.com/", "http://github.com/", "git@github.com:", "ssh://git@github.com/",
+        "git://github.com/"))
+
+
+def _run_text(cmd, cwd=None, timeout=None):
+    """(return code, stdout, stderr). A command that cannot be started counts as failed."""
+    try:
+        done = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        return done.returncode, done.stdout or "", done.stderr or ""
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, "", str(exc)
+
+
+def checkout_state(path, user, run=_run_text, lstat=os.lstat, euid=None):
+    """What is at the place the ops checkout goes: 'missing', 'ours' (that repository), 'link' (a symbolic link,
+    never followed), 'not-git' (something else is there) or 'other' (a different repository). git runs as the
+    user, never as root."""
+    try:
+        st = lstat(path)
+    except OSError:
+        return "missing"
+    if stat.S_ISLNK(st.st_mode):
+        return "link"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not-git"
+    rc, out, _ = run(as_user(user, ["git", "-C", path, "remote", "get-url", "origin"], euid=euid), timeout=30)
+    if rc != 0:
+        return "not-git"
+    return "ours" if is_ops_remote(out) else "other"
+
+
+def apt_candidate(policy_text):
+    """The version apt would install, from 'apt-cache policy PKG', or None when there is none."""
+    m = re.search(r"^\s*Candidate:\s*(\S+)", policy_text or "", re.M)
+    if not m or m.group(1) == "(none)":
+        return None
+    return m.group(1)
+
+
+def package_installed(pkg, run=_run_text):
+    rc, out, _ = run(["dpkg-query", "-W", "-f=${Status}", pkg], timeout=30)
+    return rc == 0 and "install ok installed" in out
+
+
+def package_available(pkg, run=_run_text):
+    rc, out, _ = run(["apt-cache", "policy", pkg], timeout=60)
+    return rc == 0 and apt_candidate(out) is not None
+
+
+def all_feature_packages():
+    seen = []
+    for f in FEATURES:
+        for pkg in f["apt"]:
+            if pkg not in seen:
+                seen.append(pkg)
+    return seen
+
+
+def _file_is(path, text):
+    try:
+        with open(path) as f:
+            return f.read() == text
+    except OSError:
+        return False
+
+
+def install_state(environ=None, euid=None, run=_run_text):
+    """What is installed now, for the planner and for --features. Read only and safe without root; what cannot
+    be read without root is left as 'not known' (None)."""
+    euid = os.geteuid() if euid is None else euid
+    who = invoking_user(environ, euid)
+    installed = {p for p in all_feature_packages() if package_installed(p, run)}
+    unavailable = {p for p in all_feature_packages() if p not in installed and not package_available(p, run)}
+    present = set()
+    if os.path.isfile(INSTALLED_PATH):
+        present.add("exe")
+    if os.path.isfile(COMPLETION_PATH):
+        present.add("completion")
+    if os.path.isfile(RAILS_BOOT_SERVICE_PATH):
+        present.add("rails-unit")
+    if os.path.isfile(SYSTEM_DESKTOP_PATH):
+        present.add("desktop-entry")
+    if _file_is(COMPANION_UDEV_PATH, COMPANION_UDEV_RULES):
+        present.add("udev")
+    if os.path.isfile(SDR_RECOVERY_DROPIN_PATH):
+        present.add("sdr-recovery")
+    checkout = "missing"
+    if who:
+        checkout = checkout_state(ops_checkout_path(who.pw_dir), who.pw_name, run, euid=euid)
+        apps = os.path.join(who.pw_dir, ".local", "share", "applications")
+        for marker, (_, name, _) in zip(("gui-shortcut", "console-shortcut"), OPS_SHORTCUTS):
+            if os.path.isfile(os.path.join(apps, name)):
+                present.add(marker)
+        if os.path.isfile(os.path.join(who.pw_dir, ".config", "autostart", "aiov2_ctl.desktop")):
+            present.add("autostart")
+    if checkout == "ours":
+        present.add("checkout")
+    # The rules file can only be read by root; anyone else asks sudo what they may run, which needs no password
+    # once the rules are there.
+    listening = None
+    if euid == 0:
+        try:
+            with open(SUDOERS_PATH) as f:
+                listening = "--wifi-listen" in f.read()
+        except OSError:
+            listening = False
+    else:
+        rc, out, _ = run(["sudo", "-n", "-l"], timeout=20)
+        if rc == 0:
+            listening = "--wifi-listen" in out
+    if listening:
+        present.add("sudoers-listening")
+    return {
+        "user": who.pw_name if who else None,
+        "home": who.pw_dir if who else None,
+        "checkout": checkout,
+        "installed": installed,
+        "unavailable": unavailable,
+        "sudoers_listening": listening,
+        "present": present,
+    }
+
+
+FEATURE_MARKERS = {
+    "core": ("exe", "completion", "rails-unit"),
+    "tray": ("desktop-entry",),
+    "app": ("checkout", "gui-shortcut"),
+    "console": ("checkout", "console-shortcut"),
+    "sdr": ("sdr-recovery",),
+    "listening": ("sudoers-listening",),
+    "flipper": ("udev",),
+    "autostart": ("autostart",),
+}
+
+
+def feature_installed(key, state):
+    """'yes', 'partly' or 'no': whether a feature looks installed, from the state alone."""
+    f = feature_row(key)
+    optional = OPTIONAL_PACKAGES.get(key, ())
+    checks = [pkg in state.get("installed", ()) for pkg in f["apt"] if pkg not in optional]
+    checks += [m in state.get("present", ()) for m in FEATURE_MARKERS.get(key, ())]
+    if checks and all(checks):
+        return "yes"
+    return "partly" if any(checks) else "no"
+
+
+# ---- the planner ------------------------------------------------------------------------------------------------
+
+def _step(feature_key, name, kind, detail, root, undo, **extra):
+    step = {"id": f"{feature_key}.{name}", "feature": feature_key, "kind": kind, "detail": detail, "root": root,
+            "undo": undo}
+    step.update(extra)
+    return step
+
+
+def _apt_step(key, state):
+    f = feature_row(key)
+    if not f["apt"]:
+        return []
+    have = [p for p in f["apt"] if p in state.get("installed", ())]
+    need = [p for p in f["apt"] if p not in have]
+    if need:
+        detail = "Install the package" + ("s " if len(need) > 1 else " ") + ", ".join(need)
+        if have:
+            detail += f" (already here: {', '.join(have)})"
+    else:
+        detail = "Packages already here: " + ", ".join(have)
+    steps = [_step(key, "apt", "apt", detail + ".", True,
+                   "Remove with: sudo apt remove " + " ".join(f["apt"]),
+                   packages=tuple(f["apt"]), optional=tuple(OPTIONAL_PACKAGES.get(key, ())))]
+    for pkg in need:
+        if pkg in state.get("unavailable", ()):
+            if pkg in OPTIONAL_PACKAGES.get(key, ()):
+                text = (f"{pkg} is not in this system's package sources. The console installs what it lacks "
+                        f"itself the first time you run it, as you, not as root.")
+            else:
+                text = f"{pkg} is not in this system's package sources, so it cannot be installed from here."
+                if pkg in PACKAGE_HINTS:
+                    text += " " + PACKAGE_HINTS[pkg]
+            steps.append(_step(key, f"apt-missing-{pkg}", "note", text, False, ""))
+    return steps
+
+
+def _hold_step(key):
+    if key not in PACKAGE_UNITS:
+        return []
+    pkg, units, start = PACKAGE_UNITS[key]
+    return [_step(key, "hold", "service-off",
+                  f"If this install is what adds {pkg}, stop it and keep it from starting at boot "
+                  f"({', '.join(units)}). One that was already here is left exactly as it is. "
+                  f"Start it yourself with: {start}", True, "", package=pkg, disables=tuple(units), start=start)]
+
+
+def _ops_steps(key, selected, state):
+    """The checkout and the shortcuts, shared by the app and the console: planned once, under whichever of the
+    two comes first, and counted for both."""
+    both = [k for k in ("app", "console") if k in selected]
+    if key != both[0]:
+        return []
+    shared = tuple(both[1:])
+    user, home = state.get("user"), state.get("home")
+    if not user or not home:
+        return [_step(key, "no-user", "note", NO_USER_MESSAGE, False, "", shared_with=shared, blocks=True)]
+    path = ops_checkout_path(home)
+    kind = state.get("checkout", "missing")
+    steps = []
+    if kind == "missing":
+        steps.append(_step(key, "checkout", "clone",
+                           f"Fetch the ops app into {path} as {user}: git clone {OPS_REPO_URL}. The repository "
+                           f"is private, so this needs your GitHub access.", False,
+                           f"Remove the folder {path}", path=path, shared_with=shared))
+    elif kind == "ours":
+        steps.append(_step(key, "checkout", "pull",
+                           f"Update the ops app in {path} as {user}: git pull --ff-only. A checkout with your "
+                           f"own changes, or one that has gone its own way, is reported and left alone.", False,
+                           "", path=path, shared_with=shared))
+    else:
+        why = {"link": "is a link", "other": "is a different repository"}.get(kind, "is not that repository")
+        steps.append(_step(key, "checkout-blocked", "note",
+                           f"{path} is there but {why}, so the ops app is not put there and nothing in it is "
+                           f"changed. Move it away and run the install again.", False, "",
+                           shared_with=shared, blocks=True))
+        return steps
+    steps.append(_step(key, "launchers", "launchers",
+                       f"Write the start-menu shortcuts (uConsole Ops and uConsole Ops Console) as {user}: "
+                       f"python3 -m ops_gui --install-launchers, run in {path}.", False,
+                       f"Run in {path}: python3 -m ops_gui --remove-launchers", path=path, shared_with=shared))
+    return steps
+
+
+def install_plan(selected_keys, facts, state):
+    """The steps that install a selection, in order, as plain data. Pure: reads nothing and changes nothing.
+
+    Each step is a dict: id, feature, kind (apt, copy, sudoers, udev, systemd, service-off, clone, pull,
+    launchers, desktop-entry, autostart, note), detail in plain words, root (whether it needs root), undo (how
+    to take it back, '' when there is nothing to take back). Dependencies are added. A feature whose hardware
+    was not found is still planned, with a note saying what was missing."""
+    facts = facts or {}
+    state = state or {}
+    selected = resolve_features(selected_keys)
+    user = state.get("user")
+    listening = "listening" in selected or bool(state.get("sudoers_listening"))
+    plan = []
+    for key in selected:
+        f = feature_row(key)
+        if f["hardware"] and facts.get(f["hardware"]) is False:
+            plan.append(_step(key, "hardware", "note", HARDWARE_MISSING[f["hardware"]], False, ""))
+        plan += _apt_step(key, state)
+        if key == "core":
+            plan.append(_step(key, "copy", "copy",
+                              f"Copy this program to {INSTALLED_PATH}, and link it where sudo looks if it "
+                              f"would not find it there.", True, f"Remove {INSTALLED_PATH}"))
+            plan.append(_step(key, "completion", "copy", f"Write bash completion to {COMPLETION_PATH}.", True,
+                              f"Remove {COMPLETION_PATH}"))
+            plan.append(_step(key, "rails-boot", "systemd",
+                              f"Write {RAILS_BOOT_SERVICE} and keep it enabled, as install always has: at boot "
+                              f"it puts each rail in the state you saved (all off unless you chose otherwise). "
+                              f"It switches nothing now.", True,
+                              f"sudo systemctl disable {RAILS_BOOT_SERVICE}; remove {RAILS_BOOT_SERVICE_PATH}",
+                              enables=(RAILS_BOOT_SERVICE,)))
+            who = user or "the user who ran sudo"
+            plan.append(_step(key, "sudoers", "sudoers",
+                              f"Write {SUDOERS_PATH} for {who}: exact commands only, for rails, the boot "
+                              f"device and the mesh and aircraft services"
+                              + (", and passive listening." if listening else "; no listening rules."), True,
+                              "sudo aiov2_ctl --setup-sudoers --remove", listening=listening))
+            plan.append(_step(key, "meta", "copy",
+                              f"Note where this was installed from in {INSTALL_META_PATH}, for --update.", True,
+                              f"Remove {INSTALL_META_PATH}"))
+        elif key == "tray":
+            plan.append(_step(key, "assets", "copy", f"Copy the icons to {ASSET_BASE}.", True,
+                              f"Remove {ASSET_BASE}/img"))
+            plan.append(_step(key, "desktop-entry", "desktop-entry",
+                              f"Write the start-menu entry {SYSTEM_DESKTOP_PATH}.", True,
+                              f"Remove {SYSTEM_DESKTOP_PATH}"))
+        elif key in ("app", "console"):
+            plan += _ops_steps(key, selected, state)
+            if key == "console":
+                plan.append(_step(key, "python", "note",
+                                  "The console's meshtastic library is not an apt package. The console installs "
+                                  "what it lacks itself the first time you run it, as you; this installer "
+                                  "never runs pip as root.", False, ""))
+        elif key == "sdr":
+            plan.append(_step(key, "recovery", "systemd",
+                              f"Write the readsb recovery ({SDR_RECOVERY_DROPIN_PATH}) and the once-a-minute "
+                              f"check ({SDR_WATCHDOG_TIMER}), kept enabled as install always has. It acts only "
+                              f"while the SDR rail is on and readsb is running without a tuner; it never "
+                              f"switches on a rail that is off.", True,
+                              f"sudo systemctl disable --now {SDR_WATCHDOG_TIMER}; remove "
+                              f"{SDR_RECOVERY_DROPIN_PATH}", enables=(SDR_WATCHDOG_TIMER,)))
+        elif key == "flipper":
+            plan.append(_step(key, "udev", "udev",
+                              f"Write {COMPANION_UDEV_PATH} so you can open a Flipper or ESP32 board without "
+                              f"root.", True, f"Remove {COMPANION_UDEV_PATH}"))
+        elif key == "autostart":
+            who = user or "you"
+            if user:
+                plan.append(_step(key, "entry", "autostart",
+                                  f"Start the tray when {who} logs in: write "
+                                  f"~{who}/.config/autostart/aiov2_ctl.desktop as {who}.", False,
+                                  "aiov2_ctl --no-autostart", starts_at_login=True))
+            else:
+                plan.append(_step(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the tray"),
+                                  False, "", blocks=True))
+        plan += _hold_step(key)
+    return plan
+
+
+def format_plan(plan, selected):
+    lines = ["This will install: " + ", ".join(selected), ""]
+    current = None
+    n = 0
+    for step in plan:
+        if step["feature"] != current:
+            current = step["feature"]
+            lines.append(f"{feature_row(current)['title']} ({current})")
+        if step["kind"] == "note":
+            lines.append(f"      note: {step['detail']}")
+        else:
+            n += 1
+            lines.append(f"  {n:>2}. {step['detail']}" + ("" if step["root"] else "  [as you, not root]"))
+    lines.append("")
+    lines.append("No rail is switched on, no radio is started, and nothing is made to start at boot beyond "
+                 "what is listed above.")
+    return "\n".join(lines)
+
+
+def format_features(state, facts):
+    lines = [f"{'feature':<10} {'default':<8} {'installed':<10} what it is, and what it needs", "-" * 78]
+    for f in FEATURES:
+        default = "always" if f["required"] else ("on" if f["default"] else "off")
+        needs = []
+        if f["apt"]:
+            needs.append("packages " + ", ".join(f["apt"]))
+        if f["hardware"]:
+            found = facts.get(f["hardware"])
+            needs.append(HARDWARE_TITLES[f["hardware"]]
+                         + (" (found)" if found else " (not found now)" if found is False else ""))
+        if f["needs"]:
+            needs.append("feature " + ", ".join(f["needs"]))
+        lines.append(f"{f['key']:<10} {default:<8} {feature_installed(f['key'], state):<10} {f['title']}: "
+                     f"{f['summary']}")
+        lines.append(f"{'':<30} needs: {'; '.join(needs) if needs else 'nothing else'}")
+    lines.append("")
+    lines.append("Install with: sudo aiov2_ctl --install [--all | --only LIST | --without LIST] [--dry-run] [--yes]")
+    return "\n".join(lines)
+
+
+def features_command():
+    print(format_features(install_state(), hardware_facts()))
+    return 0
+
+
+# ---- carrying a plan out --------------------------------------------------------------------------------------
+# Each action returns (status, words): 'done', 'already' (nothing needed changing), 'failed' or 'note'.
+
+def clone_failure_message(stderr, path):
+    """What to tell the user when git clone failed."""
+    text = (stderr or "").lower()
+    no_access = any(s in text for s in (
+        "authentication failed", "could not read username", "could not read password", "repository not found",
+        "permission denied", "terminal prompts disabled", "403", "access denied", "invalid credentials"))
+    if no_access:
+        return (f"GitHub would not let this account read {OPS_REPO_NAME}: it is a private repository. Sign in "
+                f"with 'gh auth login' (then 'gh auth setup-git'), or clone it by hand to {path}, and run the "
+                f"install again. Everything else was still installed.")
+    last = [l for l in (stderr or "").strip().splitlines() if l.strip()]
+    return (f"git clone failed{': ' + last[-1].strip() if last else ''}. Check the network, or clone "
+            f"{OPS_REPO_URL} by hand to {path}, and run the install again.")
+
+
+def source_checkout(this_file, installed_path, git_root, recorded):
+    """The checkout to install from, or None to install the running file itself. The file being run always
+    wins: its own git checkout if it is in one, else itself. Only the installed copy running itself falls back
+    to the checkout an earlier install recorded. (A downloaded newer file used to be passed over for that older
+    checkout, and the install reported success having put the old program back.)"""
+    if git_root:
+        return git_root
+    if this_file == installed_path:
+        return recorded
+    return None
+
+
+def install_source():
+    """(source file, icons folder or None, metadata) for this run: the git checkout this is run from when there
+    is one, else just this file; the installed copy run by itself uses the checkout a previous install recorded."""
+    stored = load_install_meta() or {}
+    recorded = stored.get("repo_path")
+    repo = source_checkout(os.path.realpath(__file__), os.path.realpath(INSTALLED_PATH), get_git_root(),
+                           recorded if recorded and os.path.isdir(recorded) else None)
+    meta = dict(stored)
+    if not repo and os.path.realpath(__file__) != os.path.realpath(INSTALLED_PATH):
+        # Run from a loose file (a download, a copy): the old record no longer says where this came from.
+        for key in ("repo_path", "branch"):
+            meta.pop(key, None)
     if repo and os.path.isfile(os.path.join(repo, "aiov2_ctl.py")):
         repo = os.path.realpath(repo)
-        src = os.path.join(repo, "aiov2_ctl.py")
-        img_src = os.path.join(repo, "img")
-    else:
-        repo = None
-        src = os.path.realpath(__file__)
-        img_src = None
-
-    meta = stored_meta.copy() if stored_meta else {}
-
-    if repo:
         meta["repo_path"] = repo
         try:
-            meta["remote"] = subprocess.check_output(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo,
-                text=True
-            ).strip()
+            meta["remote"] = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=repo,
+                                                     text=True).strip()
         except Exception:
             pass
-
         meta["branch"] = get_git_branch(repo) or "main"
+        return os.path.join(repo, "aiov2_ctl.py"), os.path.join(repo, "img"), meta
+    return os.path.realpath(__file__), None, meta
 
-    # ------------------------------
-    # Packages this program relies on
-    # ------------------------------
-    ensure_system_packages()
 
-    # ------------------------------
-    # Install executable
-    # ------------------------------
-    print(f"Installing executable → {dst}\n")
-    src_real = os.path.realpath(src)
-    dst_real = os.path.realpath(dst)
-    if src_real == dst_real:
-        print("Executable already installed, skipping copy.\n")
-    else:
-        subprocess.check_call(["cp", src, dst])
-        subprocess.check_call(["chmod", "+x", dst])
+def _write_system_file(path, text, mode=0o644):
+    """Write a file root owns, in a folder root owns. True when it changed."""
+    if _file_is(path, text):
+        os.chmod(path, mode)
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    os.chmod(path, mode)
+    return True
 
-    ensure_sudo_path_link(dst)
 
-    # ------------------------------
-    # Install assets (icons, etc.)
-    # ------------------------------
-    if img_src and os.path.isdir(img_src):
-        print(f"Installing assets → {asset_base}\n")
-        subprocess.check_call(["mkdir", "-p", asset_base])
-        subprocess.check_call(["cp", "-r", img_src, asset_base])
-    else:
-        print("No assets found, skipping.\n")
+def _act_apt(step, ctx):
+    missing = [p for p in step["packages"] if not package_installed(p)]
+    if not missing:
+        return "already", ""
+    if not ctx.get("apt_updated"):
+        ctx["apt_updated"] = True
+        subprocess.call(["apt-get", "update"])
+    absent = [p for p in missing if not package_available(p)]
+    wanted = [p for p in missing if p not in absent]
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    failed = []
+    if wanted and subprocess.call(["apt-get", "install", "-y", *wanted], env=env) != 0:
+        # One at a time, so one broken package does not keep the others out.
+        for pkg in wanted:
+            if not package_installed(pkg) and subprocess.call(["apt-get", "install", "-y", pkg], env=env) != 0:
+                failed.append(pkg)
+    ctx.setdefault("added", set()).update(p for p in wanted if p not in failed)
+    hard = [p for p in absent if p not in step.get("optional", ())]
+    soft = [p for p in absent if p in step.get("optional", ())]
+    words = []
+    if failed:
+        words.append(f"could not install {', '.join(failed)}. Try: sudo apt install {' '.join(failed)}")
+    for pkg in hard:
+        words.append(f"{pkg} is not in this system's package sources. {PACKAGE_HINTS.get(pkg, '')}".strip())
+    if soft:
+        words.append(f"{', '.join(soft)} not in the package sources: the console installs it on first run, as you")
+    if failed or hard:
+        return "failed", "; ".join(words)
+    return ("done" if wanted else "note"), "; ".join(words)
 
-    # ------------------------------
-    # Install bash completion
-    # ------------------------------
-    print("Installing bash completion…\n")
-    with open(completion_path, "w") as f:
-        f.write(BASH_COMPLETION)
-    os.chmod(completion_path, 0o644)
 
-    # ------------------------------
-    # Install system desktop entry
-    # ------------------------------
-    print(f"Installing desktop entry → {desktop_path}\n")
-    with open(desktop_path, "w") as f:
-        f.write(SYSTEM_DESKTOP_ENTRY)
-    os.chmod(desktop_path, 0o644)
+def _act_service_off(step, ctx):
+    if step["package"] not in ctx.get("added", ()):
+        return "already", ""
+    if step["feature"] == "mesh" and load_config().get("mesh_on_boot"):
+        return "note", "you have set the mesh to start at boot, so that was kept"
+    subprocess.call(["systemctl", "disable", "--now", *step["disables"]],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "note", f"not started and will not start at boot. Start it with: {step['start']}"
 
-    # ------------------------------
-    # Install boot rail systemd unit
-    # ------------------------------
+
+def _act_core_copy(step, ctx):
+    src = ctx["source"][0]
+    if os.path.realpath(src) == os.path.realpath(INSTALLED_PATH):
+        ensure_sudo_path_link(INSTALLED_PATH)
+        return "already", ""
+    same = False
+    try:
+        with open(src, "rb") as a, open(INSTALLED_PATH, "rb") as b:
+            same = a.read() == b.read()
+    except OSError:
+        pass
+    subprocess.check_call(["cp", src, INSTALLED_PATH])
+    subprocess.check_call(["chmod", "+x", INSTALLED_PATH])
+    ensure_sudo_path_link(INSTALLED_PATH)
+    return ("already" if same else "done"), ""
+
+
+def _act_core_completion(step, ctx):
+    return ("done" if _write_system_file(COMPLETION_PATH, BASH_COMPLETION) else "already"), ""
+
+
+def _act_core_rails_boot(step, ctx):
+    changed = _write_system_file(RAILS_BOOT_SERVICE_PATH, RAILS_BOOT_SERVICE_UNIT)
+    subprocess.call(["systemctl", "daemon-reload"])
+    subprocess.call(["systemctl", "enable", RAILS_BOOT_SERVICE])
+    return ("done" if changed else "already"), ""
+
+
+def _act_core_sudoers(step, ctx):
+    before = None
+    try:
+        with open(SUDOERS_PATH) as f:
+            before = f.read()
+    except OSError:
+        pass
+    # Exact, validated rules for the invoking user only (see build_sudoers).
+    if setup_sudoers(listening=step.get("listening", True)) != 0:
+        return "failed", "the rules were not written. Run 'sudo aiov2_ctl --setup-sudoers' from your own account"
+    return ("already" if _file_is(SUDOERS_PATH, before) else "done"), ""
+
+
+def _act_core_meta(step, ctx):
+    text = json.dumps(ctx["source"][2], indent=2)
+    return ("done" if _write_system_file(INSTALL_META_PATH, text) else "already"), ""
+
+
+def _act_tray_assets(step, ctx):
+    img = ctx["source"][1]
+    if not img or not os.path.isdir(img):
+        return "note", "no icons beside this file (it was not run from a git checkout), so the tray uses a stock icon"
+    subprocess.check_call(["mkdir", "-p", ASSET_BASE])
+    subprocess.check_call(["cp", "-r", img, ASSET_BASE])
+    return "done", ""
+
+
+def _act_tray_desktop_entry(step, ctx):
+    return ("done" if _write_system_file(SYSTEM_DESKTOP_PATH, SYSTEM_DESKTOP_ENTRY) else "already"), ""
+
+
+def _act_flipper_udev(step, ctx):
+    if _file_is(COMPANION_UDEV_PATH, COMPANION_UDEV_RULES):
+        return "already", ""
     ensure_companion_udev_rules()
+    return "done", "replug the device for the rule to apply"
 
-    print(f"Installing rail boot service → {RAILS_BOOT_SERVICE_PATH}\n")
-    with open(RAILS_BOOT_SERVICE_PATH, "w") as f:
-        f.write(RAILS_BOOT_SERVICE_UNIT)
-    os.chmod(RAILS_BOOT_SERVICE_PATH, 0o644)
 
-    # ------------------------------
-    # Install readsb SDR recovery
-    # ------------------------------
-    print(f"Installing readsb SDR recovery → {SDR_RECOVERY_DROPIN_PATH}\n")
-    os.makedirs(os.path.dirname(SDR_RECOVERY_DROPIN_PATH), exist_ok=True)
+def _act_sdr_recovery(step, ctx):
+    changed = False
     for path, content in (
         (SDR_RECOVERY_DROPIN_PATH, SDR_RECOVERY_DROPIN),
         (f"/etc/systemd/system/{SDR_WATCHDOG_SERVICE}", SDR_WATCHDOG_SERVICE_UNIT),
         (f"/etc/systemd/system/{SDR_WATCHDOG_TIMER}", SDR_WATCHDOG_TIMER_UNIT),
     ):
-        with open(path, "w") as f:
-            f.write(content)
-        os.chmod(path, 0o644)
-
+        changed = _write_system_file(path, content) or changed
     subprocess.call(["systemctl", "daemon-reload"])
-    subprocess.call(["systemctl", "enable", RAILS_BOOT_SERVICE])
     subprocess.call(["systemctl", "enable", "--now", SDR_WATCHDOG_TIMER])
+    return ("done" if changed else "already"), ""
 
-    # ------------------------------
-    # Install sudoers rule for systemctl status checks
-    # ------------------------------
-    # Exact, validated rules for the invoking user only (see build_sudoers).
-    # This used to grant the service commands to every local user.
-    if setup_sudoers() != 0:
-        print("Sudoers rule not installed. Run 'sudo aiov2_ctl --setup-sudoers' from your own account.\n")
 
-    os.makedirs(os.path.dirname(INSTALL_META_PATH), exist_ok=True)
-    with open(INSTALL_META_PATH, "w") as f:
-        json.dump(meta, f, indent=2)
+def _act_checkout(step, ctx, run=_run_text):
+    user, path = ctx.get("user"), step["path"]
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    # Looked at again now: the plan may be minutes old.
+    kind = checkout_state(path, user, run)
+    if kind == "missing":
+        # No prompt for a name and password: GitHub no longer takes them, and an unattended run must not hang.
+        rc, _, err = run(as_user(user, ["git", "clone", OPS_REPO_URL, path], env={"GIT_TERMINAL_PROMPT": "0"}),
+                         cwd="/", timeout=900)
+        if rc != 0:
+            return "failed", clone_failure_message(err, path)
+        return "done", ""
+    if kind != "ours":
+        return "failed", (f"{path} is there but is not a checkout of {OPS_REPO_NAME}; it was left alone. Move it "
+                          f"away and run the install again")
+    rc, out, _ = run(as_user(user, ["git", "-C", path, "status", "--porcelain", "--untracked-files=no"]),
+                     cwd="/", timeout=120)
+    if rc != 0 or out.strip():
+        return "already", f"{path} has changes of your own, so it was not updated and nothing in it was touched"
+    rc, out, err = run(as_user(user, ["git", "-C", path, "pull", "--ff-only"], env={"GIT_TERMINAL_PROMPT": "0"}),
+                       cwd="/", timeout=900)
+    if rc != 0:
+        return "already", (f"{path} could not be updated (it has gone its own way, or GitHub could not be "
+                           f"reached); it was left as it is")
+    return ("already" if "up to date" in out.lower() else "done"), ""
 
-    print("Install complete.")
-    print("Open a new shell for bash completion to activate.")
-    if "--show-mesh-status" in sys.argv:
+
+def _shortcut_texts(home):
+    texts = []
+    for _, name, _ in OPS_SHORTCUTS:
+        try:
+            fd = os.open(os.path.join(home, ".local", "share", "applications", name),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                texts.append(os.read(fd, 1 << 16))
+            finally:
+                os.close(fd)
+        except OSError:
+            texts.append(None)
+    return texts
+
+
+def _act_launchers(step, ctx, run=_run_text):
+    user, home, path = ctx.get("user"), ctx.get("home"), step["path"]
+    if not user or not home:
+        return "failed", NO_USER_MESSAGE
+    if checkout_state(path, user, run) != "ours":
+        return "failed", "the ops app is not there, so no shortcuts were written"
+    before = _shortcut_texts(home)
+    python3 = "/usr/bin/python3"
+    rc, _, err = run(as_user(user, [python3, "-m", "ops_gui", "--install-launchers"]), cwd=path, timeout=120)
+    if rc != 0:
+        last = [l for l in err.strip().splitlines() if l.strip()]
+        return "failed", "the shortcuts could not be written" + (f": {last[-1].strip()}" if last else "")
+    return ("already" if None not in before and _shortcut_texts(home) == before else "done"), ""
+
+
+def _act_autostart(step, ctx, run=_run_text):
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    rc, out, err = run(as_user(user, ["/usr/bin/python3", INSTALLED_PATH, "--autostart"]), cwd="/", timeout=60)
+    if rc != 0:
+        return "failed", (err or out).strip() or "the autostart entry could not be written"
+    return ("already" if "already" in out.lower() else "done"), ""
+
+
+def _act_note(step, ctx):
+    return ("failed" if step.get("blocks") else "note"), step["detail"]
+
+
+INSTALL_ACTIONS = {
+    "core.copy": _act_core_copy,
+    "core.completion": _act_core_completion,
+    "core.rails-boot": _act_core_rails_boot,
+    "core.sudoers": _act_core_sudoers,
+    "core.meta": _act_core_meta,
+    "tray.assets": _act_tray_assets,
+    "tray.desktop-entry": _act_tray_desktop_entry,
+    "flipper.udev": _act_flipper_udev,
+    "sdr.recovery": _act_sdr_recovery,
+    "autostart.entry": _act_autostart,
+}
+INSTALL_ACTIONS_BY_KIND = {
+    "apt": _act_apt,
+    "service-off": _act_service_off,
+    "clone": _act_checkout,
+    "pull": _act_checkout,
+    "launchers": _act_launchers,
+    "note": _act_note,
+}
+
+
+def step_action(step):
+    return INSTALL_ACTIONS.get(step["id"]) or INSTALL_ACTIONS_BY_KIND.get(step["kind"])
+
+
+def run_install(plan, ctx, say=print, action_for=step_action):
+    """Carry out every step. A step that fails, or blows up, is recorded and the rest still run. Returns
+    [(step, status, words)]."""
+    outcomes = []
+    for step in plan:
+        if step["kind"] != "note":
+            say(f"• {step['detail']}")
+        action = action_for(step)
+        try:
+            if action is None:
+                status, words = "failed", f"this version does not know how to do '{step['id']}'"
+            else:
+                status, words = action(step, ctx)
+        except Exception as exc:        # one feature failing must not stop the others
+            status, words = "failed", f"{type(exc).__name__}: {exc}"
+        if status == "failed":
+            say(f"  failed: {words}")
+        outcomes.append((step, status, words))
+    return outcomes
+
+
+def feature_results(selected, outcomes):
+    """[(feature, 'installed' | 'already there' | 'failed', words)] in the selection's order."""
+    rows = []
+    for key in selected:
+        mine = [(s, st, w) for s, st, w in outcomes if key == s["feature"] or key in s.get("shared_with", ())]
+        failed = [w for _, st, w in mine if st == "failed"]
+        notes = [w for s, st, w in mine if st in ("note", "already", "done") and w and s["kind"] != "note"]
+        if failed:
+            rows.append((key, "failed", "; ".join(failed)))
+        elif any(st == "done" for _, st, _ in mine):
+            rows.append((key, "installed", "; ".join(notes)))
+        else:
+            rows.append((key, "already there", "; ".join(notes)))
+    return rows
+
+
+def format_results(rows):
+    lines = ["", "Result", "------"]
+    for key, status, words in rows:
+        if status == "failed":
+            lines.append(f"  {key:<10} failed: {words}")
+        else:
+            lines.append(f"  {key:<10} {status}" + (f" ({words})" if words else ""))
+    return "\n".join(lines)
+
+
+def install_command(args, facts=None, state=None, execute=run_install, ask=input, isatty=None, euid=None,
+                    say=print):
+    """aiov2_ctl --install. Returns the exit code: 0 done, 1 something failed or was refused, 2 bad arguments."""
+    try:
+        opts = parse_install_args(args)
+        selected = select_features(opts, facts)
+    except InstallError as exc:
+        say(str(exc))
+        return 2
+    euid = os.geteuid() if euid is None else euid
+    if not opts["dry_run"] and euid != 0:
+        say("Install requires sudo.")
+        say("Run: sudo aiov2_ctl --install")
+        say("To see what it would do without changing anything: aiov2_ctl --install --dry-run")
+        return 1
+    interactive = sys.stdin.isatty() if isatty is None else isatty
+    if not opts["dry_run"] and not opts["yes"] and not interactive:
+        say("Not a terminal, so there is nobody to ask. Run it again with --yes to install, or --dry-run to "
+            "see the plan.")
+        return 1
+
+    facts = hardware_facts() if facts is None else facts
+    state = install_state(euid=euid) if state is None else state
+    plan = install_plan(selected, facts, state)
+    say(format_plan(plan, selected))
+    if opts["dry_run"]:
+        say("\nDry run: nothing was changed.")
+        return 0
+    if not opts["yes"]:
+        try:
+            answer = ask("\nContinue? [y/N]: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            say("Nothing was changed.")
+            return 0
+
+    say("")
+    ctx = {"user": state.get("user"), "home": state.get("home"), "source": None, "added": set()}
+    if execute is run_install:
+        ctx["source"] = install_source()
+    outcomes = execute(plan, ctx, say)
+    rows = feature_results(selected, outcomes)
+    say(format_results(rows))
+    failed = [key for key, status, _ in rows if status == "failed"]
+    say("\nInstall complete." if not failed else
+        f"\nInstall finished, but not everything went in: {', '.join(failed)}. Run it again once that is sorted.")
+    say("Open a new shell for bash completion to activate.")
+    if opts["show_mesh_status"]:
         print_mesh_on_boot_status_hint("Meshtastic boot config status:")
-    return 0
+    return 1 if failed else 0
+
+
+def install_self():
+    """Kept for callers of the old name: the same as `aiov2_ctl --install` with whatever followed it."""
+    return install_command(sys.argv[2:])
 
 
 SUDOERS_PATH = "/etc/sudoers.d/aiov2_ctl"
@@ -6786,10 +7711,12 @@ _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _SUDOERS_SERVICES = ("meshtasticd", "meshtasticd.service", "readsb", "readsb.service")
 
 
-def build_sudoers(user):
+def build_sudoers(user, listening=True):
     """
     Exact, argument-by-argument rules for what the tray needs. No wildcards,
-    so the user cannot smuggle extra arguments past sudo.
+    so the user cannot smuggle extra arguments past sudo. `listening` False
+    leaves out the passive Wi-Fi and Bluetooth listening commands (the
+    installer's 'listening' feature).
     """
     systemctl = shutil.which("systemctl") or "/usr/bin/systemctl"
     cmds = []
@@ -6805,17 +7732,19 @@ def build_sudoers(user):
     cmds.append(f"{INSTALLED_PATH} --net listen --seconds 30 --json")
     cmds.append(f"{INSTALLED_PATH} --net sweep --yes --json")
     # Wi-Fi monitor mode for Sense: passive, fixed radio and duration, one rule per channel.
-    for ch in MONITOR_CHANNELS:
+    for ch in (MONITOR_CHANNELS if listening else ()):
         cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --json")
         # The same, with one sender always reported. Its address is read from standard input, so this rule is
         # still one exact command and no argument is left open.
         cmds.append(f"{INSTALLED_PATH} --wifi-listen --iface {MONITOR_IFACE} --channel {ch} --seconds {MONITOR_SECONDS} --only - --json")
-    cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
-    for band in SURVEY_BANDS:
+    if listening:
+        cmds.append(f"{INSTALLED_PATH} --wifi-listen --restore --iface {MONITOR_IFACE}")
+    for band in (SURVEY_BANDS if listening else ()):
         for extra in ("", " --pcap"):
             cmds.append(f"{INSTALLED_PATH} --wifi-survey --iface {MONITOR_IFACE} --band {band} --seconds {MONITOR_SECONDS}{extra} --json")
     # Passive Bluetooth scan on the internal card: fixed adapter and duration.
-    cmds.append(f"{INSTALLED_PATH} --bt-scan --adapter {BT_ADAPTER} --seconds {BT_SECONDS} --json")
+    if listening:
+        cmds.append(f"{INSTALLED_PATH} --bt-scan --adapter {BT_ADAPTER} --seconds {BT_SECONDS} --json")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -6828,7 +7757,7 @@ def build_sudoers(user):
     return "\n".join(lines)
 
 
-def setup_sudoers(remove=False):
+def setup_sudoers(remove=False, listening=True):
     if os.geteuid() != 0:
         print("This command requires sudo.")
         print("Run: sudo aiov2_ctl --setup-sudoers" + (" --remove" if remove else ""))
@@ -6857,7 +7786,7 @@ def setup_sudoers(remove=False):
         print("visudo not found, so the rules cannot be validated. Nothing written.")
         return 1
 
-    content = build_sudoers(user)
+    content = build_sudoers(user, listening)
     # Names containing '.' or '~' are ignored by sudo, so a half written temp
     # file in this directory can never take effect.
     fd, tmp = tempfile.mkstemp(prefix="aiov2_ctl.", dir="/etc/sudoers.d")
@@ -6948,7 +7877,7 @@ def update_self(confirmed=False):
     report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
 
     # escalate only for install; the user has just reviewed the changes
-    rerun_with_sudo(["--install", "--show-mesh-status"], allow_untrusted=True)
+    rerun_with_sudo(["--install", "--yes", "--show-mesh-status"], allow_untrusted=True)
     return 0
 
 def check_update_interactive():
@@ -7067,7 +7996,10 @@ def main():
         print(HELP_TEXT)
 
     elif arg == "--install":
-        sys.exit(install_self())
+        sys.exit(install_command(sys.argv[2:]))
+
+    elif arg == "--features":
+        sys.exit(features_command())
 
     elif arg == "--update":
         sys.exit(update_self())
