@@ -1902,6 +1902,92 @@ def boot_device_command(mode):
     return 0
 
 
+# ---- one backend, three ways in -----------------------------------------------------------------------------------
+# The tray, the command line and the ops app all switch the same rails. Whichever one does it leaves a mark (a small
+# file in the user's runtime folder) so the others can show the change at once instead of at their next refresh.
+# The tray also opens the ops app and the ops console, through the same shortcuts the start menu uses.
+
+OPS_SHORTCUTS = (("gui", "uconsole-ops-gui.desktop", "Open uConsole Ops"),
+                 ("console", "uconsole-ops-console.desktop", "Open Ops Console"))
+OPS_GUI_PROCESS = "python3 -m ops_gui"
+OPS_GUI_WINDOW = "uConsole AIO"
+
+
+def rails_stamp_path(environ=None, uid=None):
+    """The file touched whenever a rail is switched. Under sudo it is still the calling user's file, since that
+    user's tray and app are the ones watching it."""
+    env = os.environ if environ is None else environ
+    if uid is None:
+        sudo_uid = env.get("SUDO_UID", "")
+        uid = int(sudo_uid) if sudo_uid.isdigit() else os.getuid()
+    base = f"/run/user/{uid}"
+    return os.path.join(base, "aiov2_ctl.rails") if os.path.isdir(base) else f"/tmp/aiov2_ctl-{uid}.rails"
+
+
+def mark_rails_changed(path=None, uid=None, now=None):
+    """Leave the mark. Written beside and moved into place, so a watcher never sees half a file and a mark left
+    by root can be replaced by the user. Never raises: failing to tell the others must not stop a rail switching."""
+    try:
+        path = path or rails_stamp_path(uid=uid)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(f"{time.time() if now is None else now:.3f}\n")
+        if os.geteuid() == 0:
+            sudo_uid = os.environ.get("SUDO_UID", "")
+            if sudo_uid.isdigit():
+                os.chown(tmp, int(sudo_uid), -1)
+        os.replace(tmp, path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def ops_shortcut_dir(environ=None):
+    env = os.environ if environ is None else environ
+    base = env.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "applications")
+
+
+def ops_shortcuts(directory=None):
+    """[(kind, path, label)] for the ops app and ops console shortcuts that are installed. The ops app writes them
+    (python3 -m ops_gui --install-launchers); with none there the tray offers nothing it cannot open."""
+    d = directory or ops_shortcut_dir()
+    return [(kind, os.path.join(d, name), label) for kind, name, label in OPS_SHORTCUTS
+            if os.path.isfile(os.path.join(d, name))]
+
+
+def ops_launch_env(environ=None):
+    """The environment a shortcut is started with: the tray's own, minus the Qt platform it was forced onto, so
+    the app starts exactly as it does from the start menu."""
+    env = dict(os.environ if environ is None else environ)
+    env.pop("QT_QPA_PLATFORM", None)
+    return env
+
+
+def ops_gui_running(runner=subprocess.run):
+    try:
+        return runner(["pgrep", "-f", OPS_GUI_PROCESS], capture_output=True, text=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def ops_open(kind, path, runner=subprocess.run, popen=subprocess.Popen):
+    """Open a shortcut. Returns 'opened', 'already' (the app is running: it is brought forward if the desktop
+    allows, never started twice) or 'failed'."""
+    if kind == "gui" and ops_gui_running(runner):
+        try:
+            runner(["wmctrl", "-a", OPS_GUI_WINDOW], capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return "already"
+    try:
+        popen(["gio", "launch", path], env=ops_launch_env(), start_new_session=True,
+              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return "opened"
+    except OSError:
+        return "failed"
+
+
 def parse_pinctrl_level(out: str):
     """
     Extract pin level from `pinctrl get <pin>` output.
@@ -2030,6 +2116,7 @@ class GpioController:
             "op",
             "dh" if state else "dl",
         ])
+        mark_rails_changed()                     # the tray and the ops app show the change at once
 
     @staticmethod
     def set_feature(feature, state):
@@ -5863,6 +5950,22 @@ def run_gui():
     # -------- Init Right-click menu --------
     menu = QMenu()
     actions = {}
+
+    def open_ops(kind, path):
+        result = ops_open(kind, path)
+        if result == "already":
+            tray.showMessage("uConsole Ops", "It is already open.", QSystemTrayIcon.MessageIcon.Information, 2500)
+        elif result == "failed":
+            tray.showMessage("uConsole Ops", "Could not open it.", QSystemTrayIcon.MessageIcon.Warning, 4000)
+
+    ops_actions = []
+    for kind, path, label in ops_shortcuts():
+        a = QAction(label)
+        a.triggered.connect(lambda _checked=False, kind=kind, path=path: open_ops(kind, path))
+        menu.addAction(a)
+        ops_actions.append(a)
+    if ops_actions:
+        menu.addSeparator()
 
 
     meta = load_install_meta()
