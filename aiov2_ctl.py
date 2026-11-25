@@ -529,6 +529,7 @@ USAGE:
     aiov2_ctl --net status|neighbors|listen|sweep|ports   (wired network, passive first)
     aiov2_ctl --wifi-listen [--channel 6]                (passive Wi-Fi signal listening for Sense, needs root)
     aiov2_ctl --wifi-survey [--band all] [--pcap]        (passive survey: access points, stations, probes, deauth floods; needs root)
+    aiov2_ctl --bt-scan [--seconds 30]                   (passive Bluetooth scan: devices advertising nearby; needs root)
   sudo aiov2_ctl --boot-device <status|sd|nvme|toggle>
   sudo aiov2_ctl --add-apps
   sudo aiov2_ctl --remove-apps
@@ -4984,6 +4985,320 @@ def survey_command(args):
         return 1
 
 
+# ---- Passive Bluetooth scan ------------------------------------------------------------------------------------
+# Lists the Bluetooth Low Energy devices advertising nearby. The controller is put into PASSIVE scanning: it only
+# receives the advertisements devices broadcast anyway. It never sends a scan request, never connects, never pairs
+# and never advertises. Needs root for the raw HCI socket; scanning is always switched off again when it stops.
+BT_ADAPTER = "hci1"                      # the internal USB card's Bluetooth radio
+BT_SECONDS = 600
+_BT_ADAPTER_RE = re.compile(r"^hci[0-9]$")
+BT_OP_SCAN_PARAMS, BT_OP_SCAN_ENABLE = 0x200B, 0x200C                # legacy LE scanning
+BT_OP_EXT_SCAN_PARAMS, BT_OP_EXT_SCAN_ENABLE = 0x2041, 0x2042        # extended (Bluetooth 5) LE scanning
+BT_SCAN_PASSIVE = 0x00                   # the scan type that sends nothing. 0x01 (active) is never used here.
+BT_INTERVAL, BT_WINDOW = 0x0060, 0x0030  # listen 30 ms in every 60: the card shares its antenna time with Wi-Fi
+BT_STATUS_DISALLOWED = 0x0C
+
+# Company identifiers from the Bluetooth SIG's assigned numbers: only well known ones, the rest show as a number.
+BT_COMPANIES = {
+    0x0002: "Intel", 0x0003: "IBM", 0x0006: "Microsoft", 0x000A: "Qualcomm (CSR)", 0x000D: "Texas Instruments",
+    0x000F: "Broadcom", 0x001D: "Qualcomm", 0x0030: "STMicroelectronics", 0x0046: "MediaTek", 0x004C: "Apple",
+    0x0059: "Nordic Semiconductor", 0x0075: "Samsung", 0x0087: "Garmin", 0x009E: "Bose", 0x00C4: "LG Electronics",
+    0x00E0: "Google", 0x012D: "Sony", 0x0131: "Cypress", 0x0157: "Huami", 0x0171: "Amazon", 0x02E5: "Espressif",
+    0x038F: "Xiaomi", 0x0499: "Ruuvi",
+}
+# 16 bit service numbers a device may list, again only well known ones.
+BT_SERVICES = {
+    0x1802: "immediate alert", 0x1803: "link loss", 0x1805: "current time", 0x1809: "thermometer",
+    0x180A: "device information", 0x180D: "heart rate", 0x180F: "battery", 0x1810: "blood pressure",
+    0x1812: "keyboard or mouse", 0x1816: "cycling speed", 0x1818: "cycling power", 0x181A: "environment sensor",
+    0x181D: "weight scale", 0x1826: "fitness machine", 0xFD6F: "exposure notification", 0xFE2C: "Google Fast Pair",
+    0xFEAA: "Eddystone beacon", 0xFEED: "Tile tracker",
+}
+
+
+def bt_cmd(opcode, params=b""):
+    """One HCI command packet."""
+    return struct.pack("<BHB", 0x01, opcode, len(params)) + params
+
+
+def bt_scan_commands(extended, enable):
+    """The (parameters, enable) command packets for passive scanning, or just the one that switches it off."""
+    if extended:
+        on = bt_cmd(BT_OP_EXT_SCAN_ENABLE, struct.pack("<BBHH", 1 if enable else 0, 0, 0, 0))
+        params = bt_cmd(BT_OP_EXT_SCAN_PARAMS,
+                        struct.pack("<BBB", 0x00, 0x00, 0x01) + struct.pack("<BHH", BT_SCAN_PASSIVE, BT_INTERVAL, BT_WINDOW))
+    else:
+        on = bt_cmd(BT_OP_SCAN_ENABLE, struct.pack("<BB", 1 if enable else 0, 0))
+        params = bt_cmd(BT_OP_SCAN_PARAMS, struct.pack("<BHHBB", BT_SCAN_PASSIVE, BT_INTERVAL, BT_WINDOW, 0x00, 0x00))
+    return [params, on] if enable else [on]
+
+
+def bt_addr(raw):
+    """A Bluetooth address as text. On the wire it is sent last byte first."""
+    return ":".join(f"{b:02x}" for b in reversed(raw))
+
+
+def bt_addr_kind(addr_type, addr):
+    """What sort of address this is. Most phones and wearables use a private address that changes every few
+    minutes, so the same device shows up again under a new one; only a public address names its maker."""
+    if addr_type in (0x00, 0x02):
+        return "public"
+    top = int(addr[:2], 16) >> 6
+    return {0b11: "random (fixed)", 0b01: "private (changes)", 0b00: "private (changes)"}.get(top, "random")
+
+
+def bt_parse_ad(data):
+    """The fields of one advertisement: {'name', 'company', 'services', 'tx_power', 'flags'}; only what was sent."""
+    out, i = {}, 0
+    while i + 1 < len(data):
+        length = data[i]
+        if length == 0 or i + 1 + length > len(data):
+            break
+        kind, body = data[i + 1], data[i + 2:i + 1 + length]
+        if kind in (0x08, 0x09):                                          # shortened or complete local name
+            name = body.decode("utf-8", "replace").strip("\x00").strip()
+            if name and (kind == 0x09 or "name" not in out):
+                out["name"] = "".join(c for c in name if c.isprintable())[:40]
+        elif kind == 0xFF and len(body) >= 2:                             # manufacturer data: who made it
+            out["company"] = struct.unpack_from("<H", body)[0]
+        elif kind in (0x02, 0x03):                                        # 16 bit service numbers
+            out.setdefault("services", [])
+            out["services"] += [struct.unpack_from("<H", body, j)[0] for j in range(0, len(body) - 1, 2)]
+        elif kind == 0x16 and len(body) >= 2:                             # service data starts with its service
+            out.setdefault("services", []).append(struct.unpack_from("<H", body)[0])
+        elif kind == 0x0A and len(body) == 1:
+            out["tx_power"] = struct.unpack("<b", body)[0]
+        elif kind == 0x01 and body:
+            out["flags"] = body[0]
+        i += 1 + length
+    if "services" in out:
+        out["services"] = sorted(set(out["services"]))
+    return out
+
+
+def _bt_rssi(value):
+    return value if -127 <= value <= 20 else None                        # 127 means "no reading"
+
+
+def bt_legacy_reports(params):
+    """The reports in an LE Advertising Report event (everything after its subevent byte)."""
+    out, i = [], 1
+    for _ in range(params[0] if params else 0):
+        if i + 9 > len(params):
+            break
+        event_type, addr_type, raw = params[i], params[i + 1], params[i + 2:i + 8]
+        n = params[i + 8]
+        if i + 9 + n + 1 > len(params):
+            break
+        data = params[i + 9:i + 9 + n]
+        rssi = struct.unpack_from("<b", params, i + 9 + n)[0]
+        addr = bt_addr(raw)
+        out.append({"addr": addr, "kind": bt_addr_kind(addr_type, addr), "connectable": event_type in (0x00, 0x01),
+                    "rssi": _bt_rssi(rssi), **bt_parse_ad(data)})
+        i += 10 + n
+    return out
+
+
+def bt_ext_reports(params):
+    """The reports in an LE Extended Advertising Report event (everything after its subevent byte)."""
+    out, i = [], 1
+    for _ in range(params[0] if params else 0):
+        if i + 24 > len(params):
+            break
+        event_type = struct.unpack_from("<H", params, i)[0]
+        addr_type, raw = params[i + 2], params[i + 3:i + 9]
+        rssi = struct.unpack_from("<b", params, i + 13)[0]
+        n = params[i + 23]
+        if i + 24 + n > len(params):
+            break
+        data = params[i + 24:i + 24 + n]
+        addr = bt_addr(raw)
+        out.append({"addr": addr, "kind": bt_addr_kind(addr_type, addr), "connectable": bool(event_type & 0x01),
+                    "rssi": _bt_rssi(rssi), **bt_parse_ad(data)})
+        i += 24 + n
+    return out
+
+
+def bt_event(packet):
+    """What one packet from the controller says: ('reports', [...]), ('done', opcode, status) or None."""
+    if len(packet) < 3 or packet[0] != 0x04:
+        return None
+    code, body = packet[1], packet[3:3 + packet[2]]
+    if code == 0x3E and body:                                             # LE meta event
+        if body[0] == 0x02:
+            return ("reports", bt_legacy_reports(body[1:]))
+        if body[0] == 0x0D:
+            return ("reports", bt_ext_reports(body[1:]))
+    elif code == 0x0E and len(body) >= 4:                                 # command complete
+        return ("done", struct.unpack_from("<H", body, 1)[0], body[3])
+    elif code == 0x0F and len(body) >= 4:                                 # command status
+        return ("done", struct.unpack_from("<H", body, 2)[0], body[0])
+    return None
+
+
+class BtScan:
+    """Every device heard so far, by address."""
+
+    def __init__(self, vendor=None):
+        self.devices = {}
+        self.vendor = vendor or (lambda mac: "")
+
+    def add(self, report, now):
+        dev = self.devices.setdefault(report["addr"], {
+            "addr": report["addr"], "kind": report["kind"], "name": "", "maker": "", "services": [],
+            "connectable": False, "rssi": None, "best": None, "count": 0, "first": now, "last": now})
+        dev["count"] += 1
+        dev["last"] = now
+        dev["connectable"] = dev["connectable"] or bool(report.get("connectable"))
+        if report.get("name"):
+            dev["name"] = report["name"]
+        if report.get("rssi") is not None:
+            dev["rssi"] = report["rssi"]
+            dev["best"] = report["rssi"] if dev["best"] is None else max(dev["best"], report["rssi"])
+        if report.get("company") is not None and not dev["maker"]:
+            dev["maker"] = BT_COMPANIES.get(report["company"], f"company 0x{report['company']:04x}")
+        if not dev["maker"] and dev["kind"] == "public":
+            dev["maker"] = self.vendor(dev["addr"])
+        for number in report.get("services", []):
+            label = BT_SERVICES.get(number, f"0x{number:04x}")
+            if label not in dev["services"]:
+                dev["services"].append(label)
+        return dev
+
+    def snapshot(self, now, adapter, mode):
+        rows = sorted(self.devices.values(), key=lambda d: (-(d["rssi"] if d["rssi"] is not None else -999), d["addr"]))
+        return {"t": round(now, 1), "adapter": adapter, "mode": mode, "devices": [dict(d) for d in rows]}
+
+
+def _bt_wait(sock, opcode, timeout=2.0):
+    """The status the controller gives for one command, feeding nothing else on. None if it never answers."""
+    import select
+    end = time.time() + timeout
+    while time.time() < end:
+        ready, _, _ = select.select([sock], [], [], max(0.0, end - time.time()))
+        if not ready:
+            break
+        ev = bt_event(sock.recv(1024))
+        if ev and ev[0] == "done" and ev[1] == opcode:
+            return ev[2]
+    return None
+
+
+def _bt_send(sock, packet):
+    sock.send(packet)
+    return _bt_wait(sock, struct.unpack_from("<H", packet, 1)[0])
+
+
+def bt_scan_run(adapter, seconds, emit):
+    import select
+    import signal
+    import socket
+    if os.geteuid() != 0:
+        raise OSError("Bluetooth scanning needs root: run it as 'sudo aiov2_ctl --bt-scan'.")
+    if not all(hasattr(socket, name) for name in ("AF_BLUETOOTH", "BTPROTO_HCI", "SOL_HCI", "HCI_FILTER")):
+        raise OSError("This Python has no Bluetooth socket support.")
+    if not os.path.isdir(f"/sys/class/bluetooth/{adapter}"):
+        raise OSError(f"No Bluetooth adapter {adapter}. The internal card needs the USB rail on.")
+
+    def stop(_sig, _frm):
+        raise KeyboardInterrupt
+    old = signal.signal(signal.SIGTERM, stop)
+    sock, mode = None, None
+    scan = BtScan(oui_vendor)
+    try:
+        sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_RAW, socket.BTPROTO_HCI)
+        sock.bind((int(adapter[3:]),))
+        # every event packet, nothing else. The kernel wants the whole 16 byte filter, padding included.
+        sock.setsockopt(socket.SOL_HCI, socket.HCI_FILTER, struct.pack("<IIIHH", 1 << 0x04, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0))
+        status = None
+        for extended in (True, False):                                    # Bluetooth 5 cards want the extended form
+            status = None
+            for packet in bt_scan_commands(extended, True):
+                status = _bt_send(sock, packet)
+                if status != 0:
+                    break
+            if status == 0:
+                mode = "extended" if extended else "legacy"
+                break
+        if mode is None:
+            if status == BT_STATUS_DISALLOWED:
+                raise OSError(f"{adapter} is busy: something else is scanning or connecting with it. Stop that and try again.")
+            raise OSError(f"{adapter} would not start a passive scan" + (f" (status 0x{status:02x})." if status is not None
+                                                                         else ": no answer. Is Bluetooth switched on?"))
+        end, last = time.time() + seconds, 0.0
+        while time.time() < end:
+            ready, _, _ = select.select([sock], [], [], 0.5)
+            now = time.time()
+            if ready:
+                ev = bt_event(sock.recv(2048))
+                if ev and ev[0] == "reports":
+                    for report in ev[1]:
+                        scan.add(report, now)
+            if now - last >= 2.0:
+                last = now
+                emit(scan.snapshot(now, adapter, mode))
+        emit(scan.snapshot(time.time(), adapter, mode))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if sock is not None:
+            if mode is not None:
+                try:                                                      # always leave the radio not scanning
+                    for packet in bt_scan_commands(mode == "extended", False):
+                        _bt_send(sock, packet)
+                except OSError:
+                    pass
+            sock.close()
+        signal.signal(signal.SIGTERM, old)
+
+
+def bt_command(args):
+    usage = (
+        "Usage: aiov2_ctl --bt-scan [--adapter hci1] [--seconds 30] [--json]   (passive, needs root)\n"
+        "Lists the Bluetooth Low Energy devices advertising nearby: name, address, maker and signal strength.\n"
+        "Passive scanning only: it listens to what devices broadcast and never sends a scan request, connects, pairs\n"
+        "or advertises. Scanning is switched off again when it stops."
+    )
+    args = list(args)
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    opts = {"--adapter": BT_ADAPTER, "--seconds": "30"}
+    while args:
+        if args[0] not in opts or len(args) < 2:
+            print(usage)
+            return 1
+        opts[args[0]] = args[1]
+        del args[:2]
+    try:
+        seconds = float(opts["--seconds"])
+    except ValueError:
+        print(usage)
+        return 1
+    if not _BT_ADAPTER_RE.match(opts["--adapter"]) or not 1 <= seconds <= BT_SECONDS:
+        print(usage)
+        return 1
+    final = {}
+
+    def emit(snap):
+        final.clear()
+        final.update(snap)
+        if as_json:
+            print(json.dumps(snap), flush=True)
+    try:
+        bt_scan_run(opts["--adapter"], seconds, emit)
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not as_json:
+        devices = final.get("devices", [])
+        print(f"{len(devices)} Bluetooth devices heard on {opts['--adapter']} ({final.get('mode', 'no')} passive scan):")
+        for d in devices:
+            signal_text = f"{d['rssi']} dBm" if d["rssi"] is not None else "-"
+            print(f"  {d['addr']}  {signal_text:>8}  {d['kind']:<17}  {d['name'] or '-'}"
+                  + (f"  [{d['maker']}]" if d["maker"] else "") + (f"  {', '.join(d['services'])}" if d["services"] else ""))
+    return 0
+
+
 def ensure_system_packages(say=print):
     """Install the apt packages this program relies on, if they are missing. Never fatal."""
     missing = [pkg for pkg, path in SYSTEM_PACKAGES.items() if not os.path.exists(path)]
@@ -6034,6 +6349,8 @@ def build_sudoers(user):
     for band in SURVEY_BANDS:
         for extra in ("", " --pcap"):
             cmds.append(f"{INSTALLED_PATH} --wifi-survey --iface {MONITOR_IFACE} --band {band} --seconds {MONITOR_SECONDS}{extra} --json")
+    # Passive Bluetooth scan on the internal card: fixed adapter and duration.
+    cmds.append(f"{INSTALLED_PATH} --bt-scan --adapter {BT_ADAPTER} --seconds {BT_SECONDS} --json")
     cmds.append(f"{systemctl} enable meshtasticd")
     cmds.append(f"{systemctl} disable --now meshtasticd")
 
@@ -6394,6 +6711,9 @@ def main():
 
     elif arg == "--wifi-listen":
         sys.exit(monitor_command(sys.argv[2:]))
+
+    elif arg == "--bt-scan":
+        sys.exit(bt_command(sys.argv[2:]))
 
     elif arg == "--marauder":
         sys.exit(marauder_command(sys.argv[2:]))
