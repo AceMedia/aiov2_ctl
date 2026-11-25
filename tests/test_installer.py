@@ -1063,5 +1063,286 @@ class PickerTests(unittest.TestCase):
         self.assertIn("--pick", a.INSTALL_USAGE)
 
 
+EVERYTHING_PRESENT = {"exe", "completion", "rails-unit", "desktop-entry", "checkout", "gui-shortcut",
+                      "console-shortcut", "sdr-recovery", "sudoers-listening", "udev", "autostart"}
+
+
+class RepairTests(unittest.TestCase):
+    def test_a_machine_with_only_ordinary_packages_has_nothing_installed(self):
+        st = state(installed={"git", "iw", "gpsd", "python3-pyqt6"})
+        self.assertEqual(a.features_in_place(st), [])
+        self.assertEqual(a.repair_selection(st), [])
+
+    def test_what_is_in_place_is_found_by_what_this_tool_wrote(self):
+        st = state(installed={"gpsd", "git"}, present={"exe", "udev", "checkout", "gui-shortcut"})
+        self.assertEqual(a.features_in_place(st), ["core", "app", "gps", "flipper"])
+
+    def test_the_shared_folder_alone_does_not_count_for_the_console(self):
+        st = state(present={"exe", "checkout", "gui-shortcut"})
+        self.assertNotIn("console", a.features_in_place(st))
+
+    def test_the_record_wins_over_what_is_in_place(self):
+        st = state(present=set(EVERYTHING_PRESENT))
+        self.assertEqual(a.recorded_features({"features": ["tray", "core", "nonsense"]}, st), ["core", "tray"])
+        self.assertEqual(a.repair_selection(st, {"features": ["adsb"]}), ["core", "sdr", "adsb"])
+        self.assertEqual(a.repair_selection(st, {"features": []}), [])
+
+    def test_missing_pieces_are_named(self):
+        st = state(installed={"python3-pyqt6"}, present={"exe", "completion"})
+        self.assertEqual(a.feature_missing("core", st), ["the rail boot service"])
+        self.assertEqual(a.feature_missing("tray", st), ["the tray's start-menu entry"])
+        self.assertEqual(a.feature_missing("gps", st), ["the package gpsd"])
+        text = a.format_repair(["core", "tray"], st)
+        self.assertIn("core       missing: the rail boot service", text)
+        every = state(installed=set(a.all_feature_packages()), present=set(EVERYTHING_PRESENT))
+        self.assertIn("core       looks complete", a.format_repair(["core"], every))
+
+    def test_every_marker_has_words(self):
+        for markers in a.FEATURE_MARKERS.values():
+            for m in markers:
+                self.assertIn(m, a.MARKER_WORDS)
+
+    def run_repair(self, args, known, st=None, isatty=True, euid=0):
+        said, ran, ctxs = [], [], []
+
+        def execute(plan, ctx, say):
+            ran.append(ids(plan))
+            ctxs.append(ctx)
+            return [(s, "done", "") for s in plan]
+
+        code = a.install_command(args, facts=ALL_THERE, state=st or state(), execute=execute, ask=lambda _: "y",
+                                 isatty=isatty, euid=euid, say=said.append, known=known)
+        return code, "\n".join(said), ran, ctxs
+
+    def test_repair_reinstalls_what_was_installed_and_nothing_else(self):
+        code, said, ran, ctxs = self.run_repair(["--repair"], ["core", "tray"])
+        self.assertEqual(code, 0)
+        self.assertIn("This will install: core, tray", said)
+        self.assertIn("missing:", said)
+        self.assertEqual(ctxs[0]["features"], ["core", "tray"])
+        self.assertFalse(any(i.startswith(("gps.", "app.", "sdr.")) for i in ran[0]))
+
+    def test_repair_with_nothing_installed_does_nothing(self):
+        code, said, ran, _ = self.run_repair(["--repair"], [])
+        self.assertEqual((code, ran), (0, []))
+        self.assertIn("nothing to repair", said)
+
+    def test_repair_takes_no_choice_of_features(self):
+        for extra in (["--all"], ["--only", "core"], ["--without", "tray"], ["--pick"]):
+            code, said, ran, _ = self.run_repair(["--repair", *extra], ["core"])
+            self.assertEqual((code, ran), (2, []), extra)
+
+    def test_repair_dry_run_needs_no_root(self):
+        code, said, ran, _ = self.run_repair(["--repair", "--dry-run"], ["core"], euid=1000)
+        self.assertEqual((code, ran), (0, []))
+        self.assertIn("Dry run", said)
+
+    def test_an_install_records_what_was_there_before_as_well(self):
+        _, _, _, ctxs = self.run_repair(["--only", "flipper", "--yes"], ["core", "tray"])
+        self.assertEqual(ctxs[0]["features"], ["core", "tray", "flipper"])
+
+    def test_the_first_recorded_install_keeps_what_was_already_in_place(self):
+        st = state(present={"exe", "desktop-entry"})
+        said, ctxs = [], []
+        with mock.patch.object(a, "load_install_meta", return_value={"repo_path": "/x"}):
+            a.install_command(["--only", "flipper", "--yes"], facts=ALL_THERE, state=st,
+                              execute=lambda plan, ctx, say: ctxs.append(ctx) or [], euid=0, say=said.append)
+        self.assertEqual(ctxs[0]["features"], ["core", "tray", "flipper"])
+
+
+class UninstallTests(unittest.TestCase):
+    def st(self, **changes):
+        return state(installed=set(a.all_feature_packages()), present=set(EVERYTHING_PRESENT), checkout="ours",
+                     **changes)
+
+    def test_everything_is_removed_last_installed_first(self):
+        sel = a.uninstall_selection()
+        self.assertEqual(sel, list(reversed(a.feature_keys())))
+        self.assertEqual(sel[-1], "core")
+
+    def test_removing_a_feature_removes_what_needs_it(self):
+        self.assertEqual(a.uninstall_selection(["sdr"]), ["adsb", "sdr"])
+        self.assertEqual(a.uninstall_selection(["tray"]), ["autostart", "tray"])
+        self.assertEqual(a.uninstall_selection(["core"]), list(reversed(a.feature_keys())))
+        self.assertEqual(a.uninstall_selection(["flipper"]), ["flipper"])
+
+    def test_bad_arguments_are_refused(self):
+        for args in (["--only"], ["--only", "nope"], ["--all"], ["--purge"]):
+            with self.assertRaises(a.InstallError):
+                a.parse_uninstall_args(args)
+
+    def test_no_step_touches_a_package_a_rail_or_a_radio_service(self):
+        plan = a.uninstall_plan(a.uninstall_selection(), self.st())
+        for step in plan:
+            self.assertNotIn(step["kind"], ("apt",))
+            for unit in step.get("units", ()):
+                self.assertIn(unit, (a.RAILS_BOOT_SERVICE, a.SDR_WATCHDOG_TIMER))
+            for path in step.get("paths", ()):
+                self.assertFalse(path.startswith(("/usr/bin", "/usr/lib", "/boot", "/dev", "/sys")), path)
+        text = a.format_uninstall_plan(plan, a.uninstall_selection())
+        self.assertIn("No package is removed", text)
+        self.assertIn("No rail is switched", text)
+        self.assertNotIn("apt remove", text)
+
+    def test_only_this_tools_own_files_are_named(self):
+        plan = a.uninstall_plan(a.uninstall_selection(), self.st())
+        paths = [p for s in plan for p in s.get("paths", ()) + s.get("trees", ())]
+        allowed = ("/etc/sudoers.d/aiov2_ctl", "/etc/systemd/system/aiov2-", "/etc/systemd/system/readsb.service.d/10-aiov2-",
+                   "/etc/bash_completion.d/aiov2_ctl", "/usr/local/share/aiov2_ctl/", "/usr/share/applications/aiov2_ctl.desktop",
+                   "/home/shane/.config/autostart/aiov2_ctl.desktop", "/home/shane/.local/share/applications/uconsole-ops")
+        for p in paths:
+            self.assertTrue(p.startswith(allowed), p)
+        self.assertNotIn(a.CONFIG_PATH, paths)                          # saved rail settings are left
+
+    def test_the_app_folder_goes_only_when_both_users_of_it_go(self):
+        both = a.uninstall_plan(a.uninstall_selection(), self.st())
+        self.assertEqual([s["id"] for s in both if s["kind"] == "checkout"], ["un.app.checkout"])
+        self.assertLess(ids(both).index("un.console.shortcut"), ids(both).index("un.app.checkout"))
+        one = a.uninstall_plan(["console"], self.st())
+        self.assertEqual(ids(one), ["un.console.shortcut", "un.console.checkout-kept"])
+        self.assertIn("stays", one[1]["detail"])
+
+    def test_listening_alone_rewrites_the_rules_and_with_core_they_just_go(self):
+        self.assertEqual(ids(a.uninstall_plan(["listening"], self.st())), ["un.listening.sudoers"])
+        full = ids(a.uninstall_plan(a.uninstall_selection(), self.st()))
+        self.assertNotIn("un.listening.sudoers", full)
+        self.assertIn("un.core.sudoers", full)
+
+    def test_the_program_is_the_very_last_thing_removed(self):
+        self.assertEqual(ids(a.uninstall_plan(a.uninstall_selection(), self.st()))[-1], "un.core.exe")
+
+    def test_without_a_user_nothing_in_a_home_is_guessed_at(self):
+        plan = a.uninstall_plan(["autostart", "console", "app"], state(user=None, home=None))
+        self.assertTrue(all(s["kind"] == "note" and s.get("blocks") for s in plan))
+
+    def runner(self, answers):
+        def run(cmd, cwd=None, timeout=None):
+            runner.calls.append(cmd)
+            for needle, result in answers:
+                if needle in " ".join(cmd):
+                    return result
+            return 0, "", ""
+        runner = types.SimpleNamespace(calls=[], run=run)
+        return runner
+
+    def test_a_checkout_with_anything_of_yours_is_left(self):
+        for needle, out, why in (("status --porcelain", " M app.py\n", "changed or added"),
+                                 ("stash list", "stash@{0}: WIP\n", "stashed"),
+                                 ("--not --remotes", "abc123 mine\n", "never pushed")):
+            r = self.runner([("remote get-url", (0, a.OPS_REPO_URL, "")), (needle, (0, out, ""))])
+            ok, said = a.checkout_holds_nothing("/home/shane/ops-agentic", "shane", r.run)
+            self.assertFalse(ok)
+            self.assertIn(why, said)
+            self.assertFalse(any("rm" in c for c in r.calls))
+
+    def test_a_clean_checkout_holds_nothing(self):
+        r = self.runner([])
+        self.assertEqual(a.checkout_holds_nothing("/home/shane/ops-agentic", "shane", r.run), (True, ""))
+
+    def test_the_checkout_step_refuses_any_other_folder(self):
+        r = self.runner([])
+        status, words = a._un_checkout({"path": "/home/shane"}, {"user": "shane", "home": "/home/shane"}, run=r.run)
+        self.assertEqual(status, "failed")
+        self.assertEqual(r.calls, [])
+
+    def test_the_checkout_step_leaves_a_dirty_folder_and_removes_a_clean_one(self):
+        ctx = {"user": "shane", "home": "/home/shane"}
+        step = {"path": "/home/shane/ops-agentic"}
+        with mock.patch.object(a, "checkout_state", return_value="ours"):
+            dirty = self.runner([("status --porcelain", (0, "?? notes.txt\n", ""))])
+            self.assertEqual(a._un_checkout(step, ctx, run=dirty.run)[0], "note")
+            self.assertFalse(any("rm" in c for c in dirty.calls))
+            clean = self.runner([])
+            self.assertEqual(a._un_checkout(step, ctx, run=clean.run), ("done", ""))
+            self.assertEqual(clean.calls[-1][-4:], ["rm", "-rf", "--", "/home/shane/ops-agentic"])
+        with mock.patch.object(a, "checkout_state", return_value="other"):
+            other = self.runner([])
+            self.assertEqual(a._un_checkout(step, ctx, run=other.run)[0], "note")
+            self.assertEqual(other.calls, [])
+
+    def test_results_say_what_happened_to_each_feature(self):
+        sel = ["flipper", "gps", "app", "tray"]
+        plan = a.uninstall_plan(sel, self.st())
+        by = {"un.flipper.udev": ("done", ""), "un.gps.kept": ("note", ""), "un.app.shortcut": ("already", ""),
+              "un.app.checkout-kept": ("note", ""), "un.tray.desktop-entry": ("failed", "busy")}
+        rows = dict((k, s) for k, s, _ in a.uninstall_results(sel, [(s, *by[s["id"]]) for s in plan]))
+        self.assertEqual(rows, {"flipper": "removed", "gps": "nothing to remove", "app": "was not there",
+                                "tray": "failed"})
+
+    def run_un(self, args, isatty=True, euid=0, answer="y", fail=()):
+        said, ran, forgot = [], [], []
+
+        def execute(plan, ctx, say):
+            ran.append(ids(plan))
+            return [(s, "failed" if s["feature"] in fail else ("note" if s["kind"] == "note" else "done"), "")
+                    for s in plan]
+
+        code = a.uninstall_command(args, state=self.st(), execute=execute, ask=lambda _: answer, isatty=isatty,
+                                   euid=euid, say=said.append, forget=lambda keys, st: forgot.append(keys))
+        return code, "\n".join(said), ran, forgot
+
+    def test_it_asks_first_and_no_means_no(self):
+        code, said, ran, forgot = self.run_un([], answer="n")
+        self.assertEqual((code, ran, forgot), (0, [], []))
+        self.assertIn("Nothing was changed", said)
+
+    def test_it_needs_root_a_terminal_or_yes(self):
+        self.assertEqual(self.run_un([], euid=1000)[0], 1)
+        self.assertEqual(self.run_un([], isatty=False)[0::2], (1, []))
+        self.assertEqual(len(self.run_un(["--yes"], isatty=False)[2]), 1)
+
+    def test_dry_run_changes_nothing_and_needs_no_root(self):
+        code, said, ran, forgot = self.run_un(["--dry-run"], euid=1000, isatty=False)
+        self.assertEqual((code, ran, forgot), (0, [], []))
+        self.assertIn("This will remove: autostart", said)
+
+    def test_what_was_removed_is_taken_off_the_record_but_not_what_failed(self):
+        code, said, ran, forgot = self.run_un(["--only", "sdr", "--yes"], fail=("sdr",))
+        self.assertEqual(code, 1)
+        self.assertEqual(forgot, [["adsb"]])
+        code, _, _, forgot = self.run_un(["--only", "flipper", "--yes"])
+        self.assertEqual((code, forgot), (0, [["flipper"]]))
+
+    def test_a_full_uninstall_keeps_no_record(self):
+        code, said, ran, forgot = self.run_un(["--yes"])
+        self.assertEqual((code, forgot), (0, []))
+        self.assertNotIn("Put anything back", said)
+
+    def test_bad_arguments_exit_2(self):
+        self.assertEqual(self.run_un(["--only", "nope"])[0], 2)
+
+    def test_they_are_in_the_help_and_completion(self):
+        for word in ("--repair", "--uninstall"):
+            self.assertIn(word, a.HELP_TEXT)
+            self.assertIn(word, a.BASH_COMPLETION)
+
+    def test_real_file_actions_remove_only_what_is_there(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            one, tree = os.path.join(base, "one"), os.path.join(base, "img")
+            open(one, "w").close()
+            os.mkdir(tree)
+            open(os.path.join(tree, "x.png"), "w").close()
+            step = {"paths": (one, os.path.join(base, "never-there")), "trees": (tree,)}
+            self.assertEqual(a._un_files(step, {}), ("done", ""))
+            self.assertEqual(os.listdir(base), [])
+            self.assertEqual(a._un_files(step, {}), ("already", ""))
+
+    def test_a_udev_rule_someone_changed_is_left(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            rule = os.path.join(base, "99.rules")
+            with open(rule, "w") as f:
+                f.write("# mine\n")
+            with mock.patch.object(a, "COMPANION_UDEV_PATH", rule), mock.patch.object(a.subprocess, "call") as call:
+                self.assertEqual(a._un_udev({}, {})[0], "note")
+                self.assertTrue(os.path.exists(rule))
+                with open(rule, "w") as f:
+                    f.write(a.COMPANION_UDEV_RULES)
+                self.assertEqual(a._un_udev({}, {}), ("done", ""))
+                self.assertFalse(os.path.exists(rule))
+                self.assertEqual(a._un_udev({}, {}), ("already", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -316,6 +316,8 @@ _aiov2_ctl()
         --measure
         --install
         --features
+        --repair
+        --uninstall
         --update
         --check-update
         --autostart
@@ -363,6 +365,16 @@ _aiov2_ctl()
 
     if [[ "${prev}" == "--mesh-on-boot" || "${prev}" == "--sdr-biastee" || "${prev}" == "--wifi-monitor" ]]; then
         COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${COMP_WORDS[1]}" == "--uninstall" ]]; then
+        COMPREPLY=( $(compgen -W "--only --dry-run --yes" -- "${cur}") )
+        return 0
+    fi
+
+    if [[ "${COMP_WORDS[1]}" == "--repair" ]]; then
+        COMPREPLY=( $(compgen -W "--dry-run --yes" -- "${cur}") )
         return 0
     fi
 
@@ -556,6 +568,9 @@ COMMANDS:
   --install    Install everything: the controller, tray, ops app and console, and the radio packages
                [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]
   --features   What can be installed, what is on by default and what is installed now
+  --repair     Go over what is installed and put back what is missing  [--dry-run] [--yes]
+  --uninstall  Remove what this tool installed; packages, rails and your data are left
+               [--only LIST] [--dry-run] [--yes]
   --update     Pull latest version from git and reinstall
   --check-update     Check for updates and prompt to install
   --autostart        Enable GUI autostart on login
@@ -6795,7 +6810,7 @@ def _key_list(text):
 def parse_install_args(args):
     """The words after --install as a dict. Raises InstallError for anything it does not know."""
     opts = {"all": False, "only": None, "without": [], "dry_run": False, "yes": False, "show_mesh_status": False,
-            "pick": False}
+            "pick": False, "repair": False}
     args = list(args or [])
     i = 0
     while i < len(args):
@@ -6815,6 +6830,8 @@ def parse_install_args(args):
             opts["dry_run"] = True
         elif arg == "--pick":
             opts["pick"] = True
+        elif arg == "--repair":
+            opts["repair"] = True
         elif arg in ("--yes", "-y"):
             opts["yes"] = True
         elif arg == "--show-mesh-status":
@@ -6824,6 +6841,9 @@ def parse_install_args(args):
         i += 1
     if opts["all"] and opts["only"] is not None:
         raise InstallError("--all and --only cannot be used together.\n" + INSTALL_USAGE)
+    if opts["repair"] and (opts["all"] or opts["only"] is not None or opts["without"] or opts["pick"]):
+        raise InstallError("--repair goes over what is already installed, so it takes no choice of features. "
+                           "Use: sudo aiov2_ctl --repair [--dry-run] [--yes]")
     return opts
 
 
@@ -7313,6 +7333,7 @@ def format_features(state, facts):
     lines.append("")
     lines.append("Install with: sudo aiov2_ctl --install [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]")
     lines.append("Tick them on screen with: sudo aiov2_ctl --install --pick")
+    lines.append("Put back what is missing: sudo aiov2_ctl --repair      Remove: sudo aiov2_ctl --uninstall [--only LIST]")
     return "\n".join(lines)
 
 
@@ -7439,8 +7460,8 @@ def picker_lines(picker, state, facts, numbered=False):
             lines.append((HARDWARE_MISSING[row["hardware"]], False))
         lines.append(("", False))
     if any(k not in picker.ticked and feature_installed(k, state) != "no" for k in picker.keys):
-        lines.append(("Unticking something that is already installed does not remove it; it is only left as it is.",
-                      False))
+        lines.append(("Unticking something that is already installed does not remove it. Remove it with: "
+                      "sudo aiov2_ctl --uninstall --only LIST", False))
     if picker.message:
         lines.append((picker.message, False))
     return lines
@@ -7680,7 +7701,10 @@ def _act_core_sudoers(step, ctx):
 
 
 def _act_core_meta(step, ctx):
-    text = json.dumps(ctx["source"][2], indent=2)
+    meta = dict(ctx["source"][2])
+    if ctx.get("features") is not None:
+        meta["features"] = list(ctx["features"])
+    text = json.dumps(meta, indent=2)
     return ("done" if _write_system_file(INSTALL_META_PATH, text) else "already"), ""
 
 
@@ -7863,7 +7887,7 @@ def format_results(rows):
 
 
 def install_command(args, facts=None, state=None, execute=run_install, ask=input, isatty=None, euid=None,
-                    say=print, pick=pick_features):
+                    say=print, pick=pick_features, known=None):
     """aiov2_ctl --install. Returns the exit code: 0 done, 1 something failed or was refused, 2 bad arguments."""
     try:
         opts = parse_install_args(args)
@@ -7889,6 +7913,14 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
 
     facts = hardware_facts() if facts is None else facts
     state = install_state(euid=euid) if state is None else state
+    meta = (load_install_meta() or {}) if known is None else {"features": known}
+    if opts.get("repair"):
+        selected = repair_selection(state, meta)
+        if not selected:
+            say("Nothing of this tool's is installed, so there is nothing to repair. Install with: "
+                "sudo aiov2_ctl --install")
+            return 0
+        say(format_repair(selected, state))
     if opts.get("pick"):
         # Starts from what the other flags chose (the usual set when there are none).
         selected = pick(FeaturePicker(selected), state, facts)
@@ -7910,7 +7942,10 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
             return 0
 
     say("")
-    ctx = {"user": state.get("user"), "home": state.get("home"), "source": None, "added": set()}
+    # What is recorded as installed afterwards: what was there before, and this selection.
+    keep = set(recorded_features(meta, state)) | set(selected)
+    ctx = {"user": state.get("user"), "home": state.get("home"), "source": None, "added": set(),
+           "features": [k for k in feature_keys() if k in keep]}
     if execute is run_install:
         ctx["source"] = install_source()
     outcomes = execute(plan, ctx, say)
@@ -7922,6 +7957,458 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
     say("Open a new shell for bash completion to activate.")
     if opts["show_mesh_status"]:
         print_mesh_on_boot_status_hint("Meshtastic boot config status:")
+    return 1 if failed else 0
+
+
+# ---- repair: put back whatever is missing from what is installed -------------------------------------------------
+
+MARKER_WORDS = {
+    "exe": "the program itself",
+    "completion": "bash completion",
+    "rails-unit": "the rail boot service",
+    "desktop-entry": "the tray's start-menu entry",
+    "checkout": "the ops app folder",
+    "gui-shortcut": "the uConsole Ops shortcut",
+    "console-shortcut": "the uConsole Ops Console shortcut",
+    "sdr-recovery": "the readsb recovery",
+    "sudoers-listening": "the rules for listening without a password",
+    "udev": "the Flipper rule",
+    "autostart": "the tray's login entry",
+}
+
+
+def feature_missing(key, state):
+    """What a feature should have and does not, in words. Empty when it looks complete."""
+    f = feature_row(key)
+    optional = OPTIONAL_PACKAGES.get(key, ())
+    gone = [f"the package {p}" for p in f["apt"] if p not in optional and p not in state.get("installed", ())]
+    gone += [MARKER_WORDS[m] for m in FEATURE_MARKERS.get(key, ()) if m not in state.get("present", ())]
+    return gone
+
+
+def features_in_place(state):
+    """The features that look installed, for a machine set up before installs were recorded. A package on its
+    own proves nothing (git and iw are on most machines), so a feature counts only by something this tool wrote
+    for it. The app and the console count by their own shortcut, since they share the folder. The features that
+    are only a package (GPS, mesh, aircraft) count when the package is here and this tool is too."""
+    present = state.get("present", ())
+    found = []
+    for key in feature_keys():
+        own = [m for m in FEATURE_MARKERS.get(key, ()) if m != "checkout"]
+        if own and any(m in present for m in own):
+            found.append(key)
+    if found:
+        for key in feature_keys():
+            f = feature_row(key)
+            if key not in FEATURE_MARKERS and f["apt"] and all(p in state.get("installed", ()) for p in f["apt"]):
+                found.append(key)
+    return [k for k in feature_keys() if k in found]
+
+
+def recorded_features(meta, state):
+    """What has been installed: the list the installer keeps, or what is in place when there is no list yet."""
+    listed = (meta or {}).get("features")
+    if isinstance(listed, list):
+        return [k for k in feature_keys() if k in listed]
+    return features_in_place(state)
+
+
+def repair_selection(state, meta=None):
+    """The features to repair: every one that was installed, with what they need."""
+    found = recorded_features(meta, state)
+    return resolve_features(found) if found else []
+
+
+def format_repair(selected, state):
+    lines = ["Repair goes over everything that is installed and puts back what is missing or out of date.", ""]
+    for key in selected:
+        gone = feature_missing(key, state)
+        lines.append(f"  {key:<10} " + ("missing: " + ", ".join(gone) if gone else "looks complete"))
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---- uninstall ------------------------------------------------------------------------------------------------
+# Removes what this tool wrote and nothing else. It never removes a package, never switches a rail, never stops
+# a radio service, and never deletes your saved data. The ops app folder goes only when it holds nothing of
+# yours: no changed files, nothing unpushed, nothing stashed.
+
+UNINSTALL_USAGE = (
+    "Usage: sudo aiov2_ctl --uninstall [--only LIST] [--dry-run] [--yes]\n"
+    "       With no LIST everything this tool installed is removed. LIST is feature keys separated by commas;\n"
+    "       whatever cannot work without them is removed too. See them with: aiov2_ctl --features"
+)
+SUDO_LINK_DIRS = ("/usr/bin", "/usr/sbin")
+
+
+def parse_uninstall_args(args):
+    opts = {"only": None, "dry_run": False, "yes": False}
+    args = list(args or [])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--only":
+            if i + 1 >= len(args):
+                raise InstallError("--only needs a list of features.\n" + UNINSTALL_USAGE)
+            opts["only"] = (opts["only"] or []) + _key_list(args[i + 1])
+            i += 1
+        elif arg == "--dry-run":
+            opts["dry_run"] = True
+        elif arg in ("--yes", "-y"):
+            opts["yes"] = True
+        else:
+            raise InstallError(f"Unknown option for --uninstall: {arg}\n" + UNINSTALL_USAGE)
+        i += 1
+    return opts
+
+
+def uninstall_selection(only=None):
+    """The features to remove, last installed first: everything, or the ones named with whatever needs them."""
+    keys = feature_keys()
+    if only is None:
+        gone = set(keys)
+    else:
+        gone = set(only)
+        changed = True
+        while changed:
+            changed = False
+            for key in keys:
+                if key not in gone and gone & set(feature_row(key)["needs"]):
+                    gone.add(key)
+                    changed = True
+    return [k for k in reversed(keys) if k in gone]
+
+
+def _unstep(feature_key, name, kind, detail, root, **extra):
+    step = {"id": f"un.{feature_key}.{name}", "feature": feature_key, "kind": kind, "detail": detail, "root": root}
+    step.update(extra)
+    return step
+
+
+def uninstall_plan(selected, state):
+    """The steps that remove a selection, as plain data. Pure: reads nothing and changes nothing."""
+    state = state or {}
+    selected = list(selected)
+    user, home = state.get("user"), state.get("home")
+    apps = os.path.join(home, ".local", "share", "applications") if home else None
+    plan = []
+    for key in selected:
+        if key == "autostart":
+            if home:
+                plan.append(_unstep(key, "entry", "user-file",
+                                    f"Remove the tray's login entry, as {user}.", False,
+                                    paths=(os.path.join(home, ".config", "autostart", "aiov2_ctl.desktop"),)))
+            else:
+                plan.append(_unstep(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the tray"),
+                                    False, blocks=True))
+        elif key == "flipper":
+            plan.append(_unstep(key, "udev", "udev",
+                                f"Remove {COMPANION_UDEV_PATH}. After that only root can open a Flipper or ESP32 "
+                                f"board on USB.", True))
+        elif key == "listening":
+            if "core" not in selected:
+                plan.append(_unstep(key, "sudoers", "sudoers-quiet",
+                                    f"Rewrite {SUDOERS_PATH} without the listening rules: --wifi-listen, "
+                                    f"--wifi-survey and --bt-scan will ask for a password again.", True))
+        elif key == "sdr":
+            plan.append(_unstep(key, "recovery", "units",
+                                f"Switch off the once-a-minute SDR check ({SDR_WATCHDOG_TIMER}) and remove it "
+                                f"and the readsb recovery. The SDR rail and readsb are left as they are.", True,
+                                units=(SDR_WATCHDOG_TIMER,),
+                                paths=(f"/etc/systemd/system/{SDR_WATCHDOG_TIMER}",
+                                       f"/etc/systemd/system/{SDR_WATCHDOG_SERVICE}", SDR_RECOVERY_DROPIN_PATH)))
+        elif key in ("app", "console"):
+            which = "gui" if key == "app" else "console"
+            name = next(n for k, n, _ in OPS_SHORTCUTS if k == which)
+            title = next(t for k, _, t in OPS_SHORTCUTS if k == which)
+            if not home:
+                plan.append(_unstep(key, "no-user", "note", NO_USER_MESSAGE, False, blocks=True))
+                continue
+            plan.append(_unstep(key, "shortcut", "user-file",
+                                f"Remove the start-menu shortcut '{title}', as {user}.", False,
+                                paths=(os.path.join(apps, name),)))
+            other = "console" if key == "app" else "app"
+            path = ops_checkout_path(home)
+            if other in selected:
+                # Planned once, under whichever of the two comes last, so both shortcuts go first.
+                if key == [k for k in selected if k in ("app", "console")][-1]:
+                    plan.append(_unstep(key, "checkout", "checkout",
+                                        f"Remove the ops app folder {path}, as {user}, but only if it holds "
+                                        f"nothing of yours: no changed files, nothing unpushed, nothing "
+                                        f"stashed. Otherwise it is left and you are told why. Your logs and "
+                                        f"settings in ~/.local/state/ops_gui are never touched.", False,
+                                        path=path, shared_with=(other,)))
+            else:
+                other_title = feature_row(other)["title"]
+                plan.append(_unstep(key, "checkout-kept", "note",
+                                    f"The ops app folder {path} stays: the {other_title} uses it too.", False))
+        elif key == "tray":
+            plan.append(_unstep(key, "desktop-entry", "files",
+                                f"Remove the tray's start-menu entry and its icons. A tray that is running "
+                                f"stays until you quit it or log out.", True,
+                                paths=(SYSTEM_DESKTOP_PATH,), trees=(os.path.join(ASSET_BASE, "img"),)))
+        elif key == "core":
+            plan.append(_unstep(key, "sudoers", "files",
+                                f"Remove {SUDOERS_PATH}: rails and services will ask for a password again.", True,
+                                paths=(SUDOERS_PATH,)))
+            plan.append(_unstep(key, "rails-boot", "units",
+                                f"Switch off and remove {RAILS_BOOT_SERVICE}. Rails are no longer set at boot; "
+                                f"none is switched now.", True,
+                                units=(RAILS_BOOT_SERVICE,), paths=(RAILS_BOOT_SERVICE_PATH,)))
+            plan.append(_unstep(key, "files", "files",
+                                f"Remove bash completion and the note of where this was installed from.", True,
+                                paths=(COMPLETION_PATH, INSTALL_META_PATH)))
+            plan.append(_unstep(key, "exe", "exe",
+                                f"Remove the program {INSTALLED_PATH} and any link to it where sudo looks. "
+                                f"Your saved rail settings in {CONFIG_PATH} are left.", True))
+        elif key in PACKAGE_UNITS:
+            pkg, units, _ = PACKAGE_UNITS[key]
+            plan.append(_unstep(key, "kept", "note",
+                                f"Nothing of this tool's to remove. The {pkg} package and its service "
+                                f"({', '.join(units)}) are left exactly as they are.", False))
+    return plan
+
+
+def uninstall_packages_left(selected):
+    seen = []
+    for key in reversed(selected):
+        for pkg in feature_row(key)["apt"]:
+            if pkg not in seen:
+                seen.append(pkg)
+    return seen
+
+
+def format_uninstall_plan(plan, selected):
+    lines = ["This will remove: " + ", ".join(selected), ""]
+    current = None
+    n = 0
+    for step in plan:
+        if step["feature"] != current:
+            current = step["feature"]
+            lines.append(f"{feature_row(current)['title']} ({current})")
+        if step["kind"] == "note":
+            lines.append(f"      note: {step['detail']}")
+        else:
+            n += 1
+            lines.append(f"  {n:>2}. {step['detail']}" + ("" if step["root"] else "  [as you, not root]"))
+    lines.append("")
+    packages = uninstall_packages_left(selected)
+    if packages:
+        lines.append("No package is removed. These stay installed, since other things may use them: "
+                     + ", ".join(packages) + ".")
+    lines.append("No rail is switched and no radio service is stopped or started.")
+    return "\n".join(lines)
+
+
+def _remove_paths(paths):
+    """Remove each file that is there. True if any was."""
+    removed = False
+    for path in paths:
+        try:
+            os.remove(path)
+            removed = True
+        except FileNotFoundError:
+            pass
+    return removed
+
+
+def _un_files(step, ctx):
+    removed = _remove_paths(step.get("paths", ()))
+    for tree in step.get("trees", ()):
+        if os.path.isdir(tree) and not os.path.islink(tree):
+            shutil.rmtree(tree)
+            removed = True
+    return ("done" if removed else "already"), ""
+
+
+def _un_user_file(step, ctx, run=_run_text):
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    there = [p for p in step["paths"] if os.path.lexists(p)]
+    if not there:
+        return "already", ""
+    rc, _, err = run(as_user(user, ["rm", "-f", "--", *there]), cwd="/", timeout=30)
+    if rc != 0:
+        return "failed", (err.strip().splitlines() or ["could not be removed"])[-1]
+    return "done", ""
+
+
+def _un_units(step, ctx):
+    there = [p for p in step["paths"] if os.path.lexists(p)]
+    if not there:
+        return "already", ""
+    for unit in step.get("units", ()):
+        subprocess.call(["systemctl", "disable", "--now", unit], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _remove_paths(there)
+    subprocess.call(["systemctl", "daemon-reload"])
+    return "done", ""
+
+
+def _un_udev(step, ctx):
+    if not os.path.lexists(COMPANION_UDEV_PATH):
+        return "already", ""
+    if not _file_is(COMPANION_UDEV_PATH, COMPANION_UDEV_RULES):
+        return "note", f"{COMPANION_UDEV_PATH} is not as this tool wrote it, so it was left alone"
+    os.remove(COMPANION_UDEV_PATH)
+    subprocess.call(["udevadm", "control", "--reload-rules"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "done", ""
+
+
+def _un_sudoers_quiet(step, ctx):
+    if not os.path.lexists(SUDOERS_PATH):
+        return "already", ""
+    with open(SUDOERS_PATH) as f:
+        if "--wifi-listen" not in f.read():
+            return "already", ""
+    if setup_sudoers(listening=False) != 0:
+        return "failed", "the rules could not be rewritten; they are as they were"
+    return "done", ""
+
+
+def _un_exe(step, ctx):
+    removed = False
+    for folder in SUDO_LINK_DIRS:
+        link = os.path.join(folder, os.path.basename(INSTALLED_PATH))
+        if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(INSTALLED_PATH):
+            os.remove(link)
+            removed = True
+    return ("done" if _remove_paths((INSTALLED_PATH,)) or removed else "already"), ""
+
+
+def checkout_holds_nothing(path, user, run=_run_text):
+    """(True, '') when the ops checkout has nothing of the user's in it, else (False, why)."""
+    def git(*args):
+        return run(as_user(user, ["git", "-C", path, *args]), cwd="/", timeout=60)
+    rc, out, _ = git("status", "--porcelain")
+    if rc != 0:
+        return False, "git could not read it"
+    if out.strip():
+        return False, "it has files you changed or added"
+    rc, out, _ = git("stash", "list")
+    if rc != 0 or out.strip():
+        return False, "it has stashed work"
+    rc, out, _ = git("log", "--branches", "--not", "--remotes", "--oneline")
+    if rc != 0 or out.strip():
+        return False, "it has commits that were never pushed"
+    return True, ""
+
+
+def _un_checkout(step, ctx, run=_run_text):
+    user, home, path = ctx.get("user"), ctx.get("home"), step["path"]
+    if not user or not home:
+        return "failed", NO_USER_MESSAGE
+    if path != ops_checkout_path(home):
+        return "failed", f"{path} is not where the ops app goes; nothing was removed"
+    kind = checkout_state(path, user, run)
+    if kind == "missing":
+        return "already", ""
+    if kind != "ours":
+        return "note", f"{path} is not a checkout of {OPS_REPO_NAME}, so it was left alone"
+    empty, why = checkout_holds_nothing(path, user, run)
+    if not empty:
+        return "note", f"{path} was left: {why}. Delete it yourself if you want it gone"
+    rc, _, err = run(as_user(user, ["rm", "-rf", "--", path]), cwd="/", timeout=120)
+    if rc != 0:
+        return "failed", (err.strip().splitlines() or [f"{path} could not be removed"])[-1]
+    return "done", ""
+
+
+def _un_note(step, ctx):
+    return ("failed" if step.get("blocks") else "note"), ("" if not step.get("blocks") else step["detail"])
+
+
+UNINSTALL_ACTIONS = {
+    "files": _un_files,
+    "user-file": _un_user_file,
+    "units": _un_units,
+    "udev": _un_udev,
+    "sudoers-quiet": _un_sudoers_quiet,
+    "exe": _un_exe,
+    "checkout": _un_checkout,
+    "note": _un_note,
+}
+
+
+def uninstall_action(step):
+    return UNINSTALL_ACTIONS.get(step["kind"])
+
+
+def uninstall_results(selected, outcomes):
+    """[(feature, 'removed' | 'was not there' | 'nothing to remove' | 'failed', words)] in the selection's order."""
+    rows = []
+    for key in selected:
+        mine = [(s, st, w) for s, st, w in outcomes if key == s["feature"] or key in s.get("shared_with", ())]
+        failed = [w for _, st, w in mine if st == "failed"]
+        notes = [w for s, st, w in mine if st == "note" and w]
+        real = [st for s, st, _ in mine if s["kind"] != "note"]
+        if failed:
+            rows.append((key, "failed", "; ".join(failed)))
+        elif "done" in real:
+            rows.append((key, "removed", "; ".join(notes)))
+        elif real:
+            rows.append((key, "was not there", "; ".join(notes)))
+        else:
+            rows.append((key, "nothing to remove", "; ".join(notes)))
+    return rows
+
+
+def forget_features(removed, state):
+    """Take features out of the installer's record, so repair does not put them back."""
+    meta = load_install_meta() or {}
+    kept = [k for k in recorded_features(meta, state) if k not in removed]
+    meta["features"] = kept
+    _write_system_file(INSTALL_META_PATH, json.dumps(meta, indent=2))
+
+
+def uninstall_command(args, state=None, execute=run_install, ask=input, isatty=None, euid=None, say=print,
+                      forget=forget_features):
+    """aiov2_ctl --uninstall. Returns the exit code: 0 done, 1 something failed or was refused, 2 bad arguments."""
+    try:
+        opts = parse_uninstall_args(args)
+        selected = uninstall_selection(opts["only"])
+    except InstallError as exc:
+        say(str(exc))
+        return 2
+    euid = os.geteuid() if euid is None else euid
+    if not opts["dry_run"] and euid != 0:
+        say("Uninstall requires sudo.")
+        say("Run: sudo aiov2_ctl --uninstall")
+        say("To see what it would remove without changing anything: aiov2_ctl --uninstall --dry-run")
+        return 1
+    interactive = sys.stdin.isatty() if isatty is None else isatty
+    if not opts["dry_run"] and not opts["yes"] and not interactive:
+        say("Not a terminal, so there is nobody to ask. Run it again with --yes to remove, or --dry-run to see "
+            "the plan.")
+        return 1
+    state = install_state(euid=euid) if state is None else state
+    plan = uninstall_plan(selected, state)
+    say(format_uninstall_plan(plan, selected))
+    if opts["dry_run"]:
+        say("\nDry run: nothing was changed.")
+        return 0
+    if not opts["yes"]:
+        try:
+            answer = ask("\nRemove these? [y/N]: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            say("Nothing was changed.")
+            return 0
+    say("")
+    ctx = {"user": state.get("user"), "home": state.get("home")}
+    outcomes = execute(plan, ctx, say, uninstall_action) if execute is run_install else execute(plan, ctx, say)
+    rows = uninstall_results(selected, outcomes)
+    say(format_results(rows))
+    failed = [key for key, status, _ in rows if status == "failed"]
+    if "core" not in selected:
+        # With the controller gone its record went with it; otherwise note what is no longer installed. The
+        # record is read against the state from before the removal, so a machine with no record yet gets one.
+        forget([key for key in selected if key not in failed], state)
+    say("\nUninstall complete." if not failed else
+        f"\nUninstall finished, but not everything was removed: {', '.join(failed)}.")
+    if "core" not in selected:
+        say("Put anything back with: sudo aiov2_ctl --install --only LIST")
     return 1 if failed else 0
 
 
@@ -8224,6 +8711,12 @@ def main():
 
     elif arg == "--features":
         sys.exit(features_command())
+
+    elif arg == "--repair":
+        sys.exit(install_command(["--repair", *sys.argv[2:]]))
+
+    elif arg == "--uninstall":
+        sys.exit(uninstall_command(sys.argv[2:]))
 
     elif arg == "--update":
         sys.exit(update_self())
