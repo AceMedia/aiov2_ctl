@@ -2418,7 +2418,7 @@ class Telemetry:
         gauge = cap
         estimate = percent_from_voltage(viw["voltage"], cur)
         source = "gauge"
-        if gauge_unbelievable(gauge, estimate):
+        if gauge_unbelievable(gauge, estimate, amps=cur):
             cap, source = estimate, "voltage"
         full_wh = Telemetry._read_int(f"/sys/class/power_supply/{BATTERY_SUPPLY}/energy_full_design")
 
@@ -5696,11 +5696,45 @@ def percent_from_voltage(volts, amps=0.0, resistance=CELL_RESISTANCE):
     return 100
 
 
-def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE):
-    """True when the gauge's percentage is further from what the voltage says than a rough curve can explain."""
+FULL_GAUGE = 99                      # a gauge at or above this is saying "full"
+FULL_CHARGE_AMPS = 0.3               # a battery that really is full takes less charge than this
+
+
+def gauge_unbelievable(gauge, estimate, tolerance=GAUGE_TOLERANCE, amps=0.0):
+    """True when the gauge's percentage cannot be right. Two tests. One: it is further from what the voltage
+    says than a rough curve can explain. Two: it says full while the battery is still taking a real charging
+    current (`amps`, positive while charging). The second is needed because a charger lifts the cell voltage:
+    the stuck gauge on this board read 100% at a real 56%, and once on charge the voltage's story rose to
+    within the first test's tolerance and the 100% was believed again."""
     if gauge is None or estimate is None:
         return False
-    return abs(gauge - estimate) >= tolerance
+    if abs(gauge - estimate) >= tolerance:
+        return True
+    return gauge >= FULL_GAUGE and isinstance(amps, (int, float)) and amps >= FULL_CHARGE_AMPS and estimate < gauge
+
+
+def capacity_text(summary):
+    """The percentage as --status prints it: '45%', or '~45% (estimated ...)' when it is not the gauge's."""
+    cap = summary.get("capacity")
+    if summary.get("capacity_source") == "voltage":
+        return f"~{cap}% (estimated from the cell voltage)"
+    return f"{cap}%"
+
+
+def gauge_warning_text(summary):
+    """What to say when the gauge cannot be believed, or '' when it can. Two different cases. When the
+    percentage shown is already our estimate, the sentence is about the gauge being stuck. Otherwise it is the
+    older case of a high percentage on a very low cell, which points at the battery itself."""
+    if summary.get("capacity_source") == "voltage":
+        return (f"the battery gauge says {summary.get('capacity_gauge')}%, which the cell voltage "
+                f"({summary.get('voltage')} V) rules out. The percentage above is worked out from the voltage "
+                "instead and is rough, good to about ten percent. The gauge needs calibrating: one full "
+                "charge, a full discharge, and a full charge again.")
+    if gauge_disagrees(summary):
+        return (f"the gauge says {summary.get('capacity')}% but the battery is at {summary.get('voltage')} V. "
+                "A full cell reads about 4.2 V, so one cell may be flat or not making contact. "
+                "Check the battery before running on battery power.")
+    return ""
 
 
 def gauge_disagrees(summary):
@@ -5757,16 +5791,15 @@ def show_status():
 
     print(f"Source    : {summary['source']}")
     print(f"Status    : {summary['status']}")
-    print(f"Capacity  : {summary['capacity']}%")
+    print(f"Capacity  : {capacity_text(summary)}")
     print(f"Direction : {summary['direction']}")
     print(f"Mode      : {summary['mode']}")
     print(f"Voltage   : {summary['voltage']} V")
     print(f"Current   : {summary['current']} A")
     print(f"Power     : {summary['power']} W")
-    if gauge_disagrees(summary):
-        print(f"Warning   : the gauge says {summary['capacity']}% but the battery is at "
-              f"{summary['voltage']} V. A full cell reads about 4.2 V, so one cell may be flat "
-              "or not making contact. Check the battery before running on battery power.")
+    warning = gauge_warning_text(summary)
+    if warning:
+        print(f"Warning   : {warning}")
     if ignored:
         print(f"Gauge     : {ignored} of {taken} readings ignored as implausible. "
               "If this keeps happening, check the battery contacts.")
