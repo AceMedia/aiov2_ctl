@@ -131,6 +131,7 @@ class PrivateReadTests(Folder):
     def keep(self, path=None):
         with open(path or self.status, "w") as f:
             json.dump({"written": 100.0, "status": {"rails": {"GPS": "on"}}}, f)
+        os.chmod(path or self.status, 0o600)      # as the tool writes it, whatever this machine's umask is
 
     def read(self):
         return a.read_shared_status(2.0, 100.5, self.status, self.mark)
