@@ -898,5 +898,170 @@ class SourceCheckoutTests(unittest.TestCase):
         self.assertIsNone(a.source_checkout("/usr/local/bin/aiov2_ctl", "/usr/local/bin/aiov2_ctl", None, None))
 
 
+class PickerTests(unittest.TestCase):
+    """The feature picker: the pure model, what it shows, and how --install --pick uses it."""
+
+    def test_it_starts_from_the_usual_set(self):
+        self.assertEqual(a.FeaturePicker().selected(), a.default_features())
+
+    def test_ticking_a_feature_ticks_what_it_needs_and_says_so(self):
+        p = a.FeaturePicker(["core"])
+        p.toggle("adsb")
+        self.assertEqual(p.selected(), ["core", "sdr", "adsb"])
+        self.assertIn("Software radio", p.message)
+
+    def test_unticking_a_feature_unticks_what_cannot_work_without_it(self):
+        p = a.FeaturePicker(a.feature_keys())
+        p.toggle("tray")
+        self.assertNotIn("tray", p.ticked)
+        self.assertNotIn("autostart", p.ticked)
+        self.assertIn("Tray at login", p.message)
+        p.toggle("sdr")
+        self.assertNotIn("adsb", p.ticked)
+
+    def test_a_required_feature_stays_ticked(self):
+        p = a.FeaturePicker()
+        p.toggle("core")
+        self.assertIn("core", p.ticked)
+        self.assertIn("cannot be left out", p.message)
+        p.press("n")
+        self.assertEqual(p.selected(), ["core"])
+
+    def test_every_selection_the_picker_can_reach_is_one_the_installer_accepts(self):
+        for presses in itertools.product(range(len(a.FEATURES)), repeat=3):
+            p = a.FeaturePicker()
+            for i in presses:
+                p.toggle(a.feature_keys()[i])
+            chosen = p.selected()
+            self.assertEqual(chosen, a.resolve_features(chosen), presses)
+
+    def test_keys_move_tick_and_finish(self):
+        p = a.FeaturePicker(["core"])
+        p.press("up")
+        self.assertEqual(p.cursor, 0)
+        p.press("down")
+        self.assertEqual(p.current(), "tray")
+        p.press("space")
+        self.assertIn("tray", p.ticked)
+        p.press("end")
+        self.assertEqual(p.current(), a.feature_keys()[-1])
+        p.press("down")
+        self.assertEqual(p.current(), a.feature_keys()[-1])
+        p.press("a")
+        self.assertEqual(p.selected(), a.feature_keys())
+        p.press("u")
+        self.assertEqual(p.selected(), a.default_features())
+        self.assertIsNone(p.press("?"))
+        self.assertEqual(p.press("enter"), "accept")
+        self.assertEqual(p.press("q"), "cancel")
+
+    def test_the_rows_show_ticks_what_is_installed_and_missing_hardware(self):
+        p = a.FeaturePicker(["core", "flipper"])
+        st = state(installed={"gpsd"}, present=set())
+        lines = a.picker_lines(p, st, NOTHING_THERE)
+        texts = [t for t, _ in lines]
+        flipper = next(t for t in texts if "Flipper and Marauder" in t)
+        self.assertIn("[x]", flipper)
+        self.assertIn("a Flipper Zero not found", flipper)
+        gps = next(t for t in texts if t.lstrip().startswith("[ ] GPS"))
+        self.assertIn("installed", gps)
+        self.assertEqual([c for _, c in lines].count(True), 1)
+        self.assertTrue(any("does not remove it" in t for t in texts))
+
+    def test_nothing_is_said_about_removing_when_nothing_installed_is_unticked(self):
+        texts = [t for t, _ in a.picker_lines(a.FeaturePicker(), state(), ALL_THERE)]
+        self.assertFalse(any("does not remove it" in t for t in texts))
+
+    def test_the_cursor_row_is_explained_underneath(self):
+        p = a.FeaturePicker()
+        p.cursor = a.feature_keys().index("adsb")
+        texts = [t for t, _ in a.picker_lines(p, state(), ALL_THERE)]
+        self.assertIn(a.feature_row("adsb")["summary"], texts)
+        self.assertIn("Needs: packages readsb; Software radio", texts)
+
+    def test_wrapping_keeps_every_word_and_the_cursor_row(self):
+        lines = a.picker_lines(a.FeaturePicker(), state(), NOTHING_THERE)
+        wrapped = a.wrap_for_screen(lines, 40)
+        self.assertTrue(all(len(t) < 40 for t, _ in wrapped))
+        self.assertEqual(" ".join(" ".join(t.split()) for t, _ in wrapped if t),
+                         " ".join(" ".join(t.split()) for t, _ in lines if t))
+        self.assertTrue(any(c for _, c in wrapped))
+        row = next(i for i, (t, _) in enumerate(wrapped) if "Passive Wi-Fi" in t)
+        self.assertTrue(wrapped[row + 1][0].startswith("     "))        # carried on under the title
+
+    def test_the_plain_line_picker_takes_numbers_names_and_letters(self):
+        answers = iter(["8", "tray 99", "", ])
+        said = []
+        p = a.FeaturePicker(["core", "tray"])
+        chosen = a.pick_by_lines(p, state(), ALL_THERE, ask=lambda _: next(answers), say=said.append)
+        self.assertEqual(chosen, ["core", "sdr", "adsb"])
+        self.assertTrue(any("'99' is not one of" in s for s in said))
+        self.assertTrue(any(" 8. [x] Aircraft receiver" in s for s in said))
+
+    def test_the_plain_line_picker_can_be_quit(self):
+        self.assertIsNone(a.pick_by_lines(a.FeaturePicker(), state(), ALL_THERE, ask=lambda _: "q", say=lambda _: 0))
+
+        def gone(_):
+            raise EOFError
+        self.assertIsNone(a.pick_by_lines(a.FeaturePicker(), state(), ALL_THERE, ask=gone, say=lambda _: 0))
+
+    def test_a_terminal_that_cannot_do_a_screen_gets_the_plain_lines(self):
+        def broken(*_):
+            raise RuntimeError("no screen")
+        for env, screen in (({"TERM": "dumb"}, lambda *_: self.fail("screen used on a dumb terminal")),
+                            ({"TERM": "xterm"}, broken)):
+            chosen = a.pick_features(a.FeaturePicker(["core"]), state(), ALL_THERE, ask=lambda _: "",
+                                     say=lambda _: 0, screen=screen, environ=env)
+            self.assertEqual(chosen, ["core"])
+
+    def run_pick(self, args, picked, isatty=True, euid=0):
+        said, ran, seen = [], [], []
+
+        def execute(plan, ctx, say):
+            ran.append(ids(plan))
+            return [(s, "done", "") for s in plan]
+
+        def pick(picker, st, facts):
+            seen.append(picker.selected())
+            return picked
+
+        code = a.install_command(args, facts=ALL_THERE, state=state(), execute=execute, ask=lambda _: "y",
+                                 isatty=isatty, euid=euid, say=said.append, pick=pick)
+        return code, "\n".join(said), ran, seen
+
+    def test_pick_installs_what_was_ticked(self):
+        code, said, ran, seen = self.run_pick(["--pick"], ["core", "flipper"])
+        self.assertEqual(code, 0)
+        self.assertEqual(seen, [a.default_features()])
+        self.assertIn("This will install: core, flipper", said)
+        self.assertEqual(len(ran), 1)
+        self.assertNotIn("tray.assets", ran[0])
+
+    def test_pick_starts_from_what_the_other_flags_chose(self):
+        _, _, _, seen = self.run_pick(["--pick", "--only", "adsb"], ["core"])
+        self.assertEqual(seen, [["core", "sdr", "adsb"]])
+
+    def test_quitting_the_picker_changes_nothing(self):
+        code, said, ran, _ = self.run_pick(["--pick"], None)
+        self.assertEqual((code, ran), (0, []))
+        self.assertIn("nothing was changed", said)
+
+    def test_pick_needs_a_terminal_even_with_yes_or_dry_run(self):
+        for args in (["--pick", "--yes"], ["--pick", "--dry-run"]):
+            code, said, ran, seen = self.run_pick(args, ["core"], isatty=False)
+            self.assertEqual((code, ran, seen), (1, [], []))
+            self.assertIn("--only LIST", said)
+
+    def test_pick_with_dry_run_needs_no_root_and_changes_nothing(self):
+        code, said, ran, _ = self.run_pick(["--pick", "--dry-run"], ["core", "gps"], euid=1000)
+        self.assertEqual((code, ran), (0, []))
+        self.assertIn("This will install: core, gps", said)
+
+    def test_pick_is_in_the_help_and_completion(self):
+        self.assertIn("--pick", a.HELP_TEXT)
+        self.assertIn("--pick", a.BASH_COMPLETION)
+        self.assertIn("--pick", a.INSTALL_USAGE)
+
+
 if __name__ == "__main__":
     unittest.main()
