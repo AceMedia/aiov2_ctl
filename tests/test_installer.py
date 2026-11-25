@@ -1344,5 +1344,85 @@ class UninstallTests(unittest.TestCase):
                 self.assertEqual(a._un_udev({}, {}), ("already", ""))
 
 
+class InstallerWindowHelperTests(unittest.TestCase):
+    """What the installer window decides. The window itself is only ever checked on a real screen."""
+
+    def test_root_comes_from_sudo_when_it_needs_no_password_else_the_desktop_asks(self):
+        self.assertEqual(a.elevation(True, "/usr/bin/pkexec"), "sudo")
+        self.assertEqual(a.elevation(False, "/usr/bin/pkexec"), "pkexec")
+        self.assertIsNone(a.elevation(False, None))
+
+    def test_the_command_installs_exactly_what_was_ticked_and_never_asks(self):
+        argv = a.installer_argv("sudo", "/x/aiov2_ctl.py", "install", ["core", "tray"])
+        self.assertEqual(argv, ["sudo", "-n", "/usr/bin/python3", "-u", "/x/aiov2_ctl.py", "--install", "--only",
+                                "core,tray", "--yes"])
+        opts = a.parse_install_args(argv[6:])
+        self.assertEqual(a.select_features(opts), ["core", "tray"])
+        self.assertEqual(a.installer_argv("pkexec", "/x/a.py", "repair")[:1] + a.installer_argv("pkexec", "/x/a.py", "repair")[-2:],
+                         ["pkexec", "--repair", "--yes"])
+
+    def test_every_selection_the_window_can_make_is_one_the_command_line_accepts(self):
+        for keys in (["core"], a.default_features(), a.feature_keys(), ["core", "sdr", "adsb"]):
+            p = a.FeaturePicker(keys)
+            opts = a.parse_install_args(a.installer_arguments("install", p.selected())[1:])
+            self.assertEqual(a.select_features(opts), p.selected())
+        a.parse_install_args(a.installer_arguments("repair"))
+
+    def test_the_command_shown_for_a_terminal_can_be_typed_as_it_is(self):
+        self.assertEqual(a.installer_command_text("install", ["core", "gps"]), "sudo aiov2_ctl --install --only core,gps")
+        self.assertEqual(a.installer_command_text("repair"), "sudo aiov2_ctl --repair")
+
+    def test_rows_carry_ticks_fixed_boxes_and_notes(self):
+        st = state(installed={"gpsd"}, present={"exe", "completion", "rails-unit"})
+        rows = {r["key"]: r for r in a.installer_rows(a.FeaturePicker(["core", "gps"]), st, NOTHING_THERE)}
+        self.assertEqual(len(rows), len(a.FEATURES))
+        self.assertTrue(rows["core"]["fixed"] and rows["core"]["ticked"])
+        self.assertEqual(rows["core"]["installed"], "yes")
+        self.assertFalse(rows["tray"]["ticked"] or rows["tray"]["fixed"])
+        self.assertIn("a Flipper Zero not found", rows["flipper"]["note"])
+        self.assertIn("Needs Software radio.", rows["adsb"]["summary"])
+        self.assertNotIn("Needs", rows["tray"]["summary"])              # needing only the controller goes unsaid
+
+    def test_the_summary_says_what_is_new(self):
+        st = state(present={"exe", "completion", "rails-unit"})
+        self.assertIn("all already installed", a.installer_summary(a.FeaturePicker(["core"]), st))
+        text = a.installer_summary(a.FeaturePicker(["core", "flipper"]), st)
+        self.assertIn("2 ticked, 1 to add or finish: Flipper and Marauder.", text)
+
+    def test_the_last_line_tells_done_from_refused_from_failed(self):
+        self.assertEqual(a.installer_finished_text("install", 0), "Install complete.")
+        self.assertEqual(a.installer_finished_text("repair", 0), "Repair complete.")
+        self.assertIn("Nothing was changed", a.installer_finished_text("install", 126))
+        self.assertIn("Nothing was changed", a.installer_finished_text("install", 127))
+        self.assertIn("not everything went in", a.installer_finished_text("install", 1))
+
+    def test_a_window_needs_a_display(self):
+        self.assertTrue(a.desktop_running({"DISPLAY": ":0"}))
+        self.assertTrue(a.desktop_running({"WAYLAND_DISPLAY": "wayland-0"}))
+        self.assertFalse(a.desktop_running({}))
+
+    def test_the_window_refuses_root_and_a_machine_with_no_display(self):
+        with mock.patch.object(a.os, "geteuid", return_value=0), mock.patch("builtins.print") as said:
+            self.assertEqual(a.run_installer(), 1)
+            self.assertIn("as yourself", said.call_args_list[0][0][0])
+        with mock.patch.object(a.os, "geteuid", return_value=1000), mock.patch.dict(a.os.environ, {}, clear=True), \
+                mock.patch("builtins.print") as said:
+            self.assertEqual(a.run_installer(), 1)
+            self.assertIn("--install --pick", said.call_args_list[0][0][0])
+
+    def test_an_install_started_by_pkexec_knows_whose_home_to_use(self):
+        got = a.invoking_user({"PKEXEC_UID": "1000"}, 0, by_uid=lambda uid: user_entry("shane", uid))
+        self.assertEqual(got.pw_name, "shane")
+        self.assertIsNone(a.invoking_user({"PKEXEC_UID": "0"}, 0, by_uid=lambda uid: user_entry("root", 0)))
+        self.assertIsNone(a.invoking_user({"PKEXEC_UID": "abc"}, 0))
+        # sudo's name still wins when both are there
+        got = a.invoking_user({"SUDO_USER": "shane", "PKEXEC_UID": "1001"}, 0, by_name=lambda n: user_entry(n))
+        self.assertEqual(got.pw_name, "shane")
+
+    def test_it_is_in_the_help_and_completion(self):
+        self.assertIn("--installer", a.HELP_TEXT)
+        self.assertIn("--installer", a.BASH_COMPLETION)
+
+
 if __name__ == "__main__":
     unittest.main()

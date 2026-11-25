@@ -315,6 +315,7 @@ _aiov2_ctl()
         --gui
         --measure
         --install
+        --installer
         --features
         --repair
         --uninstall
@@ -567,6 +568,7 @@ COMMANDS:
   --measure    Measure power delta of a feature
   --install    Install everything: the controller, tray, ops app and console, and the radio packages
                [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]
+  --installer  The same installer as a window: tick features, see the plan, install or repair
   --features   What can be installed, what is on by default and what is installed now
   --repair     Go over what is installed and put back what is missing  [--dry-run] [--yes]
   --uninstall  Remove what this tool installed; packages, rails and your data are left
@@ -6953,6 +6955,11 @@ def invoking_user(environ=None, euid=None, by_name=pwd.getpwnam, by_uid=pwd.getp
         if euid != 0:
             return by_uid(euid)
         name = env.get("SUDO_USER", "")
+        uid = env.get("PKEXEC_UID", "")
+        if not name and uid.isdigit() and int(uid) != 0:
+            # Started by pkexec (the installer window asking for a password): it names the user by number.
+            entry = by_uid(int(uid))
+            return entry if entry.pw_uid != 0 and _USERNAME_RE.match(entry.pw_name) else None
         if not name or name == "root" or not _USERNAME_RE.match(name):
             return None
         entry = by_name(name)
@@ -7332,7 +7339,7 @@ def format_features(state, facts):
         lines.append(f"{'':<30} needs: {'; '.join(needs) if needs else 'nothing else'}")
     lines.append("")
     lines.append("Install with: sudo aiov2_ctl --install [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]")
-    lines.append("Tick them on screen with: sudo aiov2_ctl --install --pick")
+    lines.append("Tick them on screen with: sudo aiov2_ctl --install --pick     In a window: aiov2_ctl --installer")
     lines.append("Put back what is missing: sudo aiov2_ctl --repair      Remove: sudo aiov2_ctl --uninstall [--only LIST]")
     return "\n".join(lines)
 
@@ -8412,6 +8419,334 @@ def uninstall_command(args, state=None, execute=run_install, ask=input, isatty=N
     return 1 if failed else 0
 
 
+# ---- the graphical installer ------------------------------------------------------------------------------------
+# A window over the same pieces: FeaturePicker for the ticks, install_plan for the plan, and this same program run
+# as root for the work. The window itself never runs as root. Everything it decides is in the pure helpers here;
+# the window only shows them.
+
+def elevation(sudo_without_password, pkexec_path):
+    """How the window gets root for the install: 'sudo' when sudo needs no password, 'pkexec' when the desktop
+    can ask for one, else None (the user is shown the command to run in a terminal)."""
+    if sudo_without_password:
+        return "sudo"
+    return "pkexec" if pkexec_path else None
+
+
+def installer_arguments(mode, keys=()):
+    """What follows the program's name for a run from the window."""
+    if mode == "repair":
+        return ["--repair", "--yes"]
+    return ["--install", "--only", ",".join(keys), "--yes"]
+
+
+def installer_argv(how, program, mode, keys=(), python="/usr/bin/python3", pkexec="pkexec"):
+    """The full command the window runs as root. -u so the output arrives line by line."""
+    lead = ["sudo", "-n"] if how == "sudo" else [pkexec]
+    return [*lead, python, "-u", program, *installer_arguments(mode, keys)]
+
+
+def installer_command_text(mode, keys=()):
+    """The same thing as a person would type it, for when the window cannot get root itself."""
+    return "sudo aiov2_ctl " + " ".join(installer_arguments(mode, keys)[:-1])
+
+
+def installer_rows(picker, state, facts):
+    """A row per feature for the window: what to show and whether its box is ticked or fixed."""
+    rows = []
+    for key in picker.keys:
+        f = feature_row(key)
+        needs = [feature_row(k)["title"] for k in f["needs"] if not feature_row(k)["required"]]
+        rows.append({
+            "key": key,
+            "title": f["title"],
+            "summary": f["summary"] + (f" Needs {', '.join(needs)}." if needs else ""),
+            "ticked": key in picker.ticked,
+            "fixed": bool(f["required"]),
+            "installed": feature_installed(key, state),
+            "note": picker_row_note(key, state, facts),
+        })
+    return rows
+
+
+def installer_summary(picker, state):
+    """One line under the list: how many are ticked and how many of those are new."""
+    chosen = picker.selected()
+    new = [k for k in chosen if feature_installed(k, state) != "yes"]
+    if not new:
+        return f"{len(chosen)} ticked, all already installed. Installing again brings them up to date."
+    return f"{len(chosen)} ticked, {len(new)} to add or finish: " + ", ".join(feature_row(k)["title"] for k in new) + "."
+
+
+def installer_finished_text(mode, exit_code):
+    what = "Repair" if mode == "repair" else "Install"
+    if exit_code == 0:
+        return f"{what} complete."
+    if exit_code in (126, 127):
+        return f"{what} did not start: the password was not given, or root was refused. Nothing was changed."
+    return f"{what} finished, but not everything went in. The list above says what failed."
+
+
+INSTALLER_STYLE = """
+QWidget { font-size: 12pt; }
+QLabel#heading { font-size: 17pt; font-weight: bold; }
+QLabel#summary { font-size: 10pt; }
+QLabel#note { font-size: 10pt; }
+QLabel#message { font-size: 11pt; }
+QCheckBox { font-weight: bold; spacing: 10px; }
+QCheckBox::indicator { width: 22px; height: 22px; }
+QPushButton { padding: 8px 16px; }
+QPlainTextEdit { font-family: monospace; font-size: 10pt; }
+"""
+
+
+def build_installer_window(state=None, facts=None, how=None, program=None):
+    """The installer window, built but not shown. Needs a QApplication. Kept apart from run_installer so it can
+    be driven by hand on a real screen."""
+    from PyQt6.QtCore import QProcess, Qt
+    from PyQt6.QtWidgets import (QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
+                                 QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+
+    state = install_state() if state is None else state
+    facts = hardware_facts() if facts is None else facts
+    if how is None:
+        how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
+    program = program or os.path.realpath(__file__)
+
+    class InstallerWindow(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("AIO v2 installer")
+            self.setStyleSheet(INSTALLER_STYLE)
+            self.state, self.facts, self.how, self.program = state, facts, how, program
+            self.picker = FeaturePicker(recorded_features(load_install_meta() or {}, state) or None)
+            self.mode = "install"
+            self.process = None
+            self.boxes, self.notes = {}, {}
+            self.stack = QStackedWidget()
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(18, 14, 18, 14)
+            outer.addWidget(self.stack)
+            self.stack.addWidget(self.choose_page())
+            self.stack.addWidget(self.plan_page())
+            self.stack.addWidget(self.run_page())
+            self.show_ticks()
+
+        # -- page 1: choose
+        def choose_page(self):
+            page = QWidget()
+            col = QVBoxLayout(page)
+            head = QLabel("Choose what to install")
+            head.setObjectName("heading")
+            col.addWidget(head)
+            inner = QWidget()
+            grid = QGridLayout(inner)
+            grid.setColumnStretch(0, 1)
+            grid.setVerticalSpacing(2)
+            for i, row in enumerate(installer_rows(self.picker, self.state, self.facts)):
+                box = QCheckBox(row["title"])
+                box.clicked.connect(lambda _=False, key=row["key"]: self.toggle(key))
+                note = QLabel()
+                note.setObjectName("note")
+                note.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                summary = QLabel(row["summary"])
+                summary.setObjectName("summary")
+                summary.setWordWrap(True)
+                summary.setContentsMargins(34, 0, 0, 8)
+                grid.addWidget(box, i * 2, 0)
+                grid.addWidget(note, i * 2, 1)
+                grid.addWidget(summary, i * 2 + 1, 0, 1, 2)
+                self.boxes[row["key"]], self.notes[row["key"]] = box, note
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(inner)
+            col.addWidget(scroll, 1)
+            self.message = QLabel()
+            self.message.setObjectName("message")
+            self.message.setWordWrap(True)
+            col.addWidget(self.message)
+            keys = QHBoxLayout()
+            for text, name in (("The usual set", "u"), ("Everything", "a"), ("Only what is needed", "n")):
+                b = QPushButton(text)
+                b.clicked.connect(lambda _=False, name=name: self.preset(name))
+                keys.addWidget(b)
+            keys.addStretch(1)
+            self.repair_button = QPushButton("Repair what is installed")
+            self.repair_button.clicked.connect(lambda: self.show_plan("repair"))
+            keys.addWidget(self.repair_button)
+            self.next_button = QPushButton("See the plan")
+            self.next_button.setDefault(True)
+            self.next_button.clicked.connect(lambda: self.show_plan("install"))
+            keys.addWidget(self.next_button)
+            col.addLayout(keys)
+            return page
+
+        def toggle(self, key):
+            self.picker.toggle(key)
+            self.show_ticks()
+
+        def preset(self, name):
+            self.picker.press(name)
+            self.show_ticks()
+
+        def show_ticks(self):
+            for row in installer_rows(self.picker, self.state, self.facts):
+                box = self.boxes[row["key"]]
+                box.blockSignals(True)
+                box.setChecked(row["ticked"])
+                box.blockSignals(False)
+                self.notes[row["key"]].setText(", ".join(n for n in ("always" if row["fixed"] else "", row["note"]) if n))
+            self.message.setText(self.picker.message or installer_summary(self.picker, self.state))
+            self.repair_button.setEnabled(bool(repair_selection(self.state, load_install_meta() or {})))
+
+        # -- page 2: the plan
+        def plan_page(self):
+            page = QWidget()
+            col = QVBoxLayout(page)
+            self.plan_head = QLabel()
+            self.plan_head.setObjectName("heading")
+            col.addWidget(self.plan_head)
+            self.plan_text = QPlainTextEdit()
+            self.plan_text.setReadOnly(True)
+            col.addWidget(self.plan_text, 1)
+            self.how_label = QLabel()
+            self.how_label.setObjectName("message")
+            self.how_label.setWordWrap(True)
+            col.addWidget(self.how_label)
+            keys = QHBoxLayout()
+            back = QPushButton("Back")
+            back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+            keys.addWidget(back)
+            keys.addStretch(1)
+            self.go_button = QPushButton("Install")
+            self.go_button.clicked.connect(self.start)
+            keys.addWidget(self.go_button)
+            col.addLayout(keys)
+            return page
+
+        def show_plan(self, mode):
+            self.mode = mode
+            if mode == "repair":
+                self.chosen = repair_selection(self.state, load_install_meta() or {})
+                lead = format_repair(self.chosen, self.state)
+            else:
+                self.chosen = self.picker.selected()
+                lead = ""
+            plan = install_plan(self.chosen, self.facts, self.state)
+            self.plan_head.setText("This is what repair will do" if mode == "repair" else "This is what will happen")
+            self.plan_text.setPlainText((lead + chr(10) if lead else lead) + format_plan(plan, self.chosen))
+            self.go_button.setText("Repair" if mode == "repair" else "Install")
+            self.go_button.setEnabled(self.how is not None)
+            self.how_label.setText({
+                "sudo": "Nothing has been changed yet. Pressing the button runs this as root with sudo.",
+                "pkexec": "Nothing has been changed yet. Pressing the button asks for your password, then runs "
+                          "this as root.",
+                None: "This window cannot get root on this system. Run this in a terminal instead:  "
+                      + installer_command_text(mode, self.chosen),
+            }[self.how])
+            self.stack.setCurrentIndex(1)
+
+        # -- page 3: doing it
+        def run_page(self):
+            page = QWidget()
+            col = QVBoxLayout(page)
+            self.run_head = QLabel()
+            self.run_head.setObjectName("heading")
+            col.addWidget(self.run_head)
+            self.log = QPlainTextEdit()
+            self.log.setReadOnly(True)
+            col.addWidget(self.log, 1)
+            self.done_label = QLabel()
+            self.done_label.setObjectName("message")
+            self.done_label.setWordWrap(True)
+            col.addWidget(self.done_label)
+            keys = QHBoxLayout()
+            self.again_button = QPushButton("Back to the list")
+            self.again_button.clicked.connect(self.back_to_list)
+            keys.addWidget(self.again_button)
+            keys.addStretch(1)
+            self.close_button = QPushButton("Close")
+            self.close_button.clicked.connect(self.close)
+            keys.addWidget(self.close_button)
+            col.addLayout(keys)
+            return page
+
+        def start(self):
+            argv = installer_argv(self.how, self.program, self.mode, self.chosen)
+            self.run_head.setText("Repairing" if self.mode == "repair" else "Installing")
+            self.log.setPlainText("")
+            self.done_label.setText("Working. This can take a few minutes when packages are downloaded.")
+            self.again_button.setEnabled(False)
+            self.close_button.setEnabled(False)
+            self.stack.setCurrentIndex(2)
+            self.process = QProcess(self)
+            self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+            self.process.readyReadStandardOutput.connect(self.read_output)
+            self.process.finished.connect(self.finished)
+            self.process.errorOccurred.connect(self.failed_to_start)
+            self.process.start(argv[0], argv[1:])
+
+        def read_output(self):
+            text = bytes(self.process.readAllStandardOutput()).decode("utf-8", "replace")
+            self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+            self.log.insertPlainText(text)
+            self.log.ensureCursorVisible()
+
+        def failed_to_start(self, error):
+            if error == QProcess.ProcessError.FailedToStart:
+                self.finished(127)
+
+        def finished(self, code, _status=None):
+            self.run_head.setText("Finished")
+            self.done_label.setText(installer_finished_text(self.mode, code))
+            self.again_button.setEnabled(True)
+            self.close_button.setEnabled(True)
+
+        def back_to_list(self):
+            self.state = install_state()
+            self.picker.message = ""
+            self.show_ticks()
+            self.stack.setCurrentIndex(0)
+
+        def closeEvent(self, event):
+            # An install that is under way is never cut off half done by closing the window.
+            if self.process is not None and self.process.state() != QProcess.ProcessState.NotRunning:
+                event.ignore()
+                return
+            super().closeEvent(event)
+
+    return InstallerWindow()
+
+
+def run_installer():
+    """aiov2_ctl --installer. Returns an exit code."""
+    if os.geteuid() == 0:
+        print("Run the installer window as yourself, not as root: it asks for root when it installs.")
+        return 1
+    if not desktop_running():
+        print("There is no desktop to show a window on. Use the terminal picker instead: "
+              "sudo aiov2_ctl --install --pick")
+        return 1
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:
+        print("The installer window needs PyQt6, which is not installed.")
+        print("Install it with: sudo apt install python3-pyqt6")
+        print("Or use the terminal picker, which needs nothing extra: sudo aiov2_ctl --install --pick")
+        return 1
+    app = QApplication(sys.argv[:1])
+    window = build_installer_window()
+    window.resize(900, 620)
+    window.show()
+    return app.exec()
+
+
+def desktop_running(environ=None):
+    """True when this process has a display to open a window on."""
+    env = os.environ if environ is None else environ
+    return bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
+
+
 def install_self():
     """Kept for callers of the old name: the same as `aiov2_ctl --install` with whatever followed it."""
     return install_command(sys.argv[2:])
@@ -8711,6 +9046,9 @@ def main():
 
     elif arg == "--features":
         sys.exit(features_command())
+
+    elif arg == "--installer":
+        sys.exit(run_installer())
 
     elif arg == "--repair":
         sys.exit(install_command(["--repair", *sys.argv[2:]]))
