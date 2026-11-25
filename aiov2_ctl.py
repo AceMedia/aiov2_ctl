@@ -1921,6 +1921,43 @@ def parse_pinctrl_level(out: str):
 
 
 # ==============================
+# How often the tray asks systemd about a service
+# ==============================
+# The tray used to ask "is readsb running?" on every one second tick. Each
+# ask is a new process (and, when the answer was no, a sudo line in the
+# journal), all to redraw a status line that changes a few times a day.
+# Ten seconds is plenty for a status line.
+SERVICE_CHECK_INTERVAL_S = 10
+
+
+def service_check_due(rail_on, visible, last_asked, now, forced=False,
+                      interval=SERVICE_CHECK_INTERVAL_S):
+    """
+    Should the tray ask systemd about a service now?
+
+    rail_on     the power rail the service needs is on
+    visible     the menu or window that shows the answer is open
+    last_asked  when we last asked (same clock as now), None if never
+    forced      the user just opened the menu or pressed start/stop, so
+                the answer must be fresh
+
+    A service whose rail is off cannot be running usefully, and nobody
+    can see the answer while the menu is shut, so then we do not ask at
+    all. Otherwise we ask at most once per interval.
+    """
+    if forced:
+        return True
+    if not rail_on and not visible:
+        return False
+    if last_asked is None:
+        return True
+    if now < last_asked:
+        # The clock went backwards. Ask rather than wait an unknown time.
+        return True
+    return now - last_asked >= interval
+
+
+# ==============================
 # GPIO Helpers
 # ==============================
 class GpioController:
@@ -1933,15 +1970,12 @@ class GpioController:
 
     @staticmethod
     def _service_active(name):
+        # Any user may ask systemd whether a unit is active, and "no" is
+        # an ordinary answer, not a failure. This used to ask again under
+        # sudo whenever the answer was no, which gave the same answer and
+        # wrote a sudo line to the journal each time.
         cmd = ["systemctl", "is-active", name]
-        if subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-            return True
-
-        return subprocess.run(
-            ["sudo", "-n", *cmd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode == 0
+        return subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
     @staticmethod
     def _service_enabled(name):
@@ -5937,9 +5971,9 @@ def run_gui():
     mesh_start_action = QAction("    ▶ Start")
     mesh_stop_action = QAction("    ■ Stop")
     mesh_restart_action = QAction("    ↻ Restart")
-    mesh_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "meshtasticd.service"), refresh()))
-    mesh_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "meshtasticd.service"), refresh()))
-    mesh_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "meshtasticd.service"), refresh()))
+    mesh_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "meshtasticd.service"), service_changed("meshtasticd.service")))
+    mesh_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "meshtasticd.service"), service_changed("meshtasticd.service")))
+    mesh_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "meshtasticd.service"), service_changed("meshtasticd.service")))
 
     app_services_menu.addAction(mesh_title_action)
     app_services_menu.addAction(mesh_status_action)
@@ -5956,9 +5990,9 @@ def run_gui():
     readsb_start_action = QAction("    ▶ Start")
     readsb_stop_action = QAction("    ■ Stop")
     readsb_restart_action = QAction("    ↻ Restart")
-    readsb_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "readsb.service"), refresh()))
-    readsb_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "readsb.service"), refresh()))
-    readsb_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "readsb.service"), refresh()))
+    readsb_start_action.triggered.connect(lambda _=False: (GpioController._run_service("start", "readsb.service"), service_changed("readsb.service")))
+    readsb_stop_action.triggered.connect(lambda _=False: (GpioController._run_service("stop", "readsb.service"), service_changed("readsb.service")))
+    readsb_restart_action.triggered.connect(lambda _=False: (GpioController._run_service("restart", "readsb.service"), service_changed("readsb.service")))
 
     app_services_menu.addAction(readsb_title_action)
     app_services_menu.addAction(readsb_status_action)
@@ -6011,8 +6045,30 @@ def run_gui():
         layout.addWidget(cb)
         checkboxes[f] = cb
 
+    # What systemd last said about each service: name -> (when, installed,
+    # active). refresh() runs every second while the menu or window is
+    # open; the answers are reused until service_check_due says ask again.
+    service_seen = {}
+
+    def service_state(name, rail_on, visible, forced):
+        seen = service_seen.get(name)
+        last_asked = seen[0] if seen else None
+        if seen is None or service_check_due(rail_on, visible, last_asked,
+                                             time.monotonic(), forced):
+            installed = GpioController._service_installed(name)
+            active = bool(installed and GpioController._service_active(name))
+            seen = (time.monotonic(), installed, active)
+            service_seen[name] = seen
+        return seen[1], seen[2]
+
+    def service_changed(name):
+        # The user just started or stopped it: forget the old answer.
+        service_seen.pop(name, None)
+        refresh()
+
     def refresh(force=False):
-        if not force and not window.isVisible() and not menu_active[0]:
+        visible = window.isVisible() or menu_active[0]
+        if not force and not visible:
             return
         summary = Telemetry.power_summary()
         rails_on_boot = get_rails_on_boot_config(system_only=True)
@@ -6027,8 +6083,10 @@ def run_gui():
 
         companion_action.setText(companions_summary_line(detect_companions()))
 
+        rail_on = {}
         for f, p in GPIO_MAP.items():
             state = GpioController.get_gpio(p)
+            rail_on[f] = bool(state)
 
             checkboxes[f].blockSignals(True)
             checkboxes[f].setChecked(state)
@@ -6042,13 +6100,14 @@ def run_gui():
             boot_actions[f].setChecked(bool(rails_on_boot.get(f, False)))
             boot_actions[f].blockSignals(False)
 
-        if not GpioController._service_installed("meshtasticd.service"):
+        mesh_installed, mesh_active = service_state(
+            "meshtasticd.service", rail_on.get("LORA", False), visible, force)
+        if not mesh_installed:
             mesh_state = "Not installed"
             mesh_start_action.setVisible(False)
             mesh_stop_action.setVisible(False)
             mesh_restart_action.setVisible(False)
         else:
-            mesh_active = GpioController._service_active("meshtasticd.service")
             mesh_state = "Running" if mesh_active else "Stopped"
             mesh_start_action.setVisible(True)
             mesh_stop_action.setVisible(True)
@@ -6058,13 +6117,14 @@ def run_gui():
 
         mesh_status_action.setText(f"    Status: {mesh_state}")
 
-        if not GpioController._service_installed("readsb.service"):
+        readsb_installed, readsb_active = service_state(
+            "readsb.service", rail_on.get("SDR", False), visible, force)
+        if not readsb_installed:
             readsb_state = "Not installed"
             readsb_start_action.setVisible(False)
             readsb_stop_action.setVisible(False)
             readsb_restart_action.setVisible(False)
         else:
-            readsb_active = GpioController._service_active("readsb.service")
             readsb_state = "Running" if readsb_active else "Stopped"
             readsb_start_action.setVisible(True)
             readsb_stop_action.setVisible(True)
