@@ -40,6 +40,7 @@ From a checkout, or once it is installed, the same installer is:
 ```bash
 aiov2_ctl --features                       # what can be installed, what is on by default, what is here now
 aiov2_ctl --install --dry-run              # the plan, in plain words; changes nothing and needs no root
+sudo aiov2_ctl --install --pick            # tick the features you want on screen, then see the plan
 sudo aiov2_ctl --install                   # the usual set
 sudo aiov2_ctl --install --all             # everything, including the aircraft receiver and tray at login
 sudo aiov2_ctl --install --only core,tray  # just these (and what they need)

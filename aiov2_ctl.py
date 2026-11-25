@@ -367,7 +367,7 @@ _aiov2_ctl()
     fi
 
     if [[ "${COMP_WORDS[1]}" == "--install" ]]; then
-        COMPREPLY=( $(compgen -W "--all --only --without --dry-run --yes" -- "${cur}") )
+        COMPREPLY=( $(compgen -W "--pick --all --only --without --dry-run --yes" -- "${cur}") )
         return 0
     fi
 
@@ -554,7 +554,7 @@ COMMANDS:
   --gui        System tray controller
   --measure    Measure power delta of a feature
   --install    Install everything: the controller, tray, ops app and console, and the radio packages
-               [--all | --only LIST | --without LIST] [--dry-run] [--yes]
+               [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]
   --features   What can be installed, what is on by default and what is installed now
   --update     Pull latest version from git and reinstall
   --check-update     Check for updates and prompt to install
@@ -6756,8 +6756,9 @@ NO_USER_MESSAGE = (
     "Log in as yourself and run: sudo aiov2_ctl --install"
 )
 INSTALL_USAGE = (
-    "Usage: sudo aiov2_ctl --install [--all | --only LIST | --without LIST] [--dry-run] [--yes]\n"
-    "       LIST is feature keys separated by commas. See them with: aiov2_ctl --features"
+    "Usage: sudo aiov2_ctl --install [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]\n"
+    "       --pick lets you tick features on screen. LIST is feature keys separated by commas.\n"
+    "       See them with: aiov2_ctl --features"
 )
 
 
@@ -6793,7 +6794,8 @@ def _key_list(text):
 
 def parse_install_args(args):
     """The words after --install as a dict. Raises InstallError for anything it does not know."""
-    opts = {"all": False, "only": None, "without": [], "dry_run": False, "yes": False, "show_mesh_status": False}
+    opts = {"all": False, "only": None, "without": [], "dry_run": False, "yes": False, "show_mesh_status": False,
+            "pick": False}
     args = list(args or [])
     i = 0
     while i < len(args):
@@ -6811,6 +6813,8 @@ def parse_install_args(args):
             i += 1
         elif arg == "--dry-run":
             opts["dry_run"] = True
+        elif arg == "--pick":
+            opts["pick"] = True
         elif arg in ("--yes", "-y"):
             opts["yes"] = True
         elif arg == "--show-mesh-status":
@@ -7307,13 +7311,223 @@ def format_features(state, facts):
                      f"{f['summary']}")
         lines.append(f"{'':<30} needs: {'; '.join(needs) if needs else 'nothing else'}")
     lines.append("")
-    lines.append("Install with: sudo aiov2_ctl --install [--all | --only LIST | --without LIST] [--dry-run] [--yes]")
+    lines.append("Install with: sudo aiov2_ctl --install [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]")
+    lines.append("Tick them on screen with: sudo aiov2_ctl --install --pick")
     return "\n".join(lines)
 
 
 def features_command():
     print(format_features(install_state(), hardware_facts()))
     return 0
+
+
+# ---- the picker: choosing features on a terminal ---------------------------------------------------------------
+# FeaturePicker and picker_lines are pure. The two front ends (a full screen, and plain numbered lines for a
+# terminal that cannot do one) only read keys and draw what picker_lines returns.
+
+PICKER_KEYS_HELP = "Up/Down move   Space tick or untick   A everything   U the usual set   N only what is needed   Enter go on   Q quit"
+
+
+class FeaturePicker:
+    """Which features are ticked, and where the cursor is. Ticking one ticks what it needs; unticking one unticks
+    whatever cannot work without it; a required feature stays ticked."""
+
+    def __init__(self, ticked=None):
+        self.keys = feature_keys()
+        self.ticked = set(resolve_features(default_features() if ticked is None else ticked))
+        self.cursor = 0
+        self.message = ""
+
+    def selected(self):
+        return [k for k in self.keys if k in self.ticked]
+
+    def current(self):
+        return self.keys[self.cursor]
+
+    def move(self, delta):
+        self.cursor = max(0, min(len(self.keys) - 1, self.cursor + delta))
+        self.message = ""
+
+    def toggle(self, key=None):
+        key = self.current() if key is None else key
+        row = feature_row(key)
+        if key in self.ticked:
+            if row["required"]:
+                self.message = f"{row['title']} cannot be left out: everything else needs it."
+                return
+            gone = {key}
+            changed = True
+            while changed:
+                changed = False
+                for other in self.keys:
+                    if other in self.ticked and other not in gone and gone & set(feature_row(other)["needs"]):
+                        gone.add(other)
+                        changed = True
+            self.ticked -= gone
+            also = [feature_row(k)["title"] for k in self.keys if k in gone and k != key]
+            self.message = (f"Also left out, because it needs {row['title']}: {', '.join(also)}." if also else "")
+        else:
+            added = set(resolve_features([key])) - self.ticked
+            self.ticked |= added
+            also = [feature_row(k)["title"] for k in self.keys if k in added and k != key]
+            self.message = (f"Also ticked, because {row['title']} needs it: {', '.join(also)}." if also else "")
+
+    def choose(self, keys, message=""):
+        self.ticked = set(resolve_features(keys))
+        self.message = message
+
+    def press(self, key):
+        """One key press, by name. Returns 'accept', 'cancel' or None to carry on."""
+        if key in ("up", "k"):
+            self.move(-1)
+        elif key in ("down", "j"):
+            self.move(1)
+        elif key == "home":
+            self.move(-len(self.keys))
+        elif key == "end":
+            self.move(len(self.keys))
+        elif key in ("space", "x"):
+            self.toggle()
+        elif key == "a":
+            self.choose(self.keys, "Everything is ticked.")
+        elif key == "u":
+            self.choose(default_features(), "The usual set is ticked.")
+        elif key == "n":
+            self.choose([], "Only what everything else needs is ticked.")
+        elif key == "enter":
+            return "accept"
+        elif key in ("q", "escape"):
+            return "cancel"
+        return None
+
+
+def picker_row_note(key, state, facts):
+    """The few words at the end of a feature's row: whether it is installed and whether its hardware was found."""
+    row = feature_row(key)
+    words = {"yes": "installed", "partly": "partly installed", "no": ""}[feature_installed(key, state)]
+    notes = [words] if words else []
+    if row["hardware"] and facts.get(row["hardware"]) is False:
+        notes.append(HARDWARE_TITLES[row["hardware"]] + " not found")
+    return ", ".join(notes)
+
+
+def picker_lines(picker, state, facts, numbered=False):
+    """What the picker shows, as [(text, is_the_cursor_row)]: a heading, a row per feature, then what the feature
+    under the cursor is and needs, and any message."""
+    lines = [("Choose what to install", False), ("", False)]
+    width = max(len(feature_row(k)["title"]) for k in picker.keys)
+    for i, key in enumerate(picker.keys):
+        row = feature_row(key)
+        mark = "[x]" if key in picker.ticked else "[ ]"
+        number = f"{i + 1:>2}. " if numbered else ""
+        note = picker_row_note(key, state, facts)
+        if row["required"]:
+            note = ", ".join(n for n in ("always", note) if n)
+        text = f" {number}{mark} {row['title']:<{width}}  {note}".rstrip()
+        lines.append((text, i == picker.cursor and not numbered))
+    lines.append(("", False))
+    if not numbered:
+        row = feature_row(picker.current())
+        lines.append((row["summary"], False))
+        needs = []
+        if row["apt"]:
+            needs.append("packages " + ", ".join(row["apt"]))
+        if row["needs"]:
+            needs.append(", ".join(feature_row(k)["title"] for k in row["needs"]))
+        lines.append(("Needs: " + ("; ".join(needs) if needs else "nothing else"), False))
+        if row["hardware"] and facts.get(row["hardware"]) is False:
+            lines.append((HARDWARE_MISSING[row["hardware"]], False))
+        lines.append(("", False))
+    if any(k not in picker.ticked and feature_installed(k, state) != "no" for k in picker.keys):
+        lines.append(("Unticking something that is already installed does not remove it; it is only left as it is.",
+                      False))
+    if picker.message:
+        lines.append((picker.message, False))
+    return lines
+
+
+def wrap_for_screen(lines, width):
+    """picker_lines folded to a screen `width` wide, keeping which row is the cursor's."""
+    import textwrap
+    out = []
+    for text, cursor in lines:
+        # A feature's row that is too long carries on under its title, not under its tick box.
+        hang = "     " if text.startswith((" [", "  ")) and "] " in text[:12] else ""
+        parts = textwrap.wrap(text, max(20, width - 1), subsequent_indent=hang) or [""]
+        out += [(part, cursor) for part in parts]
+    return out
+
+
+def pick_on_screen(picker, state, facts):
+    """The full-screen picker. Returns the chosen keys, or None if the user quit. Raises if the terminal cannot
+    do a full screen, so the caller can fall back to plain lines."""
+    import curses
+
+    names = {curses.KEY_UP: "up", curses.KEY_DOWN: "down", curses.KEY_HOME: "home", curses.KEY_END: "end",
+             curses.KEY_ENTER: "enter", 10: "enter", 13: "enter", 27: "escape", ord(" "): "space"}
+
+    def loop(screen):
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        while True:
+            screen.erase()
+            height, width = screen.getmaxyx()
+            rows = wrap_for_screen(picker_lines(picker, state, facts), width)
+            rows += [("", False)] + wrap_for_screen([(PICKER_KEYS_HELP, False)], width)
+            for y, (text, cursor) in enumerate(rows[:height]):
+                try:
+                    screen.addstr(y, 0, text[:width - 1], curses.A_REVERSE if cursor else curses.A_NORMAL)
+                except curses.error:
+                    pass
+            screen.refresh()
+            code = screen.getch()
+            name = names.get(code) or (chr(code).lower() if 32 < code < 127 else "")
+            done = picker.press(name)
+            if done:
+                return picker.selected() if done == "accept" else None
+
+    return curses.wrapper(loop)
+
+
+def pick_by_lines(picker, state, facts, ask=input, say=print):
+    """The picker for a terminal that cannot do a full screen: a numbered list and a typed answer."""
+    while True:
+        say("")
+        for text, _ in picker_lines(picker, state, facts, numbered=True):
+            say(text)
+        try:
+            answer = ask("\nA number to tick or untick it, a = everything, u = the usual set, n = only what is "
+                         "needed, Enter = go on, q = quit: ").strip().lower()
+        except EOFError:
+            return None
+        if answer == "":
+            return picker.selected()
+        if answer in ("q", "quit"):
+            return None
+        if answer in ("a", "u", "n"):
+            picker.press(answer)
+            continue
+        picker.message = ""
+        for word in answer.replace(",", " ").split():
+            if word.isdigit() and 1 <= int(word) <= len(picker.keys):
+                picker.toggle(picker.keys[int(word) - 1])
+            elif word in picker.keys:
+                picker.toggle(word)
+            else:
+                picker.message = f"'{word}' is not one of the numbers or names above."
+
+
+def pick_features(picker, state, facts, ask=input, say=print, screen=pick_on_screen, environ=None):
+    """Run whichever picker this terminal can show."""
+    env = os.environ if environ is None else environ
+    if env.get("TERM", "dumb") not in ("", "dumb"):
+        try:
+            return screen(picker, state, facts)
+        except Exception:
+            pass
+    return pick_by_lines(picker, state, facts, ask, say)
 
 
 # ---- carrying a plan out --------------------------------------------------------------------------------------
@@ -7649,7 +7863,7 @@ def format_results(rows):
 
 
 def install_command(args, facts=None, state=None, execute=run_install, ask=input, isatty=None, euid=None,
-                    say=print):
+                    say=print, pick=pick_features):
     """aiov2_ctl --install. Returns the exit code: 0 done, 1 something failed or was refused, 2 bad arguments."""
     try:
         opts = parse_install_args(args)
@@ -7664,6 +7878,10 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
         say("To see what it would do without changing anything: aiov2_ctl --install --dry-run")
         return 1
     interactive = sys.stdin.isatty() if isatty is None else isatty
+    if opts.get("pick") and not interactive:
+        say("Not a terminal, so there is nowhere to show the list. Choose with --only LIST or --without LIST; "
+            "see the features with: aiov2_ctl --features")
+        return 1
     if not opts["dry_run"] and not opts["yes"] and not interactive:
         say("Not a terminal, so there is nobody to ask. Run it again with --yes to install, or --dry-run to "
             "see the plan.")
@@ -7671,6 +7889,12 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
 
     facts = hardware_facts() if facts is None else facts
     state = install_state(euid=euid) if state is None else state
+    if opts.get("pick"):
+        # Starts from what the other flags chose (the usual set when there are none).
+        selected = pick(FeaturePicker(selected), state, facts)
+        if selected is None:
+            say("Nothing was chosen and nothing was changed.")
+            return 0
     plan = install_plan(selected, facts, state)
     say(format_plan(plan, selected))
     if opts["dry_run"]:
