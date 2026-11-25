@@ -185,8 +185,10 @@ class InstallTests(unittest.TestCase):
             self.assertFalse(a.ensure_system_packages(say=said.append))
         self.assertIn("sudo apt install iw", " ".join(said))
 
-    def test_install_self_calls_it(self):
-        self.assertIn("ensure_system_packages()", inspect.getsource(a.install_self))
+    def test_the_default_install_still_adds_them(self):
+        plan = a.install_plan(a.select_features([]), {}, {})
+        wanted = {pkg for step in plan if step["kind"] == "apt" for pkg in step["packages"]}
+        self.assertTrue(set(a.SYSTEM_PACKAGES) <= wanted)
 
 
 if __name__ == "__main__":

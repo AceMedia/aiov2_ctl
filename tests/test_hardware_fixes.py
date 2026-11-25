@@ -96,9 +96,9 @@ class GaugeDisagreementTests(unittest.TestCase):
 
 class InstallSudoersTests(unittest.TestCase):
     def test_installer_no_longer_writes_the_broad_rule(self):
-        src = inspect.getsource(a.install_self)
+        src = inspect.getsource(a._act_core_sudoers)
         self.assertNotIn("ALL ALL=", src)
-        self.assertIn("setup_sudoers()", src)
+        self.assertIn("setup_sudoers(", src)
 
     def test_generated_rules_are_for_one_user_with_exact_commands(self):
         text = a.build_sudoers("shane")

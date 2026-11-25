@@ -24,6 +24,55 @@ GPIO state reporting model:
 
 ---
 
+## Install
+
+On a fresh uConsole (Debian or Raspberry Pi OS), as yourself, not as root:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/install.sh
+sh install.sh
+```
+
+`install.sh` downloads `aiov2_ctl.py` from this repository, checks it is a whole Python file, says what it is about to run, and then runs `sudo python3 aiov2_ctl.py --install --all`. Anything you put after `sh install.sh` is passed on to `--install` in place of `--all`.
+
+From a checkout, or once it is installed, the same installer is:
+
+```bash
+aiov2_ctl --features                       # what can be installed, what is on by default, what is here now
+aiov2_ctl --install --dry-run              # the plan, in plain words; changes nothing and needs no root
+sudo aiov2_ctl --install                   # the usual set
+sudo aiov2_ctl --install --all             # everything, including the aircraft receiver and tray at login
+sudo aiov2_ctl --install --only core,tray  # just these (and what they need)
+sudo aiov2_ctl --install --without app,console
+sudo aiov2_ctl --install --yes             # do not ask; needed when there is no terminal to ask on
+```
+
+| Feature | Default | What it brings |
+| --- | --- | --- |
+| `core` | always | the `aiov2_ctl` command, bash completion, the rail boot service, the password-free rules |
+| `tray` | on | the tray (`--gui`), its icons and start-menu entry, `python3-pyqt6` |
+| `app` | on | the uConsole Ops app, fetched to `~/ops-agentic`, with its start-menu shortcut, `python3-pyqt6`, `fonts-spleen` |
+| `console` | on | the Ops console (`ops.py`) from the same checkout, `python3-textual`, `python3-numpy` |
+| `gps` | on | `gpsd` |
+| `mesh` | on | `meshtasticd` |
+| `sdr` | on | `rtl-sdr` and the readsb tuner recovery |
+| `adsb` | off | `readsb` |
+| `listening` | on | `iw` and the rules for `--wifi-listen`, `--wifi-survey` and `--bt-scan` |
+| `flipper` | on | the udev rule for a Flipper Zero or ESP32 board |
+| `autostart` | off | the tray starts when you log in |
+
+What it does and does not do:
+
+- It prints the plan and asks once before changing anything. It ends with a line per feature: installed, already there, or failed and why. One feature failing does not stop the others.
+- It never switches a rail on or starts a radio. Nothing is made to start at boot except the tool's own rail boot service and SDR check (as install has always done) and, if you pick `autostart`, the tray. A service that a package enables as it installs (`gpsd`, `meshtasticd`, `readsb`) is switched back off when this install is what added it; one that was already there is left exactly as it is.
+- Hardware that is not found (a rail that is off, no Flipper plugged in) does not stop a feature being installed: the plan says what was not found.
+- The ops app lives in the home of the user who ran `sudo`, and every `git` and `python3` command in that home runs as that user, never as root. An existing checkout is updated with `git pull --ff-only`; one with your own changes, or one that has gone its own way, is reported and left alone.
+- The ops app repository is private. If the clone is refused, sign in with `gh auth login` (then `gh auth setup-git`), or clone it by hand to `~/ops-agentic`, and run the install again.
+- The console's remaining Python packages (`meshtastic`, and `textual` or `numpy` where apt does not have them) are installed by the console itself on its first run, as you. The installer never runs pip as root.
+- Installing through `install.sh` leaves no git checkout of this tool behind, so `aiov2_ctl --update` has nothing to pull from; run `install.sh` again to update, or install from a clone as in section 2.
+
+---
+
 ## Requirements
 
 - HackerGadgets uConsole **AIO v2 Upgrade Kit**  
