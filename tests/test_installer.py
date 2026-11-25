@@ -813,7 +813,7 @@ class BootstrapScriptTests(unittest.TestCase):
     def test_it_stops_on_errors_checks_the_download_and_cleans_up(self):
         text = self.text()
         self.assertIn("set -eu", text)
-        self.assertIn("python3 -m py_compile", text)
+        self.assertIn("py_compile.compile(", text)
         self.assertIn("mktemp -d", text)
         self.assertIn("trap 'rm -rf \"$tmp\"' EXIT", text)
         self.assertLess(text.index("py_compile"), text.index("sudo python3 \"$file\""))
@@ -821,7 +821,8 @@ class BootstrapScriptTests(unittest.TestCase):
     def test_it_downloads_only_this_repositorys_file_and_pipes_nothing_into_a_shell(self):
         text = self.text()
         self.assertIn("https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/aiov2_ctl.py", text)
-        self.assertEqual(text.count("https://"), 1)
+        self.assertIn("https://github.com/AceMedia/aiov2_ctl.git", text)
+        self.assertEqual(text.count("https://"), 2)
         for line in text.splitlines():
             if not line.lstrip().startswith("#"):
                 self.assertNotRegex(line, r"\|\s*(sudo\s+)?(sh|bash)\b")
@@ -830,6 +831,53 @@ class BootstrapScriptTests(unittest.TestCase):
         text = self.text()
         self.assertIn('[ "$#" -gt 0 ] || set -- --all', text)
         self.assertLess(text.index("About to run as root"), text.index("\nsudo python3"))
+
+    def checkout(self, base, name, origin):
+        """A stand-in checkout whose program only prints what it was asked."""
+        path = os.path.join(base, name)
+        os.makedirs(path)
+        with open(os.path.join(path, "aiov2_ctl.py"), "w") as f:
+            f.write("import sys\nprint('STUB', ' '.join(sys.argv[1:]))\n")
+        subprocess.check_call(["git", "init", "-q", path])
+        subprocess.check_call(["git", "-C", path, "remote", "add", "origin", origin])
+        return path
+
+    def dry_run(self, base, folder, record="none.json"):
+        env = dict(os.environ, HOME=base, AIOV2_DIR=folder, AIOV2_RECORD=os.path.join(base, record))
+        return subprocess.run(["sh", self.PATH, "--dry-run"], env=env, capture_output=True, text=True, timeout=60)
+
+    @unittest.skipUnless(shutil.which("git") and os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs git, a Debian-like system and an ordinary user")
+    def test_a_dry_run_uses_a_checkout_of_this_repository_and_leaves_it_untouched(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            path = self.checkout(base, "mine", "https://github.com/AceMedia/aiov2_ctl.git")
+            before = sorted(os.listdir(path))
+            done = self.dry_run(base, path)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("STUB --install --dry-run", done.stdout)
+            self.assertNotIn("Downloading", done.stdout)
+            self.assertEqual(sorted(os.listdir(path)), before)          # no compiled copy left in it either
+
+    @unittest.skipUnless(shutil.which("git") and os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs git, a Debian-like system and an ordinary user")
+    def test_the_checkout_an_earlier_install_recorded_is_preferred(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            path = self.checkout(base, "recorded", "git@github.com:AceMedia/aiov2_ctl.git")
+            with open(os.path.join(base, "rec.json"), "w") as f:
+                json.dump({"repo_path": path}, f)
+            done = self.dry_run(base, os.path.join(base, "nothing-here"), record="rec.json")
+            self.assertIn(f"using the checkout in {path}", done.stdout)
+            self.assertIn("STUB --install --dry-run", done.stdout)
+
+    def test_a_folder_that_is_some_other_project_is_never_pulled_or_run(self):
+        text = self.text()
+        self.assertIn('git -C "$1" remote get-url origin 2>/dev/null | grep -qi "$REPO_MATCH"', text)
+        self.assertIn("is not a checkout of this tool, so it was left alone", text)
+        self.assertNotIn("git reset", text)
+        self.assertNotIn("rm -rf \"$DIR\"", text)
 
 
 class SourceCheckoutTests(unittest.TestCase):

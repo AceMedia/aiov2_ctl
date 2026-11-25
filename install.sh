@@ -1,19 +1,35 @@
 #!/bin/sh
-# Bootstrap for a fresh uConsole: fetch aiov2_ctl.py and let it install everything.
+# Bootstrap for a fresh uConsole: fetch this tool and let it install everything.
 #
 #   sh install.sh                      install every feature (asks once before changing anything)
 #   sh install.sh --dry-run            show the plan for the usual set and change nothing (no root needed)
 #   sh install.sh --only core,tray     any flags are passed on to: aiov2_ctl --install
 #
 # Run it as yourself, not as root: it calls sudo for the one step that needs it, so the installer knows whose
-# home the ops app belongs in. The only thing downloaded and run as root is this repository's own aiov2_ctl.py.
+# home the ops app belongs in. With git it keeps a checkout of this repository in ~/aiov2_ctl-ace, which is
+# where the tray's icons come from and what `aiov2_ctl --update` pulls. Without git it downloads the one
+# program file instead. Either way the only thing run as root is this repository's own aiov2_ctl.py.
 set -eu
 
 URL="https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/aiov2_ctl.py"
+REPO_URL="https://github.com/AceMedia/aiov2_ctl.git"
+REPO_MATCH="AceMedia/aiov2_ctl"
+DIR="${AIOV2_DIR:-$HOME/aiov2_ctl-ace}"
+RECORD="${AIOV2_RECORD:-/usr/local/share/aiov2_ctl/install.json}"
 
 die() {
     printf 'install.sh: %s\n' "$*" >&2
     exit 1
+}
+
+note() {
+    printf 'install.sh: %s\n' "$*"
+}
+
+# True when $1 is a git checkout of this repository (and not, say, the project this one was forked from).
+ours() {
+    [ -n "$1" ] && [ -f "$1/aiov2_ctl.py" ] && [ -e "$1/.git" ] || return 1
+    git -C "$1" remote get-url origin 2>/dev/null | grep -qi "$REPO_MATCH"
 }
 
 # 1. The right kind of system.
@@ -30,28 +46,74 @@ command -v python3 >/dev/null 2>&1 || die "python3 is missing. Install it with: 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' INT TERM
-file="$tmp/aiov2_ctl.py"
 
-# 3. Download, then check it is a whole Python file before anything runs it.
-printf 'Downloading %s\n' "$URL"
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --proto '=https' -o "$file" "$URL" || die "the download failed."
-elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$file" "$URL" || die "the download failed."
-else
-    die "neither curl nor wget is installed. Install one with: sudo apt install curl"
-fi
-python3 -m py_compile "$file" || die "the downloaded file is not valid Python; nothing was run."
-
-# 4. Install. Everything, unless told otherwise.
+# Everything, unless told otherwise. A dry run changes nothing, so it makes no checkout either.
 [ "$#" -gt 0 ] || set -- --all
+dry=0
 for arg in "$@"; do
-    if [ "$arg" = "--dry-run" ]; then
-        printf 'Showing the plan only (no root needed): python3 aiov2_ctl.py --install %s\n\n' "$*"
-        python3 "$file" --install "$@"
-        exit $?
-    fi
+    [ "$arg" != "--dry-run" ] || dry=1
 done
+
+# 3. Find or make a checkout: the one an earlier install recorded, else the usual folder, else a new clone.
+checkout=""
+if command -v git >/dev/null 2>&1; then
+    recorded=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("repo_path") or "")' "$RECORD" 2>/dev/null || true)
+    for candidate in "$recorded" "$DIR"; do
+        if ours "$candidate"; then
+            checkout=$candidate
+            break
+        fi
+    done
+    if [ -n "$checkout" ]; then
+        if [ "$dry" -eq 1 ]; then
+            note "using the checkout in $checkout as it is."
+        elif [ -n "$(git -C "$checkout" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+            note "$checkout has changes of your own, so it was not updated; installing what is there."
+        elif GIT_TERMINAL_PROMPT=0 git -C "$checkout" pull --ff-only >/dev/null 2>&1; then
+            note "updated the checkout in $checkout."
+        else
+            note "$checkout could not be updated; installing what is there."
+        fi
+    elif [ "$dry" -eq 1 ]; then
+        :
+    elif [ -e "$DIR" ]; then
+        note "$DIR is there but is not a checkout of this tool, so it was left alone."
+    else
+        printf 'Cloning %s into %s\n' "$REPO_URL" "$DIR"
+        if GIT_TERMINAL_PROMPT=0 git clone --quiet "$REPO_URL" "$DIR"; then
+            checkout=$DIR
+        else
+            note "the clone failed; downloading the one program file instead."
+        fi
+    fi
+fi
+
+# 4. Without a checkout, download the one file. The tray then uses a stock icon and --update has nothing to pull.
+if [ -n "$checkout" ]; then
+    file="$checkout/aiov2_ctl.py"
+else
+    file="$tmp/aiov2_ctl.py"
+    printf 'Downloading %s\n' "$URL"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --proto '=https' -o "$file" "$URL" || die "the download failed."
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$file" "$URL" || die "the download failed."
+    else
+        die "neither curl nor wget is installed. Install one with: sudo apt install curl"
+    fi
+    [ "$dry" -eq 1 ] || note "no checkout was made, so the tray uses a stock icon and --update has nothing to pull."
+fi
+
+# 5. Check it is a whole Python file before anything runs it. The compiled copy goes in the private folder.
+python3 -c 'import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' "$file" "$tmp/check.pyc" \
+    || die "$file is not valid Python; nothing was run."
+
+# 6. Install.
+if [ "$dry" -eq 1 ]; then
+    printf 'Showing the plan only (no root needed): python3 aiov2_ctl.py --install %s\n\n' "$*"
+    python3 "$file" --install "$@"
+    exit $?
+fi
 printf 'About to run as root: sudo python3 %s --install %s\n' "$file" "$*"
 printf 'It prints its plan and asks before changing anything.\n\n'
 sudo python3 "$file" --install "$@"
