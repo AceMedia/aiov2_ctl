@@ -832,5 +832,23 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertLess(text.index("About to run as root"), text.index("\nsudo python3"))
 
 
+class SourceCheckoutTests(unittest.TestCase):
+    """Which copy of the program an install puts in place."""
+
+    def test_a_file_in_a_checkout_installs_from_that_checkout(self):
+        self.assertEqual(a.source_checkout("/home/u/repo/aiov2_ctl.py", "/usr/local/bin/aiov2_ctl",
+                                           "/home/u/repo", "/home/u/old"), "/home/u/repo")
+
+    def test_a_loose_file_installs_itself_not_an_older_recorded_checkout(self):
+        self.assertIsNone(a.source_checkout("/tmp/dl/aiov2_ctl.py", "/usr/local/bin/aiov2_ctl", None, "/home/u/old"))
+
+    def test_the_installed_copy_run_by_itself_uses_the_recorded_checkout(self):
+        self.assertEqual(a.source_checkout("/usr/local/bin/aiov2_ctl", "/usr/local/bin/aiov2_ctl", None,
+                                           "/home/u/old"), "/home/u/old")
+
+    def test_the_installed_copy_with_nothing_recorded_installs_itself(self):
+        self.assertIsNone(a.source_checkout("/usr/local/bin/aiov2_ctl", "/usr/local/bin/aiov2_ctl", None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

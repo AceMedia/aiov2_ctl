@@ -7334,16 +7334,30 @@ def clone_failure_message(stderr, path):
             f"{OPS_REPO_URL} by hand to {path}, and run the install again.")
 
 
+def source_checkout(this_file, installed_path, git_root, recorded):
+    """The checkout to install from, or None to install the running file itself. The file being run always
+    wins: its own git checkout if it is in one, else itself. Only the installed copy running itself falls back
+    to the checkout an earlier install recorded. (A downloaded newer file used to be passed over for that older
+    checkout, and the install reported success having put the old program back.)"""
+    if git_root:
+        return git_root
+    if this_file == installed_path:
+        return recorded
+    return None
+
+
 def install_source():
     """(source file, icons folder or None, metadata) for this run: the git checkout this is run from when there
-    is one, else the checkout a previous install recorded, else just this file."""
+    is one, else just this file; the installed copy run by itself uses the checkout a previous install recorded."""
     stored = load_install_meta() or {}
-    repo = get_git_root()
-    if not repo:
-        recorded = stored.get("repo_path")
-        if recorded and os.path.isdir(recorded):
-            repo = recorded
+    recorded = stored.get("repo_path")
+    repo = source_checkout(os.path.realpath(__file__), os.path.realpath(INSTALLED_PATH), get_git_root(),
+                           recorded if recorded and os.path.isdir(recorded) else None)
     meta = dict(stored)
+    if not repo and os.path.realpath(__file__) != os.path.realpath(INSTALLED_PATH):
+        # Run from a loose file (a download, a copy): the old record no longer says where this came from.
+        for key in ("repo_path", "branch"):
+            meta.pop(key, None)
     if repo and os.path.isfile(os.path.join(repo, "aiov2_ctl.py")):
         repo = os.path.realpath(repo)
         meta["repo_path"] = repo
