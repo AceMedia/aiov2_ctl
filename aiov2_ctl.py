@@ -570,6 +570,7 @@ COMMANDS:
                [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]
   --installer  The same installer as a window: tick features, see the plan, install or repair
   --features   What can be installed, what is on by default and what is installed now
+               (--features --json gives the same as data, for a program to read)
   --repair     Go over what is installed and put back what is missing  [--dry-run] [--yes]
   --uninstall  Remove what this tool installed; packages, rails and your data are left
                [--only LIST] [--dry-run] [--yes]
@@ -7344,7 +7345,39 @@ def format_features(state, facts):
     return "\n".join(lines)
 
 
-def features_command():
+def features_report(state, meta, facts, how=None):
+    """The features as data, for a program that shows them (the ops app's Settings). Each says whether the
+    installer has it down as installed, what is missing from it, what adding it would bring with it and what
+    removing it would take with it. `root` is how a program gets root for a change: 'sudo', 'pkexec' or None."""
+    recorded = recorded_features(meta, state)
+    rows = []
+    for f in FEATURES:
+        key = f["key"]
+        found = facts.get(f["hardware"]) if f["hardware"] else None
+        rows.append({
+            "key": key,
+            "title": f["title"],
+            "summary": f["summary"],
+            "required": bool(f["required"]),
+            "installed": key in recorded,
+            "missing": feature_missing(key, state) if key in recorded else [],
+            "adds": [k for k in resolve_features([key]) if k != key and k not in recorded],
+            "removes": [k for k in uninstall_selection([key]) if k != key and k in recorded],
+            "hardware": HARDWARE_TITLES[f["hardware"]] if f["hardware"] else "",
+            "hardware_found": found if isinstance(found, bool) else None,
+        })
+    return {"version": 1, "root": how, "features": rows}
+
+
+def features_command(args=()):
+    args = list(args or ())
+    if args == ["--json"]:
+        how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
+        print(json.dumps(features_report(install_state(), load_install_meta(), hardware_facts(), how), indent=1))
+        return 0
+    if args:
+        print("Usage: aiov2_ctl --features [--json]")
+        return 2
     print(format_features(install_state(), hardware_facts()))
     return 0
 
@@ -9045,7 +9078,7 @@ def main():
         sys.exit(install_command(sys.argv[2:]))
 
     elif arg == "--features":
-        sys.exit(features_command())
+        sys.exit(features_command(sys.argv[2:]))
 
     elif arg == "--installer":
         sys.exit(run_installer())
