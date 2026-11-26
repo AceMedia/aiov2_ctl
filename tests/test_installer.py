@@ -590,6 +590,17 @@ class RunTests(unittest.TestCase):
         self.assertEqual(a.feature_results(["core", "flipper"], outcomes),
                          [("core", "already there", ""), ("flipper", "already there", "")])
 
+    def test_a_feature_whose_package_is_not_here_is_reported_apart_from_a_failure(self):
+        plan = a.install_plan(["mesh", "flipper"], ALL_THERE, state())
+        outcomes = [(s, "skipped" if s["id"] == "mesh.apt" else "done", "not in the sources" if s["id"] == "mesh.apt"
+                     else "") for s in plan]
+        rows = a.feature_results(["core", "mesh", "flipper"], outcomes)
+        self.assertEqual([(k, s) for k, s, _ in rows],
+                         [("core", "installed"), ("mesh", "not installed"), ("flipper", "installed")])
+        self.assertRegex(a.format_results(rows), r"(?m)^  mesh\s+not installed: not in the sources")
+        both = [(s, "failed", "broken") if s["id"] == "mesh.hold" else o for o, s in zip(outcomes, plan)]
+        self.assertEqual(dict((k, s) for k, s, _ in a.feature_results(["mesh"], both))["mesh"], "failed")
+
     def test_shortcuts_that_fail_fail_both_the_app_and_the_console_and_nothing_else(self):
         plan = a.install_plan(["app", "console", "flipper"], ALL_THERE, state())
         outcomes = [(s, "failed" if s["kind"] == "launchers" else "done",
@@ -679,7 +690,7 @@ class RunTests(unittest.TestCase):
             a._act_service_off(step, {"added": {"meshtasticd"}})
         call.assert_not_called()
 
-    def test_a_package_missing_from_the_sources_fails_its_feature_unless_it_is_optional(self):
+    def test_a_package_from_outside_debian_that_is_not_here_is_not_installed_and_nothing_fails(self):
         def installed(pkg, run=None):
             return pkg == "git"
         with mock.patch.object(a, "package_installed", side_effect=installed), \
@@ -687,8 +698,12 @@ class RunTests(unittest.TestCase):
                 mock.patch.object(a.subprocess, "call", return_value=0) as call:
             mesh = [s for s in a.install_plan(["mesh"], ALL_THERE, state()) if s["kind"] == "apt"][0]
             status, words = a._act_apt(mesh, {"apt_updated": True})
-            self.assertEqual(status, "failed")
+            self.assertEqual(status, "skipped")
             self.assertIn("--add-apps", words)
+            tray = [s for s in a.install_plan(["tray"], ALL_THERE, state()) if s["kind"] == "apt"][0]
+            status, words = a._act_apt(tray, {"apt_updated": True})
+            self.assertEqual(status, "failed", "an ordinary Debian package that is missing is still a failure")
+            self.assertIn("python3-pyqt6", words)
             console = [s for s in a.install_plan(["console"], ALL_THERE, state()) if s["kind"] == "apt"][0]
             status, words = a._act_apt(console, {"apt_updated": True})
             self.assertEqual(status, "note")
@@ -759,6 +774,20 @@ class CommandTests(unittest.TestCase):
         code, text, asked, ran = self.run_command(["--only", "nope", "--yes"])
         self.assertEqual((code, asked, ran), (2, [], []))
         self.assertIn("Valid features:", text)
+
+    def test_a_feature_whose_package_is_not_here_is_named_at_the_end_and_the_install_still_succeeds(self):
+        said = []
+
+        def execute(plan, ctx, say):
+            return [(s, "skipped" if s["id"] == "mesh.apt" else "done", "not in the sources") for s in plan]
+        code = a.install_command(["--yes"], facts=ALL_THERE, state=state(), execute=execute, isatty=False, euid=0,
+                                 say=said.append)
+        text = "\n".join(said)
+        self.assertEqual(code, 0)
+        self.assertIn("Install complete.", text)
+        self.assertRegex(text, r"(?m)^  mesh\s+not installed: not in the sources")
+        self.assertIn("package sources do not have what it needs: mesh.", text)
+        self.assertNotIn("not everything went in", text)
 
     def test_a_failed_feature_is_named_at_the_end_and_the_exit_code_says_so(self):
         said = []

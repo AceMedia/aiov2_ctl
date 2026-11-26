@@ -7778,8 +7778,12 @@ def _act_apt(step, ctx):
         words.append(f"{pkg} is not in this system's package sources. {PACKAGE_HINTS.get(pkg, '')}".strip())
     if soft:
         words.append(f"{', '.join(soft)} not in the package sources: the console installs it on first run, as you")
-    if failed or hard:
+    if failed or any(p not in PACKAGE_HINTS for p in hard):
         return "failed", "; ".join(words)
+    if hard:
+        # A package known to come from outside this system's sources: nothing went wrong, it just is not here
+        # yet. The feature is reported as not installed and the rest of the install is a success.
+        return "skipped", "; ".join(words)
     return ("done" if wanted else "note"), "; ".join(words)
 
 
@@ -7975,19 +7979,25 @@ def run_install(plan, ctx, say=print, action_for=step_action):
             status, words = "failed", f"{type(exc).__name__}: {exc}"
         if status == "failed":
             say(f"  failed: {words}")
+        elif status == "skipped":
+            say(f"  not installed: {words}")
         outcomes.append((step, status, words))
     return outcomes
 
 
 def feature_results(selected, outcomes):
-    """[(feature, 'installed' | 'already there' | 'failed', words)] in the selection's order."""
+    """[(feature, 'installed' | 'already there' | 'not installed' | 'failed', words)] in the selection's order.
+    'not installed' is a feature whose package this system's sources do not have: nothing failed."""
     rows = []
     for key in selected:
         mine = [(s, st, w) for s, st, w in outcomes if key == s["feature"] or key in s.get("shared_with", ())]
         failed = [w for _, st, w in mine if st == "failed"]
+        skipped = [w for _, st, w in mine if st == "skipped"]
         notes = [w for s, st, w in mine if st in ("note", "already", "done") and w and s["kind"] != "note"]
         if failed:
             rows.append((key, "failed", "; ".join(failed)))
+        elif skipped:
+            rows.append((key, "not installed", "; ".join(skipped)))
         elif any(st == "done" for _, st, _ in mine):
             rows.append((key, "installed", "; ".join(notes)))
         else:
@@ -7998,8 +8008,8 @@ def feature_results(selected, outcomes):
 def format_results(rows):
     lines = ["", "Result", "------"]
     for key, status, words in rows:
-        if status == "failed":
-            lines.append(f"  {key:<10} failed: {words}")
+        if status in ("failed", "not installed"):
+            lines.append(f"  {key:<10} {status}: {words}")
         else:
             lines.append(f"  {key:<10} {status}" + (f" ({words})" if words else ""))
     return "\n".join(lines)
@@ -8007,7 +8017,8 @@ def format_results(rows):
 
 def install_command(args, facts=None, state=None, execute=run_install, ask=input, isatty=None, euid=None,
                     say=print, pick=pick_features, known=None):
-    """aiov2_ctl --install. Returns the exit code: 0 done, 1 something failed or was refused, 2 bad arguments."""
+    """aiov2_ctl --install. Returns the exit code: 0 done (a feature whose package this system does not have is
+    said so and is not a failure), 1 something failed or was refused, 2 bad arguments."""
     try:
         opts = parse_install_args(args)
         selected = select_features(opts, facts)
@@ -8081,6 +8092,10 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
     failed = [key for key, status, _ in rows if status == "failed"]
     say("\nInstall complete." if not failed else
         f"\nInstall finished, but not everything went in: {', '.join(failed)}. Run it again once that is sorted.")
+    left = [key for key, status, _ in rows if status == "not installed"]
+    if left:
+        say(f"Not installed, because this system's package sources do not have what it needs: {', '.join(left)}. "
+            f"The list above says where to get it. Run the install again afterwards.")
     say("Open a new shell for bash completion to activate.")
     if opts["show_mesh_status"]:
         print_mesh_on_boot_status_hint("Meshtastic boot config status:")
