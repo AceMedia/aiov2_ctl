@@ -46,7 +46,8 @@ aiov2_ctl --installer                      # the same as a window; run it as you
 sudo aiov2_ctl --repair                    # go over what is installed and put back what is missing
 sudo aiov2_ctl --uninstall --only flipper  # remove one feature, and whatever cannot work without it
 sudo aiov2_ctl --uninstall                 # remove everything this tool installed
-sudo aiov2_ctl --install                   # the usual set
+sudo aiov2_ctl --apply --keep core,tray,gps  # make the installed features exactly these: the rest are removed
+sudo aiov2_ctl --install                   # a new machine: the usual set. One already set up: what it has, brought up to date
 sudo aiov2_ctl --install --all             # everything, including the aircraft receiver and tray at login
 sudo aiov2_ctl --install --only core,tray  # just these (and what they need)
 sudo aiov2_ctl --install --without app,console
@@ -56,7 +57,7 @@ sudo aiov2_ctl --install --yes             # do not ask; needed when there is no
 | Feature | Default | What it brings |
 | --- | --- | --- |
 | `core` | always | the `aiov2_ctl` command, bash completion, the rail boot service, the password-free rules |
-| `tray` | on | the tray (`--gui`), its icons and start-menu entry, `python3-pyqt6` |
+| `tray` | on | the tray (`--gui`), its icons and start-menu entry, the installer window's start-menu entry, `python3-pyqt6` |
 | `app` | on | the uConsole Ops app, fetched to `~/ops-agentic`, with its start-menu shortcut, `python3-pyqt6`, `fonts-spleen` |
 | `console` | on | the Ops console (`ops.py`) from the same checkout, `python3-textual`, `python3-numpy` |
 | `gps` | on | `gpsd` |
@@ -66,6 +67,18 @@ sudo aiov2_ctl --install --yes             # do not ask; needed when there is no
 | `listening` | on | `iw` and the rules for `--wifi-listen`, `--wifi-survey` and `--bt-scan` |
 | `flipper` | on | the udev rule for a Flipper Zero or ESP32 board |
 | `autostart` | off | the tray starts when you log in |
+
+The installer window is also in the start menu as "AIO v2 Installer" and in the tray's menu as "Add or remove features". In the window, unticking a feature that is installed removes it; the plan says so before anything happens.
+
+### Updating
+
+```bash
+aiov2_ctl --update          # run it as yourself; it asks before it uses root
+```
+
+- It fetches, shows what is coming, and asks. Then the installed program copies the new one into place, and the new one runs its own installer.
+- An update keeps to the features you have. It does not bring back one you removed, and it does not add new ones; see those with `aiov2_ctl --features`.
+- **Coming from an older version** (before the feature installer, including the project this was forked from): that version's updater pulls the new program but installs it with its own old steps. The new program notices, says so on `aiov2_ctl --status` and in the tray ("Finish the update"), and `sudo aiov2_ctl --install` or a second `aiov2_ctl --update` finishes the job. On a machine with no record of features that first install brings the usual set and keeps what was already there.
 
 What it does and does not do:
 

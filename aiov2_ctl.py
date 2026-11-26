@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 import json
+import hashlib
 import shutil
 import re
 import stat
@@ -316,6 +317,7 @@ _aiov2_ctl()
         --measure
         --install
         --installer
+        --apply
         --features
         --repair
         --uninstall
@@ -569,6 +571,8 @@ COMMANDS:
   --install    Install everything: the controller, tray, ops app and console, and the radio packages
                [--pick] [--all | --only LIST | --without LIST] [--dry-run] [--yes]
   --installer  The same installer as a window: tick features, see the plan, install or repair
+  --apply      Make the installed features exactly a list: the rest are removed, these installed
+               --keep LIST [--dry-run] [--yes]
   --features   What can be installed, what is on by default and what is installed now
                (--features --json gives the same as data, for a program to read)
   --repair     Go over what is installed and put back what is missing  [--dry-run] [--yes]
@@ -630,6 +634,17 @@ Exec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --gui
 Icon=utilities-system-monitor
 Terminal=false
 Categories=System;Utility;
+StartupNotify=false
+"""
+
+INSTALLER_DESKTOP_ENTRY = """[Desktop Entry]
+Type=Application
+Name=AIO v2 Installer
+Comment=Add, remove or repair the uConsole AIO v2 features
+Exec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --installer
+Icon=system-software-install
+Terminal=false
+Categories=System;Settings;
 StartupNotify=false
 """
 
@@ -6436,6 +6451,9 @@ def run_gui():
     menu.addAction(companion_action)
 
     menu.addSeparator()
+    menu.addAction("Add or remove features…", lambda: subprocess.Popen(
+        [INSTALLED_PATH, "--installer"], start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     menu.addAction(update_action)
 
     menu.addSeparator()
@@ -6606,6 +6624,10 @@ def run_gui():
                 QSystemTrayIcon.MessageIcon.Information,
                 30000  # Show for 30 seconds
             )
+        elif update_is_unfinished():
+            # An older updater put this version in place without running its installer.
+            update_action.setText("Finish the update → Install")
+            update_action.setEnabled(True)
         else:
             update_action.setText("Up to date")
             update_action.setEnabled(False)
@@ -6691,6 +6713,7 @@ RTLSDR_USB_IDS = (("0bda", "2832"), ("0bda", "2838"))
 ASSET_BASE = "/usr/local/share/aiov2_ctl"
 COMPLETION_PATH = "/etc/bash_completion.d/aiov2_ctl"
 SYSTEM_DESKTOP_PATH = "/usr/share/applications/aiov2_ctl.desktop"
+INSTALLER_DESKTOP_PATH = "/usr/share/applications/aiov2_ctl-installer.desktop"
 AIO_BOARD_PACKAGE_DOC = "/usr/share/doc/hackergadgets-uconsole-aio-board"
 # The only units an install step may enable at boot. Both are this tool's own and both were enabled by install
 # before features existed: one sets each rail to the state the owner saved (all off unless they chose otherwise),
@@ -7270,6 +7293,9 @@ def install_plan(selected_keys, facts, state):
             plan.append(_step(key, "desktop-entry", "desktop-entry",
                               f"Write the start-menu entry {SYSTEM_DESKTOP_PATH}.", True,
                               f"Remove {SYSTEM_DESKTOP_PATH}"))
+            plan.append(_step(key, "installer-entry", "desktop-entry",
+                              f"Write the installer's start-menu entry {INSTALLER_DESKTOP_PATH}.", True,
+                              f"Remove {INSTALLER_DESKTOP_PATH}"))
         elif key in ("app", "console"):
             plan += _ops_steps(key, selected, state)
             if key == "console":
@@ -7345,10 +7371,11 @@ def format_features(state, facts):
     return "\n".join(lines)
 
 
-def features_report(state, meta, facts, how=None):
+def features_report(state, meta, facts, how=None, unfinished=False):
     """The features as data, for a program that shows them (the ops app's Settings). Each says whether the
     installer has it down as installed, what is missing from it, what adding it would bring with it and what
-    removing it would take with it. `root` is how a program gets root for a change: 'sudo', 'pkexec' or None."""
+    removing it would take with it. `root` is how a program gets root for a change: 'sudo', 'pkexec' or None.
+    `unfinished` is True when an older updater put this version in place without running its installer."""
     recorded = recorded_features(meta, state)
     rows = []
     for f in FEATURES:
@@ -7366,14 +7393,15 @@ def features_report(state, meta, facts, how=None):
             "hardware": HARDWARE_TITLES[f["hardware"]] if f["hardware"] else "",
             "hardware_found": found if isinstance(found, bool) else None,
         })
-    return {"version": 1, "root": how, "features": rows}
+    return {"version": 1, "root": how, "unfinished": bool(unfinished), "features": rows}
 
 
 def features_command(args=()):
     args = list(args or ())
     if args == ["--json"]:
         how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
-        print(json.dumps(features_report(install_state(), load_install_meta(), hardware_facts(), how), indent=1))
+        print(json.dumps(features_report(install_state(), load_install_meta(), hardware_facts(), how,
+                                         update_is_unfinished()), indent=1))
         return 0
     if args:
         print("Usage: aiov2_ctl --features [--json]")
@@ -7744,6 +7772,8 @@ def _act_core_meta(step, ctx):
     meta = dict(ctx["source"][2])
     if ctx.get("features") is not None:
         meta["features"] = list(ctx["features"])
+    if ctx.get("stamp"):
+        meta["installed_by"] = ctx["stamp"]
     text = json.dumps(meta, indent=2)
     return ("done" if _write_system_file(INSTALL_META_PATH, text) else "already"), ""
 
@@ -7759,6 +7789,10 @@ def _act_tray_assets(step, ctx):
 
 def _act_tray_desktop_entry(step, ctx):
     return ("done" if _write_system_file(SYSTEM_DESKTOP_PATH, SYSTEM_DESKTOP_ENTRY) else "already"), ""
+
+
+def _act_tray_installer_entry(step, ctx):
+    return ("done" if _write_system_file(INSTALLER_DESKTOP_PATH, INSTALLER_DESKTOP_ENTRY) else "already"), ""
 
 
 def _act_flipper_udev(step, ctx):
@@ -7861,6 +7895,7 @@ INSTALL_ACTIONS = {
     "core.meta": _act_core_meta,
     "tray.assets": _act_tray_assets,
     "tray.desktop-entry": _act_tray_desktop_entry,
+    "tray.installer-entry": _act_tray_installer_entry,
     "flipper.udev": _act_flipper_udev,
     "sdr.recovery": _act_sdr_recovery,
     "autostart.entry": _act_autostart,
@@ -7954,6 +7989,12 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
     facts = hardware_facts() if facts is None else facts
     state = install_state(euid=euid) if state is None else state
     meta = (load_install_meta() or {}) if known is None else {"features": known}
+    if opts["only"] is None and not opts["all"] and not opts["without"] and not opts.get("repair"):
+        selected, left = plain_selection(meta, state)
+        if left:
+            say("Keeping to what is installed. Not installed, and left that way: "
+                + ", ".join(feature_row(k)["title"] for k in left)
+                + ".\nAdd them with --only LIST, --pick or --all.\n")
     if opts.get("repair"):
         selected = repair_selection(state, meta)
         if not selected:
@@ -7988,6 +8029,8 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
            "features": [k for k in feature_keys() if k in keep]}
     if execute is run_install:
         ctx["source"] = install_source()
+        # Taken now, before this run copies a newer program over the installed one.
+        ctx["stamp"] = file_stamp(os.path.realpath(__file__))
     outcomes = execute(plan, ctx, say)
     rows = feature_results(selected, outcomes)
     say(format_results(rows))
@@ -8051,6 +8094,87 @@ def recorded_features(meta, state):
     if isinstance(listed, list):
         return [k for k in feature_keys() if k in listed]
     return features_in_place(state)
+
+
+def plain_selection(meta, state):
+    """What `--install` with no choice installs, and which usual features that leaves alone.
+
+    With a record of what is installed it keeps to that, so an update never brings back something that was
+    removed. With no record (a new machine, or one set up by a version from before installs were recorded) it
+    is the usual set and whatever is already in place."""
+    listed = (meta or {}).get("features")
+    if isinstance(listed, list) and listed:
+        chosen = set(resolve_features([k for k in feature_keys() if k in listed]))
+        left = [k for k in default_features() if k not in chosen]
+    else:
+        chosen = set(resolve_features(default_features())) | set(resolve_features(features_in_place(state)))
+        left = []
+    return [k for k in feature_keys() if k in chosen], left
+
+
+def file_stamp(path):
+    """A fingerprint of a program file, or None when it cannot be read."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def update_unfinished(meta, installed_stamp):
+    """True when the installed program is not the one whose installer last ran. An updater from an older
+    version pulls the new program and then installs it with the old code, so the new version's own install
+    steps have not happened yet. No record or no installed program means nothing is installed, not that an
+    update is half done."""
+    if not isinstance(meta, dict) or not installed_stamp:
+        return False
+    return meta.get("installed_by") != installed_stamp
+
+
+def update_is_unfinished():
+    return update_unfinished(load_install_meta(), file_stamp(INSTALLED_PATH))
+
+
+UNFINISHED_NOTICE = ("aiov2_ctl was updated, but the new version's installer has not run yet, so some of it is "
+                     "not set up.\nFinish the update with: sudo aiov2_ctl --install")
+# Commands a person runs to look at things, where the notice is worth a line.
+NOTICE_ARGS = (None, "--status", "--help", "-h", "--doctor", "--features", "--check-update")
+
+
+def unfinished_notice_for(arg, rest, isatty, unfinished):
+    """The notice, or '' when this command should stay quiet: not a terminal, a command a program reads, or
+    nothing to say."""
+    if not isatty or arg not in NOTICE_ARGS or "--json" in rest:
+        return ""
+    return UNFINISHED_NOTICE if unfinished() else ""
+
+
+def update_commands(python3, installed, two_steps):
+    """What an update runs as root once the new code is pulled. The first step is the installed (old) program
+    copying the new one into place; the second is the new program running its own installer, which keeps to
+    the features already installed. Both run the root-owned installed copy, never the checkout."""
+    last = ["sudo", python3, installed, "--install", "--yes", "--show-mesh-status"]
+    first = ["sudo", python3, installed, "--install", "--only", "core", "--yes"]
+    return [first, last] if two_steps else [last]
+
+
+def finish_update(two_steps, run=subprocess.call, trusted=None, say=print):
+    """Run the root half of an update. Returns an exit code."""
+    trusted = is_trusted_file(INSTALLED_PATH) if trusted is None else trusted
+    if not trusted:
+        # Not installed yet, so there is no root-owned copy to run: install from here, as before.
+        rerun_with_sudo(["--install", "--yes", "--show-mesh-status"], allow_untrusted=True)
+        return 0
+    python3 = shutil.which("python3") or "/usr/bin/python3"
+    commands = update_commands(python3, INSTALLED_PATH, two_steps)
+    for i, cmd in enumerate(commands, 1):
+        if len(commands) > 1:
+            say(f"\nStep {i} of {len(commands)}: "
+                + ("putting the new program in place" if i == 1 else "running the new version's installer") + "\n")
+        if run(cmd) != 0:
+            say("\nThe update stopped here. Finish it with: sudo aiov2_ctl --install")
+            return 1
+    return 0
 
 
 def repair_selection(state, meta=None):
@@ -8184,9 +8308,9 @@ def uninstall_plan(selected, state):
                                     f"The ops app folder {path} stays: the {other_title} uses it too.", False))
         elif key == "tray":
             plan.append(_unstep(key, "desktop-entry", "files",
-                                f"Remove the tray's start-menu entry and its icons. A tray that is running "
-                                f"stays until you quit it or log out.", True,
-                                paths=(SYSTEM_DESKTOP_PATH,), trees=(os.path.join(ASSET_BASE, "img"),)))
+                                f"Remove the start-menu entries for the tray and the installer, and the "
+                                f"tray's icons. A tray that is running stays until you quit it or log out.", True,
+                                paths=(SYSTEM_DESKTOP_PATH, INSTALLER_DESKTOP_PATH), trees=(os.path.join(ASSET_BASE, "img"),)))
         elif key == "core":
             plan.append(_unstep(key, "sudoers", "files",
                                 f"Remove {SUDOERS_PATH}: rails and services will ask for a password again.", True,
@@ -8452,6 +8576,68 @@ def uninstall_command(args, state=None, execute=run_install, ask=input, isatty=N
     return 1 if failed else 0
 
 
+# ---- apply: make what is installed exactly a list -----------------------------------------------------------------
+
+APPLY_USAGE = (
+    "Usage: sudo aiov2_ctl --apply --keep LIST [--dry-run] [--yes]\n"
+    "       Makes the installed features exactly LIST (feature keys separated by commas, and whatever they\n"
+    "       need): installed features not in it are removed, then LIST is installed or brought up to date."
+)
+
+
+def parse_apply_args(args):
+    opts = {"keep": None, "dry_run": False, "yes": False}
+    args = list(args or [])
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--keep":
+            if i + 1 >= len(args):
+                raise InstallError("--keep needs a list of features.\n" + APPLY_USAGE)
+            opts["keep"] = (opts["keep"] or []) + _key_list(args[i + 1])
+            i += 1
+        elif arg == "--dry-run":
+            opts["dry_run"] = True
+        elif arg in ("--yes", "-y"):
+            opts["yes"] = True
+        else:
+            raise InstallError(f"Unknown option for --apply: {arg}\n" + APPLY_USAGE)
+        i += 1
+    if not opts["keep"]:
+        raise InstallError("--apply needs --keep LIST.\n" + APPLY_USAGE)
+    return opts
+
+
+def apply_changes(keep, recorded):
+    """{'remove': [...], 'install': [...]} to make the installed features exactly `keep` and what it needs.
+    Removal is last installed first; only features that are installed are ever removed."""
+    wanted = set(resolve_features(list(keep)))
+    gone = [k for k in recorded if k not in wanted]
+    remove = [k for k in uninstall_selection(gone) if k in recorded] if gone else []
+    return {"remove": remove, "install": [k for k in feature_keys() if k in wanted]}
+
+
+def apply_command(args, state=None, meta=None, remove=None, install=None, say=print):
+    """aiov2_ctl --apply. Returns an exit code. The removing and the installing are the ordinary commands."""
+    remove = uninstall_command if remove is None else remove
+    install = install_command if install is None else install
+    try:
+        opts = parse_apply_args(args)
+        state = install_state() if state is None else state
+        meta = (load_install_meta() or {}) if meta is None else meta
+        changes = apply_changes(opts["keep"], recorded_features(meta, state))
+    except InstallError as exc:
+        say(str(exc))
+        return 2
+    flags = (["--dry-run"] if opts["dry_run"] else []) + (["--yes"] if opts["yes"] else [])
+    if changes["remove"]:
+        code = remove(["--only", ",".join(changes["remove"]), *flags])
+        if code != 0:
+            return code
+        say("")
+    return install(["--only", ",".join(changes["install"]), *flags])
+
+
 # ---- the graphical installer ------------------------------------------------------------------------------------
 # A window over the same pieces: FeaturePicker for the ticks, install_plan for the plan, and this same program run
 # as root for the work. The window itself never runs as root. Everything it decides is in the pure helpers here;
@@ -8469,7 +8655,7 @@ def installer_arguments(mode, keys=()):
     """What follows the program's name for a run from the window."""
     if mode == "repair":
         return ["--repair", "--yes"]
-    return ["--install", "--only", ",".join(keys), "--yes"]
+    return ["--apply", "--keep", ",".join(keys), "--yes"]
 
 
 def installer_argv(how, program, mode, keys=(), python="/usr/bin/python3", pkexec="pkexec"):
@@ -8501,13 +8687,19 @@ def installer_rows(picker, state, facts):
     return rows
 
 
-def installer_summary(picker, state):
-    """One line under the list: how many are ticked and how many of those are new."""
+def installer_summary(picker, state, recorded=()):
+    """One line under the list: how many are ticked, how many of those are new, and what unticking removes."""
     chosen = picker.selected()
     new = [k for k in chosen if feature_installed(k, state) != "yes"]
+    gone = apply_changes(chosen, list(recorded))["remove"]
     if not new:
-        return f"{len(chosen)} ticked, all already installed. Installing again brings them up to date."
-    return f"{len(chosen)} ticked, {len(new)} to add or finish: " + ", ".join(feature_row(k)["title"] for k in new) + "."
+        text = f"{len(chosen)} ticked, all already installed. Installing again brings them up to date."
+    else:
+        text = (f"{len(chosen)} ticked, {len(new)} to add or finish: "
+                + ", ".join(feature_row(k)["title"] for k in new) + ".")
+    if gone:
+        text += f" {len(gone)} to remove: " + ", ".join(feature_row(k)["title"] for k in gone) + "."
+    return text
 
 
 def installer_finished_text(mode, exit_code):
@@ -8629,7 +8821,9 @@ def build_installer_window(state=None, facts=None, how=None, program=None):
                 box.setChecked(row["ticked"])
                 box.blockSignals(False)
                 self.notes[row["key"]].setText(", ".join(n for n in ("always" if row["fixed"] else "", row["note"]) if n))
-            self.message.setText(self.picker.message or installer_summary(self.picker, self.state))
+            self.recorded = recorded_features(load_install_meta() or {}, self.state)
+            self.message.setText(self.picker.message
+                                 or installer_summary(self.picker, self.state, self.recorded))
             self.repair_button.setEnabled(bool(repair_selection(self.state, load_install_meta() or {})))
 
         # -- page 2: the plan
@@ -8664,11 +8858,12 @@ def build_installer_window(state=None, facts=None, how=None, program=None):
                 lead = format_repair(self.chosen, self.state)
             else:
                 self.chosen = self.picker.selected()
-                lead = ""
+                gone = apply_changes(self.chosen, self.recorded)["remove"]
+                lead = format_uninstall_plan(uninstall_plan(gone, self.state), gone) + chr(10) if gone else ""
             plan = install_plan(self.chosen, self.facts, self.state)
             self.plan_head.setText("This is what repair will do" if mode == "repair" else "This is what will happen")
             self.plan_text.setPlainText((lead + chr(10) if lead else lead) + format_plan(plan, self.chosen))
-            self.go_button.setText("Repair" if mode == "repair" else "Install")
+            self.go_button.setText("Repair" if mode == "repair" else "Remove and install" if lead else "Install")
             self.go_button.setEnabled(self.how is not None)
             self.how_label.setText({
                 "sudo": "Nothing has been changed yet. Pressing the button runs this as root with sudo.",
@@ -8924,6 +9119,18 @@ def update_self(confirmed=False):
     ).stdout.strip()
     if not summary:
         print("Already up to date.")
+        if update_is_unfinished():
+            print("\n" + UNFINISHED_NOTICE.split("\n")[0])
+            if not confirmed and "--yes" not in sys.argv:
+                if not sys.stdin.isatty():
+                    print("Finish the update with: sudo aiov2_ctl --install --yes")
+                    return 1
+                resp = input("\nRun the installer now, as root, to finish the update? [y/N]: ")
+                if resp.strip().lower() not in ("y", "yes"):
+                    print("Left as it is. Finish it later with: sudo aiov2_ctl --install")
+                    return 0
+            report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
+            return finish_update(two_steps=False)
         return 0
 
     print("Incoming changes:\n")
@@ -8955,9 +9162,8 @@ def update_self(confirmed=False):
 
     report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
 
-    # escalate only for install; the user has just reviewed the changes
-    rerun_with_sudo(["--install", "--yes", "--show-mesh-status"], allow_untrusted=True)
-    return 0
+    # Root is only used for the install; the user has just reviewed the changes.
+    return finish_update(two_steps=True)
 
 def check_update_interactive():
     """Check for updates, show diff, and prompt user to update."""
@@ -9064,6 +9270,10 @@ def check_update_available(repo):
 # Entrypoint
 # ==============================
 def main():
+    notice = unfinished_notice_for(sys.argv[1] if len(sys.argv) > 1 else None, sys.argv[2:],
+                                   sys.stdout.isatty(), update_is_unfinished)
+    if notice:
+        print(notice + "\n", file=sys.stderr)
     if len(sys.argv) == 1:
         for f, p in GPIO_MAP.items():
             print(f"{f}: {'ON' if GpioController.get_gpio(p) else 'OFF'}")
@@ -9082,6 +9292,9 @@ def main():
 
     elif arg == "--installer":
         sys.exit(run_installer())
+
+    elif arg == "--apply":
+        sys.exit(apply_command(sys.argv[2:]))
 
     elif arg == "--repair":
         sys.exit(install_command(["--repair", *sys.argv[2:]]))
