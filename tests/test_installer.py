@@ -900,7 +900,7 @@ class BootstrapScriptTests(unittest.TestCase):
 
     def test_it_installs_everything_when_given_no_arguments_and_says_so_before_sudo(self):
         text = self.text()
-        self.assertIn('[ "$#" -gt 0 ] || set -- --all', text)
+        self.assertIn('[ "$chosen" -eq 1 ] || set -- "$@" --all', text)
         self.assertLess(text.index("About to run as root"), text.index("\nsudo python3"))
 
     def checkout(self, base, name, origin):
@@ -1025,6 +1025,24 @@ class BootstrapScriptTests(unittest.TestCase):
             done, asked = self.without_git(base, ["--dry-run"])
             self.assertNotIn("git is not installed", done.stdout)
             self.assertEqual(asked, "")
+
+    @unittest.skipUnless(shutil.which("git") and os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs git, a Debian-like system and an ordinary user")
+    def test_everything_is_the_default_whatever_else_is_said_unless_a_flag_chooses(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            path = self.checkout(base, "mine", f"https://github.com/{self.repo()}.git")
+            env = dict(os.environ, HOME=base, AIOV2_DIR=path, AIOV2_RECORD=os.path.join(base, "none.json"))
+            def said(*args):
+                done = subprocess.run(["sh", self.PATH, "--dry-run", *args], env=env, capture_output=True,
+                                      text=True, timeout=60)
+                return [line for line in done.stdout.splitlines() if line.startswith("STUB")][-1]
+            self.assertEqual(said(), "STUB --install --dry-run --all")
+            self.assertEqual(said("--yes"), "STUB --install --dry-run --yes --all")
+            self.assertEqual(said("--only", "core,tray"), "STUB --install --dry-run --only core,tray")
+            self.assertEqual(said("--without", "mesh"), "STUB --install --dry-run --without mesh")
+            self.assertEqual(said("--pick"), "STUB --install --dry-run --pick")
+            self.assertEqual(said("--repair"), "STUB --install --dry-run --repair")
 
     def test_a_folder_that_is_some_other_project_is_never_pulled_or_run(self):
         text = self.text()

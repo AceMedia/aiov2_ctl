@@ -2,7 +2,8 @@
 # Bootstrap for a fresh uConsole: fetch this tool and let it install everything.
 #
 #   sh install.sh                      install every feature (asks once before changing anything)
-#   sh install.sh --dry-run            show the plan for the usual set and change nothing (no root needed)
+#   sh install.sh --yes                install every feature without asking
+#   sh install.sh --dry-run            show the plan for every feature and change nothing (no root needed)
 #   sh install.sh --only core,tray     any flags are passed on to: aiov2_ctl --install
 #
 # Run it as yourself, not as root: it calls sudo for the one step that needs it, so the installer knows whose
@@ -50,12 +51,17 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' INT TERM
 
-# Everything, unless told otherwise. A dry run changes nothing, so it makes no checkout either.
-[ "$#" -gt 0 ] || set -- --all
+# Everything, unless a flag says what to install: --yes or --dry-run alone do not change what is chosen. A dry
+# run changes nothing, so it makes no checkout either.
 dry=0
+chosen=0
 for arg in "$@"; do
-    [ "$arg" != "--dry-run" ] || dry=1
+    case "$arg" in
+        --dry-run) dry=1 ;;
+        --all|--only|--without|--pick|--repair) chosen=1 ;;
+    esac
 done
+[ "$chosen" -eq 1 ] || set -- "$@" --all
 
 # git is what gives a checkout. Without it, offer to install it first: --yes agrees, a terminal is asked, and
 # with nobody to ask it carries on with the one file.
