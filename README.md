@@ -33,7 +33,7 @@ curl -fsSLO https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/install.sh
 sh install.sh
 ```
 
-`install.sh` clones this repository into `~/aiov2_ctl-ace` (or updates the checkout an earlier install used), checks `aiov2_ctl.py` is a whole Python file, says what it is about to run, and then runs `sudo python3 aiov2_ctl.py --install --all`. The checkout is where the tray's icons come from and what `aiov2_ctl --update` pulls. A folder that is some other project, or a checkout with your own changes, is never changed. Without `git`, or if the clone fails, it downloads the one program file instead. Anything you put after `sh install.sh` is passed on to `--install` in place of `--all`.
+`install.sh` clones this repository into `~/aiov2_ctl-ace` (or updates a checkout of it that is already there: the one an earlier install used, or `~/aiov2_ctl`), checks `aiov2_ctl.py` is a whole Python file, says what it is about to run, and then runs `sudo python3 aiov2_ctl.py --install --all`. The checkout is where the tray's icons come from and what `aiov2_ctl --update` pulls. A folder that is some other project, or a checkout with your own changes, is never changed. Without `git`, or if the clone fails, it downloads the one program file instead. Anything you put after `sh install.sh` is passed on to `--install` in place of `--all`.
 
 From a checkout, or once it is installed, the same installer is:
 

@@ -6,14 +6,17 @@
 #   sh install.sh --only core,tray     any flags are passed on to: aiov2_ctl --install
 #
 # Run it as yourself, not as root: it calls sudo for the one step that needs it, so the installer knows whose
-# home the ops app belongs in. With git it keeps a checkout of this repository in ~/aiov2_ctl-ace, which is
-# where the tray's icons come from and what `aiov2_ctl --update` pulls. Without git it downloads the one
-# program file instead. Either way the only thing run as root is this repository's own aiov2_ctl.py.
+# home the ops app belongs in. With git it keeps a checkout of this repository (one it finds, else a new one in
+# ~/aiov2_ctl-ace), which is where the tray's icons come from and what `aiov2_ctl --update` pulls. Without git
+# it downloads the one program file instead. Either way the only thing run as root is this repository's own
+# aiov2_ctl.py.
 set -eu
 
-URL="https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/aiov2_ctl.py"
-REPO_URL="https://github.com/AceMedia/aiov2_ctl.git"
-REPO_MATCH="AceMedia/aiov2_ctl"
+# The one place this script names the repository it belongs to: owner/name on GitHub. The README's download
+# line must name the same one (a test checks it).
+REPO="AceMedia/aiov2_ctl"
+URL="https://raw.githubusercontent.com/$REPO/main/aiov2_ctl.py"
+REPO_URL="https://github.com/$REPO.git"
 DIR="${AIOV2_DIR:-$HOME/aiov2_ctl-ace}"
 RECORD="${AIOV2_RECORD:-/usr/local/share/aiov2_ctl/install.json}"
 
@@ -29,7 +32,7 @@ note() {
 # True when $1 is a git checkout of this repository (and not, say, the project this one was forked from).
 ours() {
     [ -n "$1" ] && [ -f "$1/aiov2_ctl.py" ] && [ -e "$1/.git" ] || return 1
-    git -C "$1" remote get-url origin 2>/dev/null | grep -qi "$REPO_MATCH"
+    git -C "$1" remote get-url origin 2>/dev/null | grep -Eqi "github\.com[:/]$REPO(\.git)?/?\$"
 }
 
 # 1. The right kind of system.
@@ -54,11 +57,12 @@ for arg in "$@"; do
     [ "$arg" != "--dry-run" ] || dry=1
 done
 
-# 3. Find or make a checkout: the one an earlier install recorded, else the usual folder, else a new clone.
+# 3. Find or make a checkout: the one an earlier install recorded, else the usual folder, else ~/aiov2_ctl (where
+# the README has always said to clone it), else a new clone. Each is used only if it is this repository.
 checkout=""
 if command -v git >/dev/null 2>&1; then
     recorded=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("repo_path") or "")' "$RECORD" 2>/dev/null || true)
-    for candidate in "$recorded" "$DIR"; do
+    for candidate in "$recorded" "$DIR" "$HOME/aiov2_ctl"; do
         if ours "$candidate"; then
             checkout=$candidate
             break
