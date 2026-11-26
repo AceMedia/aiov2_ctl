@@ -34,6 +34,19 @@ def user_entry(name="shane", uid=1000):
     return types.SimpleNamespace(pw_name=name, pw_uid=uid, pw_dir=f"/home/{name}")
 
 
+_REAL_META_PATH = a.INSTALL_META_PATH
+
+
+def setUpModule():
+    # No test here may read this machine's own install record: what it says would change what a plain install
+    # selects. Tests that want a record pass one in.
+    a.INSTALL_META_PATH = "/nonexistent/aiov2_ctl/install.json"
+
+
+def tearDownModule():
+    a.INSTALL_META_PATH = _REAL_META_PATH
+
+
 class RegistryTests(unittest.TestCase):
     def test_every_feature_has_the_same_plain_fields(self):
         fields = {"key", "title", "summary", "required", "default", "apt", "hardware", "needs"}
@@ -784,7 +797,9 @@ class CommandTests(unittest.TestCase):
 
     def test_the_update_starts_the_install_without_a_second_question(self):
         import inspect
-        self.assertIn('["--install", "--yes", "--show-mesh-status"]', inspect.getsource(a.update_self))
+        self.assertIn("finish_update(two_steps=True)", inspect.getsource(a.update_self))
+        for cmd in a.update_commands("/usr/bin/python3", "/usr/local/bin/aiov2_ctl", True):
+            self.assertIn("--yes", cmd)
 
     def test_install_and_features_are_commands(self):
         with mock.patch.object(sys, "argv", ["aiov2_ctl", "--install", "--dry-run", "--only", "flipper"]), \
@@ -1190,6 +1205,7 @@ class UninstallTests(unittest.TestCase):
         paths = [p for s in plan for p in s.get("paths", ()) + s.get("trees", ())]
         allowed = ("/etc/sudoers.d/aiov2_ctl", "/etc/systemd/system/aiov2-", "/etc/systemd/system/readsb.service.d/10-aiov2-",
                    "/etc/bash_completion.d/aiov2_ctl", "/usr/local/share/aiov2_ctl/", "/usr/share/applications/aiov2_ctl.desktop",
+                   "/usr/share/applications/aiov2_ctl-installer.desktop", a.INSTALL_META_PATH,
                    "/home/shane/.config/autostart/aiov2_ctl.desktop", "/home/shane/.local/share/applications/uconsole-ops")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
@@ -1355,22 +1371,22 @@ class InstallerWindowHelperTests(unittest.TestCase):
 
     def test_the_command_installs_exactly_what_was_ticked_and_never_asks(self):
         argv = a.installer_argv("sudo", "/x/aiov2_ctl.py", "install", ["core", "tray"])
-        self.assertEqual(argv, ["sudo", "-n", "/usr/bin/python3", "-u", "/x/aiov2_ctl.py", "--install", "--only",
+        self.assertEqual(argv, ["sudo", "-n", "/usr/bin/python3", "-u", "/x/aiov2_ctl.py", "--apply", "--keep",
                                 "core,tray", "--yes"])
-        opts = a.parse_install_args(argv[6:])
-        self.assertEqual(a.select_features(opts), ["core", "tray"])
+        opts = a.parse_apply_args(argv[6:])
+        self.assertEqual((opts["keep"], opts["yes"], opts["dry_run"]), (["core", "tray"], True, False))
         self.assertEqual(a.installer_argv("pkexec", "/x/a.py", "repair")[:1] + a.installer_argv("pkexec", "/x/a.py", "repair")[-2:],
                          ["pkexec", "--repair", "--yes"])
 
     def test_every_selection_the_window_can_make_is_one_the_command_line_accepts(self):
         for keys in (["core"], a.default_features(), a.feature_keys(), ["core", "sdr", "adsb"]):
             p = a.FeaturePicker(keys)
-            opts = a.parse_install_args(a.installer_arguments("install", p.selected())[1:])
-            self.assertEqual(a.select_features(opts), p.selected())
+            opts = a.parse_apply_args(a.installer_arguments("install", p.selected())[1:])
+            self.assertEqual(a.apply_changes(opts["keep"], [])["install"], p.selected())
         a.parse_install_args(a.installer_arguments("repair"))
 
     def test_the_command_shown_for_a_terminal_can_be_typed_as_it_is(self):
-        self.assertEqual(a.installer_command_text("install", ["core", "gps"]), "sudo aiov2_ctl --install --only core,gps")
+        self.assertEqual(a.installer_command_text("install", ["core", "gps"]), "sudo aiov2_ctl --apply --keep core,gps")
         self.assertEqual(a.installer_command_text("repair"), "sudo aiov2_ctl --repair")
 
     def test_rows_carry_ticks_fixed_boxes_and_notes(self):
@@ -1437,7 +1453,8 @@ class FeaturesReportTests(unittest.TestCase):
         out, rows = self.report(["core"])
         self.assertEqual([r["key"] for r in out["features"]], a.feature_keys())
         self.assertEqual(json.loads(json.dumps(out)), out)
-        self.assertEqual((out["version"], out["root"]), (1, "sudo"))
+        self.assertEqual((out["version"], out["root"], out["unfinished"]), (1, "sudo", False))
+        self.assertIs(a.features_report(state(), {}, {}, None, unfinished=True)["unfinished"], True)
 
     def test_installed_is_what_the_installer_recorded(self):
         _, rows = self.report(["core", "tray", "sdr"])
@@ -1477,6 +1494,226 @@ class FeaturesReportTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(a.features_command(["--yaml"]), 2)
         self.assertIn("--json", out.getvalue())
+
+
+class InstallerEntryTests(unittest.TestCase):
+    """The installer window's start-menu entry comes and goes with the tray."""
+
+    def test_the_tray_writes_both_entries(self):
+        plan = a.install_plan(["core", "tray"], NOTHING_THERE, state())
+        self.assertIn("tray.installer-entry", ids(plan))
+        self.assertLess(ids(plan).index("tray.desktop-entry"), ids(plan).index("tray.installer-entry"))
+        self.assertNotIn("tray.installer-entry", ids(a.install_plan(["core"], NOTHING_THERE, state())))
+
+    def test_every_planned_step_has_something_that_does_it(self):
+        for step in a.install_plan(a.feature_keys(), NOTHING_THERE, state()):
+            if step["kind"] != "note":
+                self.assertTrue(callable(a.step_action(step)), step["id"])
+
+    def test_the_entry_opens_the_window_as_the_user(self):
+        entry = a.INSTALLER_DESKTOP_ENTRY
+        self.assertIn("Exec=/usr/bin/python3 /usr/local/bin/aiov2_ctl --installer", entry)
+        self.assertIn("Terminal=false", entry)
+        self.assertNotIn("sudo", entry)
+        self.assertNotIn("pkexec", entry)
+
+    def test_removing_the_tray_removes_both_entries(self):
+        plan = a.uninstall_plan(["tray"], state(present={"desktop-entry"}))
+        paths = [p for s in plan for p in s.get("paths", ())]
+        self.assertIn(a.SYSTEM_DESKTOP_PATH, paths)
+        self.assertIn(a.INSTALLER_DESKTOP_PATH, paths)
+
+
+class PlainInstallTests(unittest.TestCase):
+    """What `--install` with no choice means: it is what every updater ends by running."""
+
+    def test_a_new_machine_gets_the_usual_set(self):
+        self.assertEqual(a.plain_selection({}, state()), (a.resolve_features(a.default_features()), []))
+        self.assertEqual(a.plain_selection(None, state())[0], a.resolve_features(a.default_features()))
+
+    def test_a_record_is_kept_to_so_an_update_does_not_bring_back_what_was_removed(self):
+        chosen, left = a.plain_selection({"features": ["core", "gps"]}, state())
+        self.assertEqual(chosen, ["core", "gps"])
+        self.assertIn("tray", left)
+        self.assertNotIn("gps", left)
+        self.assertNotIn("adsb", left)                 # never one of the usual set, so not worth a mention
+
+    def test_a_record_that_misses_what_a_feature_needs_gets_it(self):
+        self.assertEqual(a.plain_selection({"features": ["adsb"]}, state())[0], ["core", "sdr", "adsb"])
+
+    def test_an_older_install_with_no_record_gets_the_usual_set_and_keeps_what_it_has(self):
+        # What the project this was forked from leaves: the program, completion, the tray entry, the boot unit.
+        old = state(present={"exe", "completion", "rails-unit", "desktop-entry", "autostart"}, installed={"readsb"})
+        chosen, left = a.plain_selection({"repo_path": "/home/shane/aiov2_ctl", "branch": "main"}, old)
+        self.assertEqual(left, [])
+        for key in a.default_features() + ["autostart", "adsb"]:
+            self.assertIn(key, chosen)
+
+    def test_an_empty_record_counts_as_none(self):
+        self.assertEqual(a.plain_selection({"features": []}, state())[0], a.resolve_features(a.default_features()))
+
+    def said(self, args, known):
+        lines = []
+        code = a.install_command(args, facts=NOTHING_THERE, state=state(), euid=1000, isatty=False,
+                                 say=lines.append, known=known)
+        return code, "\n".join(lines)
+
+    def test_the_command_says_what_it_is_leaving_alone(self):
+        code, text = self.said(["--dry-run"], ["core", "gps"])
+        self.assertEqual(code, 0)
+        self.assertIn("This will install: core, gps", text)
+        self.assertIn("Keeping to what is installed", text)
+        self.assertIn("Tray", text)
+
+    def test_a_choice_on_the_command_line_still_wins(self):
+        code, text = self.said(["--dry-run", "--only", "tray"], ["core", "gps"])
+        self.assertIn("This will install: core, tray", text)
+        self.assertNotIn("Keeping to", text)
+        code, text = self.said(["--dry-run", "--all"], ["core"])
+        self.assertIn(", ".join(a.feature_keys()), text)
+
+
+class UpdateTests(unittest.TestCase):
+    """Updating: the old program copies the new one in, then the new one runs its own installer."""
+
+    def test_a_stamp_is_the_same_for_the_same_file_and_none_for_no_file(self):
+        self.assertEqual(a.file_stamp(a.__file__), a.file_stamp(a.__file__))
+        self.assertEqual(len(a.file_stamp(a.__file__)), 64)
+        self.assertIsNone(a.file_stamp("/nonexistent/aiov2_ctl"))
+
+    def test_an_update_is_unfinished_when_another_versions_installer_ran_last(self):
+        self.assertTrue(a.update_unfinished({"installed_by": "old"}, "new"))
+        self.assertFalse(a.update_unfinished({"installed_by": "new"}, "new"))
+
+    def test_an_install_from_before_stamps_is_unfinished(self):
+        # The project this was forked from, and this one before now: a record with no stamp.
+        self.assertTrue(a.update_unfinished({"repo_path": "/home/shane/aiov2_ctl", "branch": "main"}, "new"))
+        self.assertTrue(a.update_unfinished({}, "new"))
+
+    def test_nothing_installed_is_not_an_unfinished_update(self):
+        self.assertFalse(a.update_unfinished(None, "new"))
+        self.assertFalse(a.update_unfinished({"installed_by": "x"}, None))
+
+    def test_the_install_records_the_stamp_of_the_program_that_ran(self):
+        written = {}
+        ctx = {"source": ("/x/aiov2_ctl.py", None, {"repo_path": "/x"}), "features": ["core"], "stamp": "abc"}
+        with mock.patch.object(a, "_write_system_file", side_effect=lambda path, text: written.update({path: text}) or True):
+            a._act_core_meta({}, ctx)
+        meta = json.loads(written[a.INSTALL_META_PATH])
+        self.assertEqual((meta["installed_by"], meta["features"], meta["repo_path"]), ("abc", ["core"], "/x"))
+
+    def test_an_update_runs_the_root_owned_copy_twice_and_never_the_checkout(self):
+        first, last = a.update_commands("/usr/bin/python3", "/usr/local/bin/aiov2_ctl", True)
+        self.assertEqual(first, ["sudo", "/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--only", "core", "--yes"])
+        self.assertEqual(last, ["sudo", "/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--yes", "--show-mesh-status"])
+        # The second is a plain install: it keeps to what is installed.
+        opts = a.parse_install_args(last[4:])
+        self.assertTrue(opts["only"] is None and not opts["all"] and not opts["without"])
+        # The first is one every version with features understands, and it copies the program.
+        self.assertIn("core.copy", ids(a.install_plan(a.select_features(a.parse_install_args(first[4:])), NOTHING_THERE, state())))
+
+    def test_finishing_an_unfinished_update_is_only_the_second_step(self):
+        self.assertEqual(a.update_commands("p", "i", False), [["sudo", "p", "i", "--install", "--yes", "--show-mesh-status"]])
+
+    def test_the_steps_run_in_order_and_stop_at_a_failure(self):
+        ran, said = [], []
+        self.assertEqual(a.finish_update(True, run=lambda c: ran.append(c) or 0, trusted=True, say=said.append), 0)
+        self.assertEqual(len(ran), 2)
+        self.assertIn("Step 1 of 2", "".join(said))
+        ran.clear()
+        said.clear()
+        self.assertEqual(a.finish_update(True, run=lambda c: ran.append(c) or 1, trusted=True, say=said.append), 1)
+        self.assertEqual(len(ran), 1)
+        self.assertIn("sudo aiov2_ctl --install", "".join(said))
+
+    def test_the_notice_is_for_a_person_looking_not_for_a_program_reading(self):
+        yes = lambda: True
+        self.assertIn("sudo aiov2_ctl --install", a.unfinished_notice_for("--status", [], True, yes))
+        self.assertIn("sudo aiov2_ctl --install", a.unfinished_notice_for(None, [], True, yes))
+        self.assertEqual(a.unfinished_notice_for("--status", [], False, yes), "")             # piped
+        self.assertEqual(a.unfinished_notice_for("--features", ["--json"], True, yes), "")
+        self.assertEqual(a.unfinished_notice_for("--gui", [], True, yes), "")
+        self.assertEqual(a.unfinished_notice_for("--install", [], True, yes), "")
+        self.assertEqual(a.unfinished_notice_for("--status", [], True, lambda: False), "")
+
+    def test_a_quiet_command_does_not_even_look(self):
+        def boom():
+            raise AssertionError("looked")
+        self.assertEqual(a.unfinished_notice_for("--gui", [], True, boom), "")
+        self.assertEqual(a.unfinished_notice_for("--status", [], False, boom), "")
+
+
+class ApplyTests(unittest.TestCase):
+    """--apply: make what is installed exactly a list. It is what the window's Install button runs."""
+
+    def test_what_is_installed_and_not_kept_is_removed_last_installed_first(self):
+        got = a.apply_changes(["core", "gps"], ["core", "tray", "gps", "flipper", "autostart"])
+        self.assertEqual(got["remove"], ["autostart", "flipper", "tray"])
+        self.assertEqual(got["install"], ["core", "gps"])
+
+    def test_nothing_is_removed_that_is_not_installed(self):
+        self.assertEqual(a.apply_changes(["core", "gps"], [])["remove"], [])
+        self.assertEqual(a.apply_changes(["core"], ["core", "sdr"])["remove"], ["sdr"])   # not adsb: it is not there
+
+    def test_what_the_kept_ones_need_is_kept(self):
+        got = a.apply_changes(["adsb"], ["core", "sdr", "adsb", "tray"])
+        self.assertEqual((got["install"], got["remove"]), (["core", "sdr", "adsb"], ["tray"]))
+
+    def test_the_controller_is_never_removed(self):
+        for keep in (["gps"], ["core"], a.feature_keys()):
+            self.assertNotIn("core", a.apply_changes(keep, a.feature_keys())["remove"])
+
+    def test_keeping_everything_installed_removes_nothing(self):
+        self.assertEqual(a.apply_changes(a.feature_keys(), a.feature_keys())["remove"], [])
+
+    def test_the_arguments(self):
+        self.assertEqual(a.parse_apply_args(["--keep", "core,gps", "--dry-run"]),
+                         {"keep": ["core", "gps"], "dry_run": True, "yes": False})
+        for bad in ([], ["--yes"], ["--keep"], ["--keep", "core", "--all"]):
+            with self.assertRaises(a.InstallError):
+                a.parse_apply_args(bad)
+
+    def run_apply(self, args, recorded, remove_code=0):
+        calls, said = [], []
+        code = a.apply_command(args, state=state(), meta={"features": recorded},
+                               remove=lambda x: calls.append(("remove", x)) or remove_code,
+                               install=lambda x: calls.append(("install", x)) or 0, say=said.append)
+        return code, calls, said
+
+    def test_it_removes_then_installs_with_the_ordinary_commands(self):
+        code, calls, _ = self.run_apply(["--keep", "core,gps", "--yes"], ["core", "tray", "gps"])
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [("remove", ["--only", "tray", "--yes"]), ("install", ["--only", "core,gps", "--yes"])])
+
+    def test_with_nothing_to_remove_it_only_installs(self):
+        _, calls, _ = self.run_apply(["--keep", "core,gps", "--dry-run"], ["core"])
+        self.assertEqual(calls, [("install", ["--only", "core,gps", "--dry-run"])])
+
+    def test_a_removal_that_fails_stops_it(self):
+        code, calls, _ = self.run_apply(["--keep", "core", "--yes"], ["core", "tray"], remove_code=1)
+        self.assertEqual((code, len(calls)), (1, 1))
+
+    def test_bad_arguments_change_nothing(self):
+        code, calls, said = self.run_apply(["--keep", "nonsense"], ["core"])
+        self.assertEqual((code, calls), (2, []))
+        code, calls, said = self.run_apply([], ["core"])
+        self.assertEqual((code, calls), (2, []))
+        self.assertIn("--keep", "".join(said))
+
+    def test_the_window_says_what_unticking_removes(self):
+        st = state(present={"exe", "completion", "rails-unit"})
+        text = a.installer_summary(a.FeaturePicker(["core"]), st, ["core", "tray", "autostart"])
+        self.assertIn("2 to remove: Tray at login, Tray.", text)
+        self.assertNotIn("to remove", a.installer_summary(a.FeaturePicker(["core"]), st, ["core"]))
+        self.assertNotIn("to remove", a.installer_summary(a.FeaturePicker(["core"]), st))
+
+    def test_it_is_a_command_with_help_and_completion(self):
+        with mock.patch.object(sys, "argv", ["aiov2_ctl", "--apply", "--keep", "core", "--dry-run"]), \
+                mock.patch.object(a, "apply_command", return_value=0) as cmd, self.assertRaises(SystemExit):
+            a.main()
+        cmd.assert_called_once_with(["--keep", "core", "--dry-run"])
+        self.assertIn("--apply", a.HELP_TEXT)
+        self.assertIn("--apply", a.BASH_COMPLETION)
 
 if __name__ == "__main__":
     unittest.main()
