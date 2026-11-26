@@ -8682,7 +8682,8 @@ def uninstall_plan(selected, state):
                     plan.append(_unstep(key, "checkout", "checkout",
                                         f"Remove the ops app folder {path}, as {user}, but only if it holds "
                                         f"nothing of yours: no changed files, nothing unpushed, nothing "
-                                        f"stashed. Otherwise it is left and you are told why. Your logs and "
+                                        f"stashed. Otherwise it is left and you are told why. An ops app or "
+                                        f"console running from it is closed first. Your logs and "
                                         f"settings in ~/.local/state/ops_gui are never touched.", False,
                                         path=path, shared_with=(other,)))
             else:
@@ -8690,9 +8691,12 @@ def uninstall_plan(selected, state):
                 plan.append(_unstep(key, "checkout-kept", "note",
                                     f"The ops app folder {path} stays: the {other_title} uses it too.", False))
         elif key == "tray":
+            plan.append(_unstep(key, "close", "close-tray",
+                                "Close the tray if it is running. If the tray is what asked for this, it is "
+                                "left open: quit it yourself afterwards.", True))
             plan.append(_unstep(key, "desktop-entry", "files",
                                 f"Remove the start-menu entries for the tray and the installer, and the "
-                                f"tray's icons. A tray that is running stays until you quit it or log out.", True,
+                                f"tray's icons.", True,
                                 paths=(SYSTEM_DESKTOP_PATH, INSTALLER_DESKTOP_PATH), trees=(os.path.join(ASSET_BASE, "img"),)))
         elif key == "core":
             plan.append(_unstep(key, "sudoers", "files",
@@ -8744,7 +8748,99 @@ def format_uninstall_plan(plan, selected):
         lines.append("No package is removed. These stay installed, since other things may use them: "
                      + ", ".join(packages) + ".")
     lines.append("No rail is switched and no radio service is stopped or started.")
+    if "autostart" in selected and "core" in selected:
+        lines.append("The tray's login entry is not part of the usual set, so installing again does not bring it "
+                     "back. Afterwards, run: aiov2_ctl --autostart")
     return "\n".join(lines)
+
+
+def process_table(proc="/proc"):
+    """[(pid, uid, parent, argv, cwd)] for each process that can be read. Reads only."""
+    rows = []
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return rows
+    for name in names:
+        if not name.isdigit():
+            continue
+        base = os.path.join(proc, name)
+        try:
+            uid = os.stat(base).st_uid
+            with open(os.path.join(base, "cmdline"), "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+            with open(os.path.join(base, "stat")) as f:
+                parent = int(f.read().rsplit(")", 1)[1].split()[1])
+            cwd = os.readlink(os.path.join(base, "cwd"))
+        except (OSError, ValueError, IndexError):
+            continue
+        rows.append((int(name), uid, parent, argv, cwd))
+    return rows
+
+
+def is_tray_process(argv, cwd):
+    return INSTALLED_PATH in argv[:2] and "--gui" in argv
+
+
+def runs_ops_from(path):
+    """A test for process_table rows: the ops app or the ops console, started in `path`. Not a shell or an
+    editor that merely has the folder open."""
+    def test(argv, cwd):
+        if cwd != path:
+            return False
+        app = any(a == "-m" and b == "ops_gui" for a, b in zip(argv, argv[1:]))
+        return app or any(os.path.basename(a) == "ops.py" for a in argv[1:])
+    return test
+
+
+def processes_to_close(table, uid, own_pid, wanted):
+    """(pids to close, asked) for the user's processes that `wanted(argv, cwd)` picks. A picked process that is
+    this one or one that started it is not closed, since closing it would stop the removal half way: asked is
+    True then."""
+    parents = {pid: parent for pid, _, parent, _, _ in table}
+    line, pid = set(), own_pid
+    while pid and pid not in line:
+        line.add(pid)
+        pid = parents.get(pid)
+    picked = [pid for pid, owner, _, argv, cwd in table if owner == uid and wanted(argv, cwd)]
+    return [p for p in picked if p not in line], any(p in line for p in picked)
+
+
+def close_processes(pids, kill=os.kill, alive=None, sleep=time.sleep, wait=3.0):
+    """Ask each to finish (SIGTERM, never SIGKILL) and wait a moment for them. Returns how many went."""
+    alive = alive or (lambda pid: os.path.exists(f"/proc/{pid}"))
+    asked = []
+    for pid in pids:
+        try:
+            kill(pid, 15)
+            asked.append(pid)
+        except OSError:
+            pass
+    waited = 0.0
+    while waited < wait and any(alive(p) for p in asked):
+        sleep(0.2)
+        waited += 0.2
+    return len([p for p in asked if not alive(p)])
+
+
+def _close_users(user, wanted, table=None, close=close_processes):
+    """(how many closed, asked) for the user's processes `wanted` picks."""
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return 0, False
+    pids, asked = processes_to_close(process_table() if table is None else table, uid, os.getpid(), wanted)
+    return (close(pids) if pids else 0), asked
+
+
+def _un_close_tray(step, ctx, table=None, close=close_processes):
+    user = ctx.get("user")
+    if not user:
+        return "already", ""
+    closed, asked = _close_users(user, is_tray_process, table, close)
+    if asked:
+        return "note", "the tray asked for this, so it is still open: quit it yourself"
+    return ("done" if closed else "already"), ""
 
 
 def _remove_paths(paths):
@@ -8820,7 +8916,24 @@ def _un_exe(step, ctx):
         if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(INSTALLED_PATH):
             os.remove(link)
             removed = True
+    removed = _remove_paths(compiled_copies(INSTALLED_PATH)) or removed
+    try:
+        os.rmdir(os.path.join(os.path.dirname(INSTALLED_PATH), "__pycache__"))     # only when it is empty
+    except OSError:
+        pass
     return ("done" if _remove_paths((INSTALLED_PATH,)) or removed else "already"), ""
+
+
+def compiled_copies(path, listdir=os.listdir):
+    """The copies Python compiled of the program at `path` and left in __pycache__ beside it."""
+    cache = os.path.join(os.path.dirname(path), "__pycache__")
+    name = os.path.basename(path)
+    try:
+        names = listdir(cache)
+    except OSError:
+        return []
+    return [os.path.join(cache, n) for n in sorted(names)
+            if n.endswith(".pyc") and (n.startswith(name + ".") or n.startswith(name + "cpython-"))]
 
 
 def checkout_holds_nothing(path, user, run=_run_text):
@@ -8841,7 +8954,7 @@ def checkout_holds_nothing(path, user, run=_run_text):
     return True, ""
 
 
-def _un_checkout(step, ctx, run=_run_text):
+def _un_checkout(step, ctx, run=_run_text, closer=None):
     user, home, path = ctx.get("user"), ctx.get("home"), step["path"]
     if not user or not home:
         return "failed", NO_USER_MESSAGE
@@ -8855,10 +8968,11 @@ def _un_checkout(step, ctx, run=_run_text):
     empty, why = checkout_holds_nothing(path, user, run)
     if not empty:
         return "note", f"{path} was left: {why}. Delete it yourself if you want it gone"
+    _, asked = (closer or _close_users)(user, runs_ops_from(path))
     rc, _, err = run(as_user(user, ["rm", "-rf", "--", path]), cwd="/", timeout=120)
     if rc != 0:
         return "failed", (err.strip().splitlines() or [f"{path} could not be removed"])[-1]
-    return "done", ""
+    return "done", ("the ops app asked for this, so it is still open: close it yourself" if asked else "")
 
 
 def _un_note(step, ctx):
@@ -8872,6 +8986,7 @@ UNINSTALL_ACTIONS = {
     "udev": _un_udev,
     "sudoers-quiet": _un_sudoers_quiet,
     "exe": _un_exe,
+    "close-tray": _un_close_tray,
     "checkout": _un_checkout,
     "note": _un_note,
 }
@@ -8887,7 +9002,7 @@ def uninstall_results(selected, outcomes):
     for key in selected:
         mine = [(s, st, w) for s, st, w in outcomes if key == s["feature"] or key in s.get("shared_with", ())]
         failed = [w for _, st, w in mine if st == "failed"]
-        notes = [w for s, st, w in mine if st == "note" and w]
+        notes = [w for s, st, w in mine if st in ("note", "done") and w]
         real = [st for s, st, _ in mine if s["kind"] != "note"]
         if failed:
             rows.append((key, "failed", "; ".join(failed)))
