@@ -7113,6 +7113,15 @@ def package_available(pkg, run=_run_text):
     return rc == 0 and apt_candidate(out) is not None
 
 
+def package_lists_present(listdir=os.listdir, path="/var/lib/apt/lists"):
+    """True when apt has fetched its package lists. A fresh system image often has none, and then apt knows
+    of no package at all, which says nothing about what its sources hold."""
+    try:
+        return any(n.endswith("_Packages") or "_Packages." in n for n in listdir(path))
+    except OSError:
+        return False
+
+
 def all_feature_packages():
     seen = []
     for f in FEATURES:
@@ -7136,7 +7145,9 @@ def install_state(environ=None, euid=None, run=_run_text):
     euid = os.geteuid() if euid is None else euid
     who = invoking_user(environ, euid)
     installed = {p for p in all_feature_packages() if package_installed(p, run)}
-    unavailable = {p for p in all_feature_packages() if p not in installed and not package_available(p, run)}
+    lists = package_lists_present()
+    unavailable = ({p for p in all_feature_packages() if p not in installed and not package_available(p, run)}
+                   if lists else set())
     present = set()
     if os.path.isfile(INSTALLED_PATH):
         present.add("exe")
@@ -7182,6 +7193,7 @@ def install_state(environ=None, euid=None, run=_run_text):
         "checkout": checkout,
         "installed": installed,
         "unavailable": unavailable,
+        "no_package_lists": not lists,
         "sudoers_listening": listening,
         "present": present,
     }
@@ -7313,6 +7325,11 @@ def install_plan(selected_keys, facts, state):
             plan.append(_step(key, "hardware", "note", HARDWARE_MISSING[f["hardware"]], False, ""))
         plan += _apt_step(key, state)
         if key == "core":
+            if state.get("no_package_lists"):
+                plan.append(_step(key, "no-lists", "note",
+                                  "This system has not fetched its package lists yet. The install fetches them "
+                                  "first (apt-get update); until then it is not known whether a package is "
+                                  "missing from the package sources.", False, ""))
             plan.append(_step(key, "copy", "copy",
                               f"Copy this program to {INSTALLED_PATH}, and link it where sudo looks if it "
                               f"would not find it there.", True, f"Remove {INSTALLED_PATH}"))

@@ -8,8 +8,8 @@
 # Run it as yourself, not as root: it calls sudo for the one step that needs it, so the installer knows whose
 # home the ops app belongs in. With git it keeps a checkout of this repository (one it finds, else a new one in
 # ~/aiov2_ctl-ace), which is where the tray's icons come from and what `aiov2_ctl --update` pulls. Without git
-# it downloads the one program file instead. Either way the only thing run as root is this repository's own
-# aiov2_ctl.py.
+# it downloads the one program file instead. What runs as root is this repository's own aiov2_ctl.py and, when
+# git is missing and you agree, apt to install git.
 set -eu
 
 # The one place this script names the repository it belongs to: owner/name on GitHub. The README's download
@@ -56,6 +56,32 @@ dry=0
 for arg in "$@"; do
     [ "$arg" != "--dry-run" ] || dry=1
 done
+
+# git is what gives a checkout. Without it, offer to install it first: --yes agrees, a terminal is asked, and
+# with nobody to ask it carries on with the one file.
+yes=0
+for arg in "$@"; do
+    case "$arg" in --yes|-y) yes=1 ;; esac
+done
+if [ "$dry" -eq 0 ] && ! command -v git >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    note "git is not installed. With it this tool keeps a checkout: the tray's icons come from it and --update pulls it."
+    go=$yes
+    if [ "$go" -eq 0 ] && [ -t 0 ]; then
+        printf 'Install git now? [Y/n]: '
+        read -r answer || answer=n
+        case "$answer" in ""|y|Y|yes|Yes) go=1 ;; esac
+    fi
+    if [ "$go" -eq 1 ]; then
+        printf 'About to run as root: sudo apt-get update, then sudo apt-get install -y git\n'
+        if sudo apt-get update -q && sudo apt-get install -y -q git; then
+            note "git is installed."
+        else
+            note "git could not be installed; carrying on without a checkout."
+        fi
+    else
+        note "carrying on without git. Install it (sudo apt install git) and run this again to get a checkout."
+    fi
+fi
 
 # 3. Find or make a checkout: the one an earlier install recorded, else the usual folder, else ~/aiov2_ctl (where
 # the README has always said to clone it), else a new clone. Each is used only if it is this repository.
