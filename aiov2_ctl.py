@@ -8430,6 +8430,32 @@ def channel_look(repo, branch, run=_run_text):
     return heads, (out.strip().splitlines() if rc == 0 else None), ""
 
 
+def ops_incoming(path, run=_run_text, isdir=os.path.isdir):
+    """The ops app's changes waiting on the branch its folder is on, newest first, each marked '(ops app)'. []
+    when there is no checkout at `path`, it is not the ops repository, or it could not be reached. Fetches;
+    changes no file. An update pulls the app as well as this tool, so a change to the app alone is an update."""
+    if not isdir(os.path.join(path, ".git")):
+        return []
+    git = ["env", "GIT_TERMINAL_PROMPT=0", "git", "-C", path]
+    rc, url, _ = run(git + ["remote", "get-url", "origin"], timeout=10)
+    if rc != 0 or not is_ops_remote(url):
+        return []
+    rc, branch, _ = run(git + ["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+    branch = branch.strip()
+    if rc != 0 or not branch or branch == "HEAD":
+        return []
+    if run(git + ["fetch", "--quiet", "origin", branch], timeout=120)[0] != 0:
+        return []
+    rc, out, _ = run(git + ["log", "--oneline", "--no-decorate", f"HEAD..origin/{branch}"], timeout=60)
+    if rc != 0:
+        return []
+    return [f"{line.strip()} (ops app)" for line in out.splitlines() if line.strip()]
+
+
+def ops_waiting():
+    return ops_incoming(ops_checkout_path(os.path.expanduser("~")))
+
+
 def channel_command(args=()):
     args = list(args or ())
     yes = any(a in ("--yes", "-y") for a in args)
@@ -8442,6 +8468,8 @@ def channel_command(args=()):
         if not repo:
             return 1
         heads, incoming, error = channel_look(repo, branch)
+        if incoming is not None:
+            incoming = incoming + ops_waiting()
         how = None
         if rest:
             how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
@@ -9472,7 +9500,8 @@ def update_self(confirmed=False):
         ["git", "log", "--oneline", "--no-decorate", incoming],
         cwd=repo, text=True, capture_output=True,
     ).stdout.strip()
-    if not summary:
+    app_waiting = ops_waiting()
+    if not summary and not app_waiting:
         print("Already up to date.")
         if update_is_unfinished():
             print("\n" + UNFINISHED_NOTICE.split("\n")[0])
@@ -9488,11 +9517,16 @@ def update_self(confirmed=False):
             return finish_update(two_steps=False)
         return 0
 
-    print("Incoming changes:\n")
-    print(summary)
-    run_cmd(["git", "diff", "--stat", incoming], cwd=repo)
+    if summary:
+        print("Incoming changes:\n")
+        print(summary)
+        run_cmd(["git", "diff", "--stat", incoming], cwd=repo)
+    if app_waiting:
+        print("\nIncoming changes to the ops app:\n")
+        print("\n".join(app_waiting))
 
-    if load_config().get("require_signed_updates"):
+    # The signature is on this tool's commits: they are what runs as root. The app is pulled and run as the user.
+    if summary and load_config().get("require_signed_updates"):
         if not run_cmd(["git", "verify-commit", f"origin/{branch}"], cwd=repo):
             print("\nrequire_signed_updates is on and the newest commit is not "
                   "validly signed. Not updating.")
@@ -9508,10 +9542,11 @@ def update_self(confirmed=False):
             print("Update cancelled.")
             return 0
 
-    print("\nPulling latest changes…\n")
-    if not run_cmd(["git", "pull", "--ff-only", "origin", branch], cwd=repo):
-        print("Git pull failed. Resolve manually.")
-        return 1
+    if summary:
+        print("\nPulling latest changes…\n")
+        if not run_cmd(["git", "pull", "--ff-only", "origin", branch], cwd=repo):
+            print("Git pull failed. Resolve manually.")
+            return 1
 
     print("\nReinstalling updated version…\n")
 
