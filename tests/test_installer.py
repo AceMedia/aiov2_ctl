@@ -846,6 +846,21 @@ class BootstrapScriptTests(unittest.TestCase):
         with open(self.PATH) as f:
             return f.read()
 
+    def repo(self):
+        """The repository the script says it belongs to."""
+        import re
+        found = re.findall(r'^REPO="([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"$', self.text(), re.M)
+        self.assertEqual(len(found), 1, found)
+        return found[0]
+
+    def test_the_repository_is_named_once_and_the_readme_names_the_same_one(self):
+        text, repo = self.text(), self.repo()
+        self.assertEqual(text.count(repo), 1)
+        with open(os.path.join(REPO, "README.md")) as f:
+            readme = f.read()
+        self.assertIn(f"curl -fsSLO https://raw.githubusercontent.com/{repo}/main/install.sh", readme)
+        self.assertEqual(readme.count("raw.githubusercontent.com"), 1)
+
     @unittest.skipUnless(shutil.which("sh"), "no sh here")
     def test_the_script_is_valid_shell(self):
         self.assertEqual(subprocess.call(["sh", "-n", self.PATH]), 0)
@@ -860,8 +875,8 @@ class BootstrapScriptTests(unittest.TestCase):
 
     def test_it_downloads_only_this_repositorys_file_and_pipes_nothing_into_a_shell(self):
         text = self.text()
-        self.assertIn("https://raw.githubusercontent.com/AceMedia/aiov2_ctl/main/aiov2_ctl.py", text)
-        self.assertIn("https://github.com/AceMedia/aiov2_ctl.git", text)
+        self.assertIn('URL="https://raw.githubusercontent.com/$REPO/main/aiov2_ctl.py"', text)
+        self.assertIn('REPO_URL="https://github.com/$REPO.git"', text)
         self.assertEqual(text.count("https://"), 2)
         for line in text.splitlines():
             if not line.lstrip().startswith("#"):
@@ -891,7 +906,7 @@ class BootstrapScriptTests(unittest.TestCase):
     def test_a_dry_run_uses_a_checkout_of_this_repository_and_leaves_it_untouched(self):
         import tempfile
         with tempfile.TemporaryDirectory() as base:
-            path = self.checkout(base, "mine", "https://github.com/AceMedia/aiov2_ctl.git")
+            path = self.checkout(base, "mine", f"https://github.com/{self.repo()}.git")
             before = sorted(os.listdir(path))
             done = self.dry_run(base, path)
             self.assertEqual(done.returncode, 0, done.stderr)
@@ -905,16 +920,50 @@ class BootstrapScriptTests(unittest.TestCase):
         import json
         import tempfile
         with tempfile.TemporaryDirectory() as base:
-            path = self.checkout(base, "recorded", "git@github.com:AceMedia/aiov2_ctl.git")
+            path = self.checkout(base, "recorded", f"git@github.com:{self.repo()}.git")
             with open(os.path.join(base, "rec.json"), "w") as f:
                 json.dump({"repo_path": path}, f)
             done = self.dry_run(base, os.path.join(base, "nothing-here"), record="rec.json")
             self.assertIn(f"using the checkout in {path}", done.stdout)
             self.assertIn("STUB --install --dry-run", done.stdout)
 
+    @unittest.skipUnless(shutil.which("git") and os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs git, a Debian-like system and an ordinary user")
+    def test_the_checkout_the_readme_always_named_is_found(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            path = self.checkout(base, "aiov2_ctl", f"https://github.com/{self.repo()}")
+            done = self.dry_run(base, os.path.join(base, "nothing-here"))
+            self.assertIn(f"using the checkout in {path}", done.stdout)
+            self.assertIn("STUB --install --dry-run", done.stdout)
+
+    @unittest.skipUnless(shutil.which("git") and os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs git, a Debian-like system and an ordinary user")
+    def test_a_checkout_of_another_repository_is_not_used_even_with_a_similar_name(self):
+        import tempfile
+        owner, name = self.repo().split("/")
+        for origin in (f"https://github.com/someone-else/{name}.git", f"https://github.com/{owner}/{name}-fake.git",
+                       f"https://evil.example/{owner}/{name}.git"):
+            with tempfile.TemporaryDirectory() as base:
+                path = self.checkout(base, "aiov2_ctl", origin)
+                # A stand-in curl, so the download the script falls back to never touches the network.
+                os.makedirs(os.path.join(base, "bin"))
+                curl = os.path.join(base, "bin", "curl")
+                with open(curl, "w") as f:
+                    f.write('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                            'echo "print(\'DOWNLOADED\')" > "$out"\n')
+                os.chmod(curl, 0o755)
+                env = dict(os.environ, HOME=base, AIOV2_DIR=path, AIOV2_RECORD=os.path.join(base, "none.json"),
+                           PATH=os.path.join(base, "bin") + os.pathsep + os.environ["PATH"])
+                done = subprocess.run(["sh", self.PATH, "--dry-run"], env=env, capture_output=True, text=True,
+                                      timeout=60)
+                self.assertNotIn("using the checkout", done.stdout, origin)
+                self.assertNotIn("STUB", done.stdout, origin)
+                self.assertIn("DOWNLOADED", done.stdout, origin)
+
     def test_a_folder_that_is_some_other_project_is_never_pulled_or_run(self):
         text = self.text()
-        self.assertIn('git -C "$1" remote get-url origin 2>/dev/null | grep -qi "$REPO_MATCH"', text)
+        self.assertIn('git -C "$1" remote get-url origin 2>/dev/null | grep -Eqi', text)
         self.assertIn("is not a checkout of this tool, so it was left alone", text)
         self.assertNotIn("git reset", text)
         self.assertNotIn("rm -rf \"$DIR\"", text)
