@@ -105,7 +105,9 @@ def get_git_root(cwd=None):
             text=True
         ).strip()
     except (subprocess.CalledProcessError, OSError):
-        return None
+        # git refuses to look at another user's checkout (root, started by pkexec). A .git folder beside this
+        # file says the same thing without asking git.
+        return cwd if os.path.isdir(os.path.join(cwd, ".git")) else None
 
 
 def get_git_branch(repo):
@@ -123,6 +125,18 @@ def get_git_branch(repo):
                 return branch_from_head(f.read())
         except OSError:
             return None
+
+
+def origin_from_config(text):
+    """The address of the remote called origin, from the text of a checkout's .git/config, or None."""
+    section = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            section = line
+        elif section == '[remote "origin"]' and re.match(r"url\s*=", line):
+            return line.split("=", 1)[1].strip() or None
+    return None
 
 
 def branch_from_head(text):
@@ -7239,11 +7253,15 @@ def feature_installed(key, state):
     """'yes', 'partly' or 'no': whether a feature looks installed, from the state alone."""
     f = feature_row(key)
     optional = OPTIONAL_PACKAGES.get(key, ())
-    checks = [pkg in state.get("installed", ()) for pkg in f["apt"] if pkg not in optional]
-    checks += [m in state.get("present", ()) for m in FEATURE_MARKERS.get(key, ())]
-    if checks and all(checks):
+    packages = [pkg in state.get("installed", ()) for pkg in f["apt"] if pkg not in optional]
+    markers = FEATURE_MARKERS.get(key, ())
+    marks = [m in state.get("present", ()) for m in markers]
+    if (packages or marks) and all(packages + marks):
         return "yes"
-    return "partly" if any(checks) else "no"
+    # A package on its own proves nothing (git and PyQt are on most machines), and nor do the app's files, which
+    # come with every checkout. Where a feature writes something of its own, only that counts as a start.
+    own = [m in state.get("present", ()) for m in markers if m != "app-files"]
+    return "partly" if any(own if own else packages) else "no"
 
 
 # ---- the planner ------------------------------------------------------------------------------------------------
@@ -7306,9 +7324,9 @@ def _ops_steps(key, selected, state):
     path = state.get("app_source")
     if not path:
         return [_step(key, "no-files", "note",
-                      "The ops app and console come with this tool's git checkout, and this install has none: "
-                      "it was put in from a single downloaded file. Install git and run install.sh again, and "
-                      "they go in with it.", False, "", shared_with=shared, blocks=True)]
+                      "The ops app and console come with this tool's git checkout, and this install is not "
+                      "running from one that holds them. Install git and run install.sh, which keeps such a "
+                      "checkout, and they go in with it.", False, "", shared_with=shared, skips=True)]
     steps = [_step(key, "launchers", "launchers",
                    f"Write the start-menu shortcuts (uConsole Ops and uConsole Ops Console) as {user}: "
                    f"python3 -m ops_gui --install-launchers, run in {path}. The app and the console run from "
@@ -7319,7 +7337,8 @@ def _ops_steps(key, selected, state):
         steps.append(_step(key, "old-folder", "old-folder",
                            f"Remove {old}, as {user}: the ops app used to be kept there and now comes with "
                            f"this tool. Only if it holds nothing of yours: no changed files, nothing unpushed, "
-                           f"nothing stashed. Otherwise it is left and you are told why.", False, "",
+                           f"nothing stashed. Otherwise it is left and you are told why. An ops app or "
+                           f"console running from it is closed first.", False, "",
                            path=old, shared_with=shared))
     return steps
 
@@ -7467,7 +7486,11 @@ def features_report(state, meta, facts, how=None, unfinished=False):
             "title": f["title"],
             "summary": f["summary"],
             "required": bool(f["required"]),
-            "installed": key in recorded,
+            # Asked for, and something of it is here: the same test the table uses. A feature whose package this
+            # system does not have, or an app with no checkout to run from, is wanted and not installed, and
+            # `missing` says what it lacks.
+            "installed": key in recorded and feature_installed(key, state) != "no",
+            "wanted": key in recorded,
             "missing": feature_missing(key, state) if key in recorded else [],
             "adds": [k for k in resolve_features([key]) if k != key and k not in recorded],
             "removes": [k for k in uninstall_selection([key]) if k != key and k in recorded],
@@ -7734,7 +7757,14 @@ def install_source():
             meta["remote"] = subprocess.check_output(["git", "remote", "get-url", "origin"], cwd=repo,
                                                      text=True).strip()
         except Exception:
-            pass
+            # The same refusal as in get_git_root: read the address from the checkout's own file.
+            try:
+                with open(os.path.join(repo, ".git", "config")) as f:
+                    url = origin_from_config(f.read())
+            except OSError:
+                url = None
+            if url:
+                meta["remote"] = url
         meta["branch"] = get_git_branch(repo) or "main"
         return os.path.join(repo, "aiov2_ctl.py"), os.path.join(repo, "img"), meta
     return os.path.realpath(__file__), None, meta
@@ -7852,6 +7882,12 @@ def _act_tray_assets(step, ctx):
     img = ctx["source"][1]
     if not img or not os.path.isdir(img):
         return "note", "no icons beside this file (it was not run from a git checkout), so the tray uses a stock icon"
+    import filecmp
+    there = os.path.join(ASSET_BASE, os.path.basename(os.path.normpath(img)))
+    if os.path.isdir(there):
+        cmp = filecmp.dircmp(img, there)
+        if not cmp.left_only and not cmp.diff_files and not cmp.funny_files:
+            return "already", ""
     subprocess.check_call(["mkdir", "-p", ASSET_BASE])
     subprocess.check_call(["cp", "-r", img, ASSET_BASE])
     return "done", ""
@@ -7885,11 +7921,11 @@ def _act_sdr_recovery(step, ctx):
     return ("done" if changed else "already"), ""
 
 
-def _act_old_folder(step, ctx, run=_run_text, closer=None):
+def _act_old_folder(step, ctx, run=_run_text, closer=None, asking=None):
     """Clear away the folder the ops app used to be cloned into, under the same rule an uninstall uses: only
     when it holds nothing of the user's. An app running from it that asked for this install keeps its folder:
     it goes at the next install, once the app has been started again from its new place."""
-    return _remove_ops_folder(step["path"], ctx, run, closer, keep_if_asked=True)
+    return _remove_ops_folder(step["path"], ctx, run, closer, keep_if_asked=True, asking=asking)
 
 
 def _shortcut_texts(home):
@@ -7933,6 +7969,8 @@ def _act_autostart(step, ctx, run=_run_text):
 
 
 def _act_note(step, ctx):
+    if step.get("skips"):
+        return "skipped", step["detail"]
     return ("failed" if step.get("blocks") else "note"), step["detail"]
 
 
@@ -8094,8 +8132,8 @@ def install_command(args, facts=None, state=None, execute=run_install, ask=input
         f"\nInstall finished, but not everything went in: {', '.join(failed)}. Run it again once that is sorted.")
     left = [key for key, status, _ in rows if status == "not installed"]
     if left:
-        say(f"Not installed, because this system's package sources do not have what it needs: {', '.join(left)}. "
-            f"The list above says where to get it. Run the install again afterwards.")
+        say(f"Not installed: {', '.join(left)}. The list above says why and what to do. Run the install again "
+            f"afterwards.")
     say("Open a new shell for bash completion to activate.")
     if opts["show_mesh_status"]:
         print_mesh_on_boot_status_hint("Meshtastic boot config status:")
@@ -8748,6 +8786,8 @@ def runs_ops_from(path, which=None):
     def test(argv, cwd):
         if cwd != path:
             return False
+        if not argv or not os.path.basename(argv[0]).startswith("python"):
+            return False
         app = any(a == "-m" and b == "ops_gui" for a, b in zip(argv, argv[1:]))
         console = any(os.path.basename(a) == "ops.py" for a in argv[1:])
         return {"gui": app, "console": console}.get(which, app or console)
@@ -8915,7 +8955,16 @@ def checkout_holds_nothing(path, user, run=_run_text):
     return True, ""
 
 
-def _remove_ops_folder(path, ctx, run=_run_text, closer=None, keep_if_asked=False):
+def _user_asked(user, wanted, table=None):
+    """True when one of the user's processes that `wanted` picks is what started this run. Closes nothing."""
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+    except KeyError:
+        return False
+    return processes_to_close(process_table() if table is None else table, uid, os.getpid(), wanted)[1]
+
+
+def _remove_ops_folder(path, ctx, run=_run_text, closer=None, keep_if_asked=False, asking=None):
     """Remove the folder the ops app used to be cloned into, and nothing else, when it holds nothing of the
     user's. With `keep_if_asked`, an app running from it that asked for this keeps its folder."""
     user, home = ctx.get("user"), ctx.get("home")
@@ -8931,10 +8980,13 @@ def _remove_ops_folder(path, ctx, run=_run_text, closer=None, keep_if_asked=Fals
     empty, why = checkout_holds_nothing(path, user, run)
     if not empty:
         return "note", f"{path} was left: {why}. Delete it yourself if you want it gone"
+    kept = (f"{path} was left for now: the app that asked for this is running from it. Start the app again "
+            f"from the start menu; the folder goes at the next install or update")
+    if keep_if_asked and (asking or _user_asked)(user, runs_ops_from(path)):
+        return "note", kept                      # decided before anything is closed
     _, asked = (closer or _close_users)(user, runs_ops_from(path))
     if asked and keep_if_asked:
-        return "note", (f"{path} was left for now: the app that asked for this is running from it. Start the "
-                        f"app again from the start menu; the folder goes at the next install or update")
+        return "note", kept
     rc, _, err = run(as_user(user, ["rm", "-rf", "--", path]), cwd="/", timeout=120)
     if rc != 0:
         return "failed", (err.strip().splitlines() or [f"{path} could not be removed"])[-1]

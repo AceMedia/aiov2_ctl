@@ -461,10 +461,11 @@ def build_settings(win, Bridge_signals):
         what, title = feat["busy"] or ("add", "")
         feat["busy"] = None
         done = json.loads(payload)
-        feat_note.setText(features.result_text(what, title, done["code"]))
+        left = what == "add" and done["code"] == 0 and features.left_out(done["out"])
+        feat_note.setText(features.result_text(what, title, done["code"], left))
         feat_note.show()
         feat_log.setPlainText(features.tail(done["out"]))
-        feat_log.setVisible(done["code"] != 0 and bool(done["out"].strip()))
+        feat_log.setVisible((done["code"] != 0 or left) and bool(done["out"].strip()))
         feat_scroll.verticalScrollBar().setValue(0)
         refresh_features(keep_note=True)
 

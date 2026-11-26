@@ -276,8 +276,24 @@ class PlanTests(unittest.TestCase):
         plan = a.install_plan(["app"], ALL_THERE, state(app_source=None))
         self.assertNotIn("launchers", [s["kind"] for s in plan])
         note = [s for s in plan if s["id"] == "app.no-files"][0]
-        self.assertTrue(note["blocks"])
+        self.assertTrue(note["skips"])
+        self.assertNotIn("blocks", note)
         self.assertIn("install.sh", note["detail"])
+        self.assertEqual(a._act_note(note, {})[0], "skipped")
+
+    def test_an_install_with_no_checkout_still_succeeds_and_says_the_app_is_not_installed(self):
+        said = []
+
+        def execute(plan, ctx, say):
+            return a.run_install(plan, ctx, say, action_for=lambda step: a._act_note if step["kind"] == "note"
+                                 else (lambda step, ctx: ("done", "")))
+        code = a.install_command(["--only", "app,console", "--yes"], facts=ALL_THERE, state=state(app_source=None),
+                                 execute=execute, isatty=False, euid=0, say=said.append, known=[])
+        text = "\n".join(said)
+        self.assertEqual(code, 0)
+        self.assertRegex(text, r"(?m)^  app\s+not installed: ")
+        self.assertRegex(text, r"(?m)^  console\s+not installed: ")
+        self.assertIn("Not installed: app, console.", text)
 
     def test_the_folder_the_app_used_to_be_kept_in_is_cleared_away_only_when_it_is_there(self):
         self.assertNotIn("old-folder", [s["kind"] for s in a.install_plan(["app"], ALL_THERE, state())])
@@ -482,6 +498,35 @@ class CheckoutTests(unittest.TestCase):
         self.assertIn("next install", words)
         self.assertFalse(any("rm" in c for c in calls))
 
+    def test_nothing_is_closed_when_the_old_folder_is_kept_for_the_app_that_asked(self):
+        run, calls = self.runner({})
+        closed = []
+        step = {"id": "app.old-folder", "feature": "app", "kind": "old-folder", "path": self.PATH}
+        with mock.patch.object(a, "checkout_state", return_value="ours"), \
+                mock.patch.object(a.os, "geteuid", return_value=0):
+            status, words = a._act_old_folder(step, {"user": "shane", "home": "/home/shane"}, run,
+                                              closer=lambda u, w: closed.append(u) or (1, False),
+                                              asking=lambda u, w: True)
+        self.assertEqual(status, "note")
+        self.assertIn("next install", words)
+        self.assertEqual(closed, [], "the console running beside the app is not closed either")
+        self.assertFalse(any("rm" in c for c in calls))
+
+    def test_who_asked_is_worked_out_from_the_process_table_without_closing_anything(self):
+        table = [(60, 1000, 1, ["/usr/bin/python3", "-m", "ops_gui"], self.PATH),
+                 (61, 1000, 1, ["python3", self.PATH + "/ops.py"], self.PATH),
+                 (70, 0, 60, ["python3", "/usr/local/bin/aiov2_ctl", "--install"], "/")]
+        entry = types.SimpleNamespace(pw_uid=1000)
+        with mock.patch.object(a.pwd, "getpwnam", return_value=entry):
+            with mock.patch.object(a.os, "getpid", return_value=70):
+                self.assertTrue(a._user_asked("shane", a.runs_ops_from(self.PATH), table))
+            with mock.patch.object(a.os, "getpid", return_value=999):
+                self.assertFalse(a._user_asked("shane", a.runs_ops_from(self.PATH), table))
+
+    def test_the_plan_says_running_copies_are_closed_before_the_old_folder_goes(self):
+        plan = a.install_plan(["app"], ALL_THERE, state(old_checkout=True))
+        self.assertIn("closed first", [s for s in plan if s["kind"] == "old-folder"][0]["detail"])
+
     def test_another_repository_in_that_place_is_left_alone(self):
         (status, _), calls = self.old({}, lambda u, w: (0, False), place="other")
         self.assertEqual(status, "note")
@@ -541,7 +586,13 @@ class StateTests(unittest.TestCase):
     def test_a_feature_looks_installed_when_all_its_parts_are_there(self):
         self.assertEqual(a.feature_installed("gps", state()), "no")
         self.assertEqual(a.feature_installed("gps", state(installed={"gpsd"})), "yes")
-        self.assertEqual(a.feature_installed("app", state(installed={"git"})), "partly")
+        self.assertEqual(a.feature_installed("app", state(installed={"git"})), "no")
+        self.assertEqual(a.feature_installed("app", state(installed={"git"}, present={"app-files"})), "no",
+                         "packages and the checkout's own files are on a machine that never installed the app")
+        self.assertEqual(a.feature_installed("app", state(present={"gui-shortcut"})), "partly")
+        self.assertEqual(a.feature_installed("tray", state(installed={"python3-pyqt6"})), "no")
+        self.assertEqual(a.feature_installed("tray", state(present={"desktop-entry"})), "partly")
+        self.assertEqual(a.feature_installed("mesh", state()), "no")
         self.assertEqual(a.feature_installed("app", state(installed={"git", "python3-pyqt6", "fonts-spleen"},
                                                           present={"app-files", "gui-shortcut"})), "yes")
         self.assertEqual(a.feature_installed("flipper", state(present={"udev"})), "yes")
@@ -786,7 +837,7 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Install complete.", text)
         self.assertRegex(text, r"(?m)^  mesh\s+not installed: not in the sources")
-        self.assertIn("package sources do not have what it needs: mesh.", text)
+        self.assertIn("Not installed: mesh.", text)
         self.assertNotIn("not everything went in", text)
 
     def test_a_failed_feature_is_named_at_the_end_and_the_exit_code_says_so(self):
@@ -1027,6 +1078,23 @@ class BootstrapScriptTests(unittest.TestCase):
 
 class SourceCheckoutTests(unittest.TestCase):
     """Which copy of the program an install puts in place."""
+
+    def test_a_checkout_git_refuses_to_look_at_is_still_found_by_its_git_folder(self):
+        refuse = subprocess.CalledProcessError(128, ["git"])
+        with mock.patch.object(a.subprocess, "check_output", side_effect=refuse):
+            with mock.patch.object(a.os.path, "isdir", side_effect=lambda p: p == "/home/u/repo/.git"):
+                self.assertEqual(a.get_git_root("/home/u/repo"), "/home/u/repo")
+            with mock.patch.object(a.os.path, "isdir", return_value=False):
+                self.assertIsNone(a.get_git_root("/tmp/download"))
+
+    def test_the_address_of_origin_is_read_from_the_checkouts_own_file(self):
+        text = ('[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://example.org/other.git\n'
+                '[remote "origin"]\n\turl = https://github.com/someone/aiov2_ctl.git\n'
+                '\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "beta"]\n\tremote = origin\n')
+        self.assertEqual(a.origin_from_config(text), "https://github.com/someone/aiov2_ctl.git")
+        self.assertIsNone(a.origin_from_config('[remote "upstream"]\n\turl = x\n'))
+        self.assertIsNone(a.origin_from_config(""))
+        self.assertIsNone(a.origin_from_config(None))
 
     def test_a_file_in_a_checkout_installs_from_that_checkout(self):
         self.assertEqual(a.source_checkout("/home/u/repo/aiov2_ctl.py", "/usr/local/bin/aiov2_ctl",
@@ -1418,6 +1486,15 @@ class UninstallTests(unittest.TestCase):
         self.assertIn("still open", words)
         self.assertEqual(a._un_close_ops(step, {"user": None}), ("already", ""))
 
+    def test_an_editor_or_a_pager_with_the_console_file_open_is_never_closed(self):
+        wanted = a.runs_ops_from("/home/shane/aiov2_ctl")
+        for argv in (["vim", "ops.py"], ["nano", "ops.py"], ["less", "ops.py"], ["git", "diff", "ops.py"],
+                     ["bash"], []):
+            self.assertFalse(wanted(argv, "/home/shane/aiov2_ctl"), argv)
+        for argv in (["python3", "ops.py"], ["/usr/bin/python3", "/home/shane/aiov2_ctl/ops.py", "--no-prompts"],
+                     ["/usr/bin/python3", "-m", "ops_gui"], ["python3.13", "-m", "ops_gui"]):
+            self.assertTrue(wanted(argv, "/home/shane/aiov2_ctl"), argv)
+
     def test_the_tray_is_closed_unless_it_asked(self):
         closed = []
         close = lambda pids: closed.extend(pids) or len(pids)
@@ -1673,9 +1750,24 @@ class FeaturesReportTests(unittest.TestCase):
         self.assertEqual((out["version"], out["root"], out["unfinished"]), (1, "sudo", False))
         self.assertIs(a.features_report(state(), {}, {}, None, unfinished=True)["unfinished"], True)
 
-    def test_installed_is_what_the_installer_recorded(self):
-        _, rows = self.report(["core", "tray", "sdr"])
+    def test_wanted_is_what_the_installer_recorded_and_installed_also_needs_the_packages(self):
+        _, rows = self.report(["core", "tray", "sdr"], installed={"python3-pyqt6", "rtl-sdr"},
+                              present={"exe", "completion", "rails-unit", "desktop-entry", "sdr-recovery"})
+        self.assertEqual([k for k, r in rows.items() if r["wanted"]], ["core", "tray", "sdr"])
         self.assertEqual([k for k, r in rows.items() if r["installed"]], ["core", "tray", "sdr"])
+        _, rows = self.report(["core", "mesh", "console", "app"], installed={"git"},
+                              present={"app-files", "console-shortcut"})
+        self.assertTrue(rows["mesh"]["wanted"])
+        self.assertFalse(rows["mesh"]["installed"], "its package is not here, so it is not installed")
+        self.assertIn("the package meshtasticd", rows["mesh"]["missing"])
+        self.assertTrue(rows["console"]["installed"], "the console's packages are optional")
+        self.assertFalse(rows["app"]["installed"], "nothing of the app's own is here")
+        self.assertTrue(rows["app"]["wanted"])
+        for key, r in rows.items():
+            self.assertEqual(r["installed"], r["wanted"] and a.feature_installed(key, state(
+                installed={"git"}, present={"app-files", "console-shortcut"})) != "no", key)
+        self.assertFalse(rows["gps"]["wanted"])
+        self.assertEqual(rows["gps"]["missing"], [])
         self.assertTrue(rows["core"]["required"])
         self.assertFalse(rows["tray"]["required"])
 

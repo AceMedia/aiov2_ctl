@@ -51,6 +51,8 @@ class RowTests(unittest.TestCase):
     def test_the_state_says_installed_missing_and_hardware(self):
         self.assertEqual(f.state_text(row("gps")), "Not installed.")
         self.assertEqual(f.state_text(row("gps", installed=True)), "Installed.")
+        self.assertEqual(f.state_text(row("mesh", missing=["the package meshtasticd"])),
+                         "Not installed, missing: the package meshtasticd.")
         self.assertEqual(f.state_text(row("tray", installed=True, missing=["the tray shortcut", "its icons"])),
                          "Installed, missing: the tray shortcut, its icons.")
         self.assertEqual(f.state_text(row("sdr", hardware="the AIO board", hardware_found=False)),
@@ -128,6 +130,12 @@ class ResultTests(unittest.TestCase):
     def test_how_it_ended_is_said_plainly(self):
         self.assertEqual(f.result_text("add", "GPS", 0), "GPS added.")
         self.assertEqual(f.result_text("remove", "GPS", 0), "GPS removed.")
+        said = "Result\n------\n  core       already there\n  mesh       not installed: meshtasticd is not in ...\n"
+        self.assertTrue(f.left_out(said))
+        self.assertFalse(f.left_out("Result\n------\n  core       already there\n  gps        installed\n"))
+        self.assertFalse(f.left_out(""))
+        self.assertIn("not everything could be installed", f.result_text("add", "LoRa mesh", 0, True))
+        self.assertEqual(f.result_text("remove", "LoRa mesh", 0, True), "LoRa mesh removed.")
         self.assertIn("nothing was changed", f.result_text("add", "GPS", 126))
         self.assertIn("nothing was changed", f.result_text("remove", "GPS", 127))
         self.assertIn("could not be started", f.result_text("add", "GPS", None))
