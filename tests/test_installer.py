@@ -20,7 +20,8 @@ NOTHING_THERE = {k: False for k in ALL_THERE}
 
 
 def state(**changes):
-    base = {"user": "shane", "home": "/home/shane", "checkout": "missing", "installed": set(), "unavailable": set(),
+    base = {"user": "shane", "home": "/home/shane", "app_source": "/home/shane/aiov2_ctl", "old_checkout": False,
+            "installed": set(), "unavailable": set(),
             "sudoers_listening": False, "present": set()}
     base.update(changes)
     return base
@@ -158,7 +159,7 @@ class SelectionTests(unittest.TestCase):
 
 class PlanTests(unittest.TestCase):
     def test_every_step_is_a_small_dict_with_the_agreed_fields(self):
-        kinds = {"apt", "copy", "sudoers", "udev", "systemd", "service-off", "clone", "pull", "launchers",
+        kinds = {"apt", "copy", "sudoers", "udev", "systemd", "service-off", "launchers", "old-folder",
                  "desktop-entry", "autostart", "note"}
         for step in a.install_plan(a.feature_keys(), NOTHING_THERE, state()):
             for field in ("id", "feature", "kind", "detail", "root", "undo"):
@@ -198,7 +199,7 @@ class PlanTests(unittest.TestCase):
     def test_picking_the_app_pulls_in_the_controller(self):
         plan = a.install_plan(["app"], ALL_THERE, state())
         self.assertIn("core.copy", ids(plan))
-        self.assertIn("app.checkout", ids(plan))
+        self.assertIn("app.launchers", ids(plan))
 
     def test_missing_hardware_gives_a_note_and_the_feature_is_still_installed(self):
         there = a.install_plan(a.feature_keys(), ALL_THERE, state())
@@ -255,40 +256,37 @@ class PlanTests(unittest.TestCase):
         note = [s for s in plan if s["id"] == "mesh.apt-missing-meshtasticd"][0]
         self.assertIn("--add-apps", note["detail"])
 
-    def test_a_missing_checkout_is_cloned_and_an_existing_one_is_pulled(self):
-        self.assertEqual([s["kind"] for s in a.install_plan(["app"], ALL_THERE, state()) if s["id"] == "app.checkout"],
-                         ["clone"])
-        plan = a.install_plan(["app"], ALL_THERE, state(checkout="ours"))
-        pull = [s for s in plan if s["id"] == "app.checkout"][0]
-        self.assertEqual(pull["kind"], "pull")
-        self.assertIn("--ff-only", pull["detail"])
-        self.assertIn("left alone", pull["detail"])
-
-    def test_the_checkout_goes_in_the_users_home_and_its_steps_do_not_run_as_root(self):
+    def test_the_app_runs_from_this_tools_own_checkout_and_nothing_is_fetched(self):
         plan = a.install_plan(["app", "console"], ALL_THERE, state())
-        for step in plan:
-            if step["kind"] in ("clone", "pull", "launchers"):
-                self.assertFalse(step["root"])
-                self.assertEqual(step["path"], "/home/shane/ops-agentic")
+        self.assertFalse({"clone", "pull"} & {s["kind"] for s in plan})
+        step = [s for s in plan if s["kind"] == "launchers"][0]
+        self.assertFalse(step["root"])
+        self.assertEqual(step["path"], "/home/shane/aiov2_ctl")
+        self.assertIn("/home/shane/aiov2_ctl", step["detail"])
 
-    def test_the_app_and_the_console_share_one_checkout_and_one_set_of_shortcuts(self):
+    def test_the_app_and_the_console_share_one_set_of_shortcuts(self):
         plan = a.install_plan(["app", "console"], ALL_THERE, state())
-        self.assertEqual([s["kind"] for s in plan].count("clone"), 1)
         self.assertEqual([s["kind"] for s in plan].count("launchers"), 1)
-        clone = [s for s in plan if s["kind"] == "clone"][0]
-        self.assertEqual((clone["feature"], clone["shared_with"]), ("app", ("console",)))
+        step = [s for s in plan if s["kind"] == "launchers"][0]
+        self.assertEqual((step["feature"], step["shared_with"]), ("app", ("console",)))
         alone = a.install_plan(["console"], ALL_THERE, state())
-        self.assertEqual([s["feature"] for s in alone if s["kind"] == "clone"], ["console"])
+        self.assertEqual([s["feature"] for s in alone if s["kind"] == "launchers"], ["console"])
 
-    def test_something_else_in_the_checkouts_place_is_reported_and_left_alone(self):
-        for kind in ("link", "other", "not-git"):
-            plan = a.install_plan(["app"], ALL_THERE, state(checkout=kind))
-            self.assertNotIn("clone", [s["kind"] for s in plan])
-            self.assertNotIn("pull", [s["kind"] for s in plan])
-            self.assertNotIn("launchers", [s["kind"] for s in plan])
-            note = [s for s in plan if s["id"] == "app.checkout-blocked"][0]
-            self.assertTrue(note["blocks"])
-            self.assertIn("nothing in it is changed", note["detail"])
+    def test_an_install_with_no_checkout_says_the_app_cannot_go_in_and_how_to_get_it(self):
+        plan = a.install_plan(["app"], ALL_THERE, state(app_source=None))
+        self.assertNotIn("launchers", [s["kind"] for s in plan])
+        note = [s for s in plan if s["id"] == "app.no-files"][0]
+        self.assertTrue(note["blocks"])
+        self.assertIn("install.sh", note["detail"])
+
+    def test_the_folder_the_app_used_to_be_kept_in_is_cleared_away_only_when_it_is_there(self):
+        self.assertNotIn("old-folder", [s["kind"] for s in a.install_plan(["app"], ALL_THERE, state())])
+        plan = a.install_plan(["app", "console"], ALL_THERE, state(old_checkout=True))
+        old = [s for s in plan if s["kind"] == "old-folder"]
+        self.assertEqual([(s["id"], s["path"], s["root"]) for s in old],
+                         [("app.old-folder", "/home/shane/ops-agentic", False)])
+        self.assertIn("nothing of yours", old[0]["detail"])
+        self.assertLess(ids(plan).index("app.launchers"), ids(plan).index("app.old-folder"))
 
     def test_with_no_user_the_app_is_not_guessed_at_and_the_rest_is_still_planned(self):
         plan = a.install_plan(a.feature_keys(), ALL_THERE, state(user=None, home=None))
@@ -451,102 +449,47 @@ class CheckoutTests(unittest.TestCase):
         run, _ = self.runner({"remote": (128, "", "not a git repository")})
         self.assertEqual(a.checkout_state(self.PATH, "shane", run, lstat=lambda p: folder, euid=0), "not-git")
 
-    def test_a_clone_refused_for_lack_of_access_says_so_and_what_to_do(self):
-        for err in ("remote: Repository not found.\nfatal: repository 'https://github.com/...' not found",
-                    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
-                    "fatal: Authentication failed for 'https://github.com/AceMedia/uConsole-AIO-OPS.git/'",
-                    "git@github.com: Permission denied (publickey)."):
-            text = a.clone_failure_message(err, self.PATH)
-            self.assertIn("private", text)
-            self.assertIn("gh auth login", text)
-            self.assertIn(self.PATH, text)
-            self.assertIn("run the install again", text)
+    def test_the_app_is_found_only_in_a_checkout_that_holds_it(self):
+        have = {"/r/ops_gui/__main__.py", "/r/ops.py"}
+        self.assertEqual(a.app_source("/r", isfile=lambda p: p in have), "/r")
+        self.assertIsNone(a.app_source("/r", isfile=lambda p: p == "/r/ops.py"))
+        self.assertIsNone(a.app_source(None))
 
-    def test_a_clone_that_failed_for_another_reason_does_not_blame_access(self):
-        text = a.clone_failure_message("fatal: unable to access '...': Could not resolve host: github.com", self.PATH)
-        self.assertNotIn("private", text)
-        self.assertIn("Could not resolve host", text)
-        self.assertIn(self.PATH, text)
-
-    def step(self, kind):
-        return {"id": "app.checkout", "feature": "app", "kind": kind, "path": self.PATH}
-
-    def act(self, kind, place, answers):
+    def old(self, answers, closer, place="ours"):
         run, calls = self.runner(answers)
+        step = {"id": "app.old-folder", "feature": "app", "kind": "old-folder", "path": self.PATH}
         with mock.patch.object(a, "checkout_state", return_value=place), \
                 mock.patch.object(a.os, "geteuid", return_value=0):
-            result = a._act_checkout(self.step(kind), {"user": "shane", "home": "/home/shane"}, run)
+            result = a._act_old_folder(step, {"user": "shane", "home": "/home/shane"}, run, closer)
         return result, calls
 
-    def test_cloning_runs_git_as_the_user_and_never_asks_for_a_password(self):
-        (status, _), calls = self.act("clone", "missing", {})
+    def test_the_old_folder_goes_when_it_holds_nothing_of_yours(self):
+        (status, _), calls = self.old({}, lambda u, w: (0, False))
         self.assertEqual(status, "done")
-        self.assertEqual(calls, [["sudo", "-u", "shane", "-H", "--", "env", "GIT_TERMINAL_PROMPT=0", "git", "clone",
-                                  a.OPS_REPO_URL, self.PATH]])
+        self.assertEqual(calls[-1], ["sudo", "-u", "shane", "-H", "--", "rm", "-rf", "--", self.PATH])
 
-    def test_a_refused_clone_fails_that_step_with_the_plain_message(self):
-        (status, words), _ = self.act("clone", "missing", {"clone": (128, "", "remote: Repository not found.")})
-        self.assertEqual(status, "failed")
-        self.assertIn("gh auth login", words)
+    def test_the_old_folder_stays_when_it_holds_something_of_yours(self):
+        closed = []
+        (status, words), calls = self.old({"status": (0, " M ops.py\n", "")}, lambda u, w: closed.append(u))
+        self.assertEqual(status, "note")
+        self.assertIn("was left", words)
+        self.assertFalse(any("rm" in c for c in calls))
+        self.assertEqual(closed, [], "nothing is closed when the folder stays")
 
-    def test_a_clean_checkout_is_fast_forwarded_as_the_user(self):
-        (status, _), calls = self.act("pull", "ours", {"pull": (0, "Updating 1..2\nFast-forward\n", "")})
-        self.assertEqual(status, "done")
-        self.assertIn("--ff-only", calls[-1])
-        for cmd in calls:
-            self.assertEqual(cmd[:5], ["sudo", "-u", "shane", "-H", "--"])
+    def test_the_old_folder_stays_while_the_app_that_asked_is_running_from_it(self):
+        (status, words), calls = self.old({}, lambda u, w: (0, True))
+        self.assertEqual(status, "note")
+        self.assertIn("next install", words)
+        self.assertFalse(any("rm" in c for c in calls))
 
-    def test_a_checkout_that_is_up_to_date_counts_as_already_there(self):
-        (status, _), _ = self.act("pull", "ours", {"pull": (0, "Already up to date.\n", "")})
-        self.assertEqual(status, "already")
-
-    def test_the_apps_folder_moves_to_the_controllers_channel_before_it_is_pulled(self):
-        run, calls = self.runner({"ls-remote": (0, "a\trefs/heads/main\nb\trefs/heads/beta\n", ""),
-                                  "pull": (0, "Already up to date.\n", "")})
-        ctx = {"user": "shane", "home": "/home/shane", "source": ("/x/aiov2_ctl.py", None, {"branch": "beta"})}
-        with mock.patch.object(a, "checkout_state", return_value="ours"), \
-                mock.patch.object(a.os, "geteuid", return_value=0), \
-                mock.patch("builtins.open", mock.mock_open(read_data="ref: refs/heads/main\n")):
-            a._act_checkout(self.step("pull"), ctx, run)
-        words = [" ".join(c) for c in calls]
-        self.assertTrue(any("checkout --quiet beta" in w for w in words))
-        self.assertLess(next(i for i, w in enumerate(words) if "checkout --quiet beta" in w),
-                        next(i for i, w in enumerate(words) if "pull --ff-only" in w))
-        for cmd in calls:
-            self.assertEqual(cmd[:5], ["sudo", "-u", "shane", "-H", "--"])
-
-    def test_the_apps_folder_stays_put_when_the_controller_is_on_the_same_channel(self):
-        run, calls = self.runner({"pull": (0, "Already up to date.\n", "")})
-        ctx = {"user": "shane", "home": "/home/shane", "source": ("/x/aiov2_ctl.py", None, {"branch": "main"})}
-        with mock.patch.object(a, "checkout_state", return_value="ours"), \
-                mock.patch.object(a.os, "geteuid", return_value=0), \
-                mock.patch("builtins.open", mock.mock_open(read_data="ref: refs/heads/main\n")):
-            a._act_checkout(self.step("pull"), ctx, run)
-        self.assertFalse(any("ls-remote" in c or "checkout" in c for c in calls))
-
-    def test_a_checkout_with_local_changes_is_reported_and_not_pulled(self):
-        (status, words), calls = self.act("pull", "ours", {"status": (0, " M ops.py\n", "")})
-        self.assertEqual(status, "already")
-        self.assertIn("changes of your own", words)
-        self.assertFalse(any("pull" in cmd for cmd in calls))
-
-    def test_a_checkout_that_cannot_fast_forward_is_reported_and_never_reset(self):
-        (status, words), calls = self.act("pull", "ours", {"pull": (128, "", "fatal: Not possible to fast-forward")})
-        self.assertEqual(status, "already")
-        self.assertIn("left as it is", words)
-        for cmd in calls:
-            for word in ("reset", "checkout", "clean", "stash", "--force", "-f", "rebase", "merge"):
-                self.assertNotIn(word, cmd)
-
-    def test_something_else_put_there_since_the_plan_was_made_is_left_alone(self):
-        (status, words), calls = self.act("clone", "link", {})
-        self.assertEqual(status, "failed")
-        self.assertIn("left alone", words)
+    def test_another_repository_in_that_place_is_left_alone(self):
+        (status, _), calls = self.old({}, lambda u, w: (0, False), place="other")
+        self.assertEqual(status, "note")
         self.assertEqual(calls, [])
 
-    def test_with_no_user_git_is_not_run_at_all(self):
+    def test_with_no_user_nothing_is_removed(self):
         run, calls = self.runner({})
-        status, words = a._act_checkout(self.step("clone"), {"user": None}, run)
+        status, words = a._act_old_folder({"path": self.PATH}, {"user": None}, run)
         self.assertEqual((status, words), ("failed", a.NO_USER_MESSAGE))
         self.assertEqual(calls, [])
 
@@ -556,7 +499,7 @@ class CheckoutTests(unittest.TestCase):
         def run(cmd, cwd=None, timeout=None):
             seen.append((cmd, cwd))
             return 0, "", ""
-        with mock.patch.object(a, "checkout_state", return_value="ours"), \
+        with mock.patch.object(a, "app_source", return_value=self.PATH), \
                 mock.patch.object(a.os, "geteuid", return_value=0):
             status, _ = a._act_launchers({"id": "app.launchers", "feature": "app", "kind": "launchers", "path": self.PATH},
                                          {"user": "shane", "home": "/nonexistent/home"}, run)
@@ -564,9 +507,9 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(seen, [(["sudo", "-u", "shane", "-H", "--", "/usr/bin/python3", "-m", "ops_gui",
                                   "--install-launchers"], self.PATH)])
 
-    def test_no_shortcuts_are_written_when_the_checkout_is_not_there(self):
+    def test_no_shortcuts_are_written_when_the_app_is_not_there(self):
         run, calls = self.runner({})
-        with mock.patch.object(a, "checkout_state", return_value="missing"):
+        with mock.patch.object(a, "app_source", return_value=None):
             status, _ = a._act_launchers({"id": "app.launchers", "feature": "app", "kind": "launchers", "path": self.PATH},
                                          {"user": "shane", "home": "/nonexistent/home"}, run)
         self.assertEqual(status, "failed")
@@ -600,12 +543,12 @@ class StateTests(unittest.TestCase):
         self.assertEqual(a.feature_installed("gps", state(installed={"gpsd"})), "yes")
         self.assertEqual(a.feature_installed("app", state(installed={"git"})), "partly")
         self.assertEqual(a.feature_installed("app", state(installed={"git", "python3-pyqt6", "fonts-spleen"},
-                                                          present={"checkout", "gui-shortcut"})), "yes")
+                                                          present={"app-files", "gui-shortcut"})), "yes")
         self.assertEqual(a.feature_installed("flipper", state(present={"udev"})), "yes")
 
     def test_the_console_counts_as_installed_without_its_optional_packages(self):
         self.assertEqual(a.feature_installed("console", state(installed={"git"},
-                                                              present={"checkout", "console-shortcut"})), "yes")
+                                                              present={"app-files", "console-shortcut"})), "yes")
 
     def test_the_feature_table_lists_every_feature_with_its_default_and_needs(self):
         text = a.format_features(state(installed={"gpsd"}), NOTHING_THERE)
@@ -647,9 +590,10 @@ class RunTests(unittest.TestCase):
         self.assertEqual(a.feature_results(["core", "flipper"], outcomes),
                          [("core", "already there", ""), ("flipper", "already there", "")])
 
-    def test_a_failed_checkout_fails_both_the_app_and_the_console_and_nothing_else(self):
+    def test_shortcuts_that_fail_fail_both_the_app_and_the_console_and_nothing_else(self):
         plan = a.install_plan(["app", "console", "flipper"], ALL_THERE, state())
-        outcomes = [(s, "failed" if s["kind"] == "clone" else "done", "no access" if s["kind"] == "clone" else "")
+        outcomes = [(s, "failed" if s["kind"] == "launchers" else "done",
+                     "no access" if s["kind"] == "launchers" else "")
                     for s in plan]
         rows = {k: s for k, s, _ in a.feature_results(["core", "app", "console", "flipper"], outcomes)}
         self.assertEqual(rows, {"core": "installed", "app": "failed", "console": "failed", "flipper": "installed"})
@@ -695,7 +639,7 @@ class RunTests(unittest.TestCase):
                 mock.patch.object(a, "ensure_companion_udev_rules"), \
                 mock.patch.object(a, "setup_sudoers", return_value=0), \
                 mock.patch.object(a, "load_config", return_value={}), \
-                mock.patch.object(a, "checkout_state", side_effect=["missing", "ours"]), \
+                mock.patch.object(a, "app_source", return_value="/home/shane/aiov2_ctl"), \
                 mock.patch.object(a.os, "geteuid", return_value=0), \
                 mock.patch.object(a.GpioController, "set_feature") as set_feature, \
                 mock.patch.object(a.GpioController, "set_gpio") as set_gpio:
@@ -820,7 +764,7 @@ class CommandTests(unittest.TestCase):
         said = []
 
         def execute(plan, ctx, say):
-            return [(s, "failed" if s["kind"] == "clone" else "done", "no access") for s in plan]
+            return [(s, "failed" if s["kind"] == "launchers" else "done", "no access") for s in plan]
         code = a.install_command(["--yes"], facts=ALL_THERE, state=state(), execute=execute, isatty=False, euid=0,
                                  say=said.append)
         text = "\n".join(said)
@@ -1052,55 +996,6 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertNotIn("rm -rf \"$DIR\"", text)
 
 
-class OpsIncomingTests(unittest.TestCase):
-    """An update also offers changes that are only in the ops app."""
-
-    def runner(self, url="https://github.com/AceMedia/uConsole-AIO-OPS.git", branch="beta", fetch=0,
-               log="abc123 one\ndef456 two\n"):
-        calls = []
-
-        def run(cmd, cwd=None, timeout=None):
-            calls.append(cmd)
-            if "get-url" in cmd:
-                return 0, url + "\n", ""
-            if "rev-parse" in cmd:
-                return 0, branch + "\n", ""
-            if "fetch" in cmd:
-                return fetch, "", ""
-            if "log" in cmd:
-                return 0, log, ""
-            return 1, "", ""
-        return run, calls
-
-    def look(self, **kw):
-        run, calls = self.runner(**kw)
-        return a.ops_incoming("/home/u/ops-agentic", run=run, isdir=lambda p: True), calls
-
-    def test_it_lists_what_waits_on_the_folders_own_branch(self):
-        got, calls = self.look()
-        self.assertEqual(got, ["abc123 one (ops app)", "def456 two (ops app)"])
-        self.assertIn("HEAD..origin/beta", calls[-1])
-        self.assertTrue(all(c[:2] == ["env", "GIT_TERMINAL_PROMPT=0"] for c in calls))
-
-    def test_it_changes_no_file(self):
-        _, calls = self.look()
-        for c in calls:
-            self.assertFalse({"pull", "merge", "checkout", "reset"} & set(c), c)
-
-    def test_nothing_when_there_is_no_checkout_or_it_is_another_repository(self):
-        run, calls = self.runner()
-        self.assertEqual(a.ops_incoming("/home/u/ops-agentic", run=run, isdir=lambda p: False), [])
-        self.assertEqual(calls, [])
-        got, calls = self.look(url="https://github.com/someone/else.git")
-        self.assertEqual(got, [])
-        self.assertFalse(any("fetch" in c for c in calls))
-
-    def test_nothing_when_it_cannot_be_reached_or_is_on_no_branch_or_is_up_to_date(self):
-        self.assertEqual(self.look(fetch=1)[0], [])
-        self.assertEqual(self.look(branch="HEAD")[0], [])
-        self.assertEqual(self.look(log="")[0], [])
-
-
 class SourceCheckoutTests(unittest.TestCase):
     """Which copy of the program an install puts in place."""
 
@@ -1284,7 +1179,7 @@ class PickerTests(unittest.TestCase):
         self.assertIn("--pick", a.INSTALL_USAGE)
 
 
-EVERYTHING_PRESENT = {"exe", "completion", "rails-unit", "desktop-entry", "checkout", "gui-shortcut",
+EVERYTHING_PRESENT = {"exe", "completion", "rails-unit", "desktop-entry", "app-files", "gui-shortcut",
                       "console-shortcut", "sdr-recovery", "sudoers-listening", "udev", "autostart"}
 
 
@@ -1295,11 +1190,11 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(a.repair_selection(st), [])
 
     def test_what_is_in_place_is_found_by_what_this_tool_wrote(self):
-        st = state(installed={"gpsd", "git"}, present={"exe", "udev", "checkout", "gui-shortcut"})
+        st = state(installed={"gpsd", "git"}, present={"exe", "udev", "app-files", "gui-shortcut"})
         self.assertEqual(a.features_in_place(st), ["core", "app", "gps", "flipper"])
 
     def test_the_shared_folder_alone_does_not_count_for_the_console(self):
-        st = state(present={"exe", "checkout", "gui-shortcut"})
+        st = state(present={"exe", "app-files", "gui-shortcut"})
         self.assertNotIn("console", a.features_in_place(st))
 
     def test_the_record_wins_over_what_is_in_place(self):
@@ -1373,8 +1268,9 @@ class RepairTests(unittest.TestCase):
 
 class UninstallTests(unittest.TestCase):
     def st(self, **changes):
-        return state(installed=set(a.all_feature_packages()), present=set(EVERYTHING_PRESENT), checkout="ours",
-                     **changes)
+        base = dict(installed=set(a.all_feature_packages()), present=set(EVERYTHING_PRESENT), old_checkout=True)
+        base.update(changes)
+        return state(**base)
 
     def test_everything_is_removed_last_installed_first(self):
         sel = a.uninstall_selection()
@@ -1416,13 +1312,16 @@ class UninstallTests(unittest.TestCase):
             self.assertTrue(p.startswith(allowed), p)
         self.assertNotIn(a.CONFIG_PATH, paths)                          # saved rail settings are left
 
-    def test_the_app_folder_goes_only_when_both_users_of_it_go(self):
+    def test_the_old_app_folder_goes_only_when_both_users_of_it_go_and_the_apps_files_stay(self):
         both = a.uninstall_plan(a.uninstall_selection(), self.st())
         self.assertEqual([s["id"] for s in both if s["kind"] == "checkout"], ["un.app.checkout"])
         self.assertLess(ids(both).index("un.console.shortcut"), ids(both).index("un.app.checkout"))
         one = a.uninstall_plan(["console"], self.st())
-        self.assertEqual(ids(one), ["un.console.shortcut", "un.console.checkout-kept"])
-        self.assertIn("stays", one[1]["detail"])
+        self.assertEqual(ids(one), ["un.console.shortcut", "un.console.close", "un.console.files-kept"])
+        self.assertIn("stay there", one[2]["detail"])
+        fresh = a.uninstall_plan(a.uninstall_selection(), self.st(old_checkout=False))
+        self.assertEqual([s for s in fresh if s["kind"] == "checkout"], [])
+        self.assertEqual([s["id"] for s in fresh if s["kind"] == "close-ops"], ["un.console.close", "un.app.close"])
 
     def test_listening_alone_rewrites_the_rules_and_with_core_they_just_go(self):
         self.assertEqual(ids(a.uninstall_plan(["listening"], self.st())), ["un.listening.sudoers"])
@@ -1451,7 +1350,7 @@ class UninstallTests(unittest.TestCase):
         for needle, out, why in (("status --porcelain", " M app.py\n", "changed or added"),
                                  ("stash list", "stash@{0}: WIP\n", "stashed"),
                                  ("--not --remotes", "abc123 mine\n", "never pushed")):
-            r = self.runner([("remote get-url", (0, a.OPS_REPO_URL, "")), (needle, (0, out, ""))])
+            r = self.runner([("remote get-url", (0, "https://github.com/AceMedia/uConsole-AIO-OPS.git", "")), (needle, (0, out, ""))])
             ok, said = a.checkout_holds_nothing("/home/shane/ops-agentic", "shane", r.run)
             self.assertFalse(ok)
             self.assertIn(why, said)
@@ -1476,6 +1375,19 @@ class UninstallTests(unittest.TestCase):
     def test_the_app_that_asked_for_the_removal_is_not_closed(self):
         wanted = a.runs_ops_from("/home/shane/ops-agentic")
         self.assertEqual(a.processes_to_close(self.TABLE, 1000, 71, wanted), ([61], True))
+
+    def test_removing_the_app_closes_the_app_and_removing_the_console_closes_the_console(self):
+        folder = "/home/shane/ops-agentic"
+        self.assertEqual(a.processes_to_close(self.TABLE, 1000, 999, a.runs_ops_from(folder, "gui")), ([60], False))
+        self.assertEqual(a.processes_to_close(self.TABLE, 1000, 999, a.runs_ops_from(folder, "console")),
+                         ([61], False))
+        step = {"path": folder, "which": "gui"}
+        self.assertEqual(a._un_close_ops(step, {"user": "shane"}, closer=lambda u, w: (1, False)), ("done", ""))
+        self.assertEqual(a._un_close_ops(step, {"user": "shane"}, closer=lambda u, w: (0, False)), ("already", ""))
+        status, words = a._un_close_ops(step, {"user": "shane"}, closer=lambda u, w: (0, True))
+        self.assertEqual(status, "note")
+        self.assertIn("still open", words)
+        self.assertEqual(a._un_close_ops(step, {"user": None}), ("already", ""))
 
     def test_the_tray_is_closed_unless_it_asked(self):
         closed = []
@@ -1556,7 +1468,7 @@ class UninstallTests(unittest.TestCase):
         sel = ["flipper", "gps", "app", "tray"]
         plan = a.uninstall_plan(sel, self.st())
         by = {"un.flipper.udev": ("done", ""), "un.gps.kept": ("note", ""), "un.app.shortcut": ("already", ""),
-              "un.app.checkout-kept": ("note", ""), "un.tray.close": ("already", ""),
+              "un.app.close": ("already", ""), "un.app.files-kept": ("note", ""), "un.tray.close": ("already", ""),
               "un.tray.desktop-entry": ("failed", "busy")}
         rows = dict((k, s) for k, s, _ in a.uninstall_results(sel, [(s, *by[s["id"]]) for s in plan]))
         self.assertEqual(rows, {"flipper": "removed", "gps": "nothing to remove", "app": "was not there",
@@ -2025,14 +1937,6 @@ class ChannelTests(unittest.TestCase):
         self.assertIn("older version", text)
         self.assertNotIn("well tested", text)
         self.assertIn("and 5 more", a.switch_summary("beta", [str(i) for i in range(20)], 0))
-
-    def test_the_apps_folder_follows_the_channel_where_its_repository_has_it(self):
-        self.assertEqual(a.app_branch_for("beta", "main", {"main", "beta"}), "beta")
-        self.assertEqual(a.app_branch_for("beta", "main", {"main"}), "main")          # no beta there: stay
-        self.assertEqual(a.app_branch_for("main", "beta", {"main", "beta"}), "main")  # back to stable
-        self.assertEqual(a.app_branch_for("beta", "my-work", {"main", "beta"}), "my-work")   # someone's own branch
-        self.assertEqual(a.app_branch_for("my-work", "main", {"main", "beta"}), "main")
-        self.assertEqual(a.app_branch_for("beta", "main", None), "main")              # could not look
 
     def test_looking_at_the_channel_changes_no_file(self):
         calls = []
