@@ -1,3 +1,4 @@
+import json
 """The one installer: the feature list, choosing from it, the plan it makes and carrying the plan out. Nothing here
 needs root, a network or the board: the planner is pure and the runner's commands are caught."""
 import itertools
@@ -794,7 +795,7 @@ class CommandTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", ["aiov2_ctl", "--features"]), \
                 mock.patch.object(a, "features_command", return_value=0) as cmd, self.assertRaises(SystemExit):
             a.main()
-        cmd.assert_called_once_with()
+        cmd.assert_called_once_with([])
         self.assertIn("--features", a.HELP_TEXT)
         self.assertIn("--features", a.BASH_COMPLETION)
 
@@ -1423,6 +1424,59 @@ class InstallerWindowHelperTests(unittest.TestCase):
         self.assertIn("--installer", a.HELP_TEXT)
         self.assertIn("--installer", a.BASH_COMPLETION)
 
+
+
+class FeaturesReportTests(unittest.TestCase):
+    """aiov2_ctl --features --json: what the ops app's Settings reads."""
+
+    def report(self, listed, **changes):
+        out = a.features_report(state(**changes), {"features": listed}, {"desktop": True, "aio_board": False}, "sudo")
+        return out, {r["key"]: r for r in out["features"]}
+
+    def test_it_lists_every_feature_in_order_and_survives_json(self):
+        out, rows = self.report(["core"])
+        self.assertEqual([r["key"] for r in out["features"]], a.feature_keys())
+        self.assertEqual(json.loads(json.dumps(out)), out)
+        self.assertEqual((out["version"], out["root"]), (1, "sudo"))
+
+    def test_installed_is_what_the_installer_recorded(self):
+        _, rows = self.report(["core", "tray", "sdr"])
+        self.assertEqual([k for k, r in rows.items() if r["installed"]], ["core", "tray", "sdr"])
+        self.assertTrue(rows["core"]["required"])
+        self.assertFalse(rows["tray"]["required"])
+
+    def test_removing_takes_only_the_installed_things_that_need_it(self):
+        _, rows = self.report(["core", "tray", "sdr", "autostart"])
+        self.assertEqual(rows["tray"]["removes"], ["autostart"])
+        self.assertEqual(rows["sdr"]["removes"], [])          # the aircraft receiver needs it but is not installed
+        _, rows = self.report(["core", "sdr", "adsb"])
+        self.assertEqual(rows["sdr"]["removes"], ["adsb"])
+
+    def test_adding_brings_what_it_needs_and_does_not_have(self):
+        _, rows = self.report(["core"])
+        self.assertEqual(rows["adsb"]["adds"], ["sdr"])
+        self.assertEqual(rows["autostart"]["adds"], ["tray"])
+        _, rows = self.report(["core", "sdr"])
+        self.assertEqual(rows["adsb"]["adds"], [])
+
+    def test_what_is_missing_is_said_only_for_installed_features(self):
+        _, rows = self.report(["core", "tray"])
+        self.assertTrue(rows["tray"]["missing"])               # nothing of the tray is in this bare state
+        self.assertEqual(rows["sdr"]["missing"], [])
+
+    def test_hardware_is_named_and_only_true_or_false_when_known(self):
+        _, rows = self.report(["core"])
+        self.assertIs(rows["tray"]["hardware_found"], True)
+        self.assertIs(rows["sdr"]["hardware_found"], False)
+        self.assertIsNone(rows["console"]["hardware_found"])
+        self.assertEqual(rows["console"]["hardware"], "")
+        self.assertTrue(rows["sdr"]["hardware"])
+
+    def test_the_command_rejects_anything_but_json(self):
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(a.features_command(["--yaml"]), 2)
+        self.assertIn("--json", out.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

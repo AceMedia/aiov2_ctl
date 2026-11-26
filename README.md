@@ -39,6 +39,7 @@ From a checkout, or once it is installed, the same installer is:
 
 ```bash
 aiov2_ctl --features                       # what can be installed, what is on by default, what is here now
+aiov2_ctl --features --json                # the same as data; the ops app's Settings reads this
 aiov2_ctl --install --dry-run              # the plan, in plain words; changes nothing and needs no root
 sudo aiov2_ctl --install --pick            # tick the features you want on screen, then see the plan
 aiov2_ctl --installer                      # the same as a window; run it as yourself, it asks for root when it installs
