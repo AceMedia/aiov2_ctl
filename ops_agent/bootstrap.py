@@ -132,12 +132,25 @@ def _ensure_textual_imports():
         print("\n" + "=" * 60)
         print("Textual TUI Library Required")
         print("=" * 60)
-        print("The python3-textual package is installed but not importable.")
-        print("This happens when hardware packages create user site-packages")
-        print("that interfere with system packages.\n")
+        try:
+            from importlib.metadata import version as _version
+            have = _version("textual")
+        except Exception:
+            have = None
+        if have:
+            print(f"The textual package on this system is version {have}, which is too old")
+            print("for the console (Debian 12 ships an old one). A newer one can be")
+            print("installed for your user only; the system package is left alone.\n")
+        else:
+            print("The python3-textual package is installed but not importable.")
+            print("This happens when hardware packages create user site-packages")
+            print("that interfere with system packages.\n")
         print(f"Technical details: {e}\n")
         print("Install textual now to fix this? [y/n]: ", end="", flush=True)
-        response = input().strip().lower()
+        try:
+            response = input().strip().lower()
+        except EOFError:                                # nobody to ask: say how to fix it and stop
+            response = "n"
 
         if response == "y":
             print("\nStep 1: Fixing directory permissions...")
@@ -194,7 +207,10 @@ def _ensure_numpy_import():
         print("The 'numpy' package is required for SDR panadapter FFT rendering.\n")
         print(f"Technical details: {e}\n")
         print("Install numpy now to fix this? [y/n]: ", end="", flush=True)
-        response = input().strip().lower()
+        try:
+            response = input().strip().lower()
+        except EOFError:                                # nobody to ask: say how to fix it and stop
+            response = "n"
 
         if response == "y":
             print("\nInstalling numpy...")

@@ -3,6 +3,7 @@
 Everything here is plain data in, plain data out. The list comes from `aiov2_ctl --features --json`, and a change
 is made by the same installer the command line uses (`aiov2_ctl --install --only KEY` or `--uninstall --only KEY`),
 so this page cannot disagree with it about what a feature is."""
+import re
 import json
 
 REPORT_ARGS = ["aiov2_ctl", "--features", "--json"]
@@ -54,7 +55,7 @@ def state_text(row):
     if row["installed"]:
         words = "Installed" + (", missing: " + ", ".join(row["missing"]) if row["missing"] else "")
     else:
-        words = "Not installed"
+        words = "Not installed" + (", missing: " + ", ".join(row["missing"]) if row.get("missing") else "")
     if row["hardware"] and row["hardware_found"] is False:
         words += f". {row['hardware'][:1].upper()}{row['hardware'][1:]} not found now"
     return words + "."
@@ -114,10 +115,18 @@ def command_text(what, key):
     return "sudo aiov2_ctl " + " ".join(change_arguments(what, key)[:-1])
 
 
-def result_text(what, title, code):
+def left_out(output):
+    """True when the installer's result list says a feature was not installed (its package is not in this
+    system's package sources, or there is no checkout to run the app from). The installer still ends well."""
+    return bool(re.search(r"(?m)^\s+\S+\s+not installed: ", output or ""))
+
+
+def result_text(what, title, code, left=False):
     """One line on how a change ended. 126 and 127 are what pkexec gives when the password box is dismissed or
-    refused."""
+    refused. `left` is left_out() of what the installer said."""
     verb = "Adding" if what == "add" else "Removing"
+    if code == 0 and what == "add" and left:
+        return f"{title}: not everything could be installed. What the installer said is below."
     if code == 0:
         return f"{title} {'added' if what == 'add' else 'removed'}."
     if code in (126, 127):
