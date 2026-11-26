@@ -113,10 +113,23 @@ def get_git_branch(repo):
         return subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=repo,
+            stderr=subprocess.DEVNULL,
             text=True
         ).strip()
-    except subprocess.CalledProcessError:
-        return None
+    except (subprocess.CalledProcessError, OSError):
+        # git refuses to look at another user's checkout (root, started by pkexec). The answer is in a file.
+        try:
+            with open(os.path.join(repo, ".git", "HEAD")) as f:
+                return branch_from_head(f.read())
+        except OSError:
+            return None
+
+
+def branch_from_head(text):
+    """The branch named by the text of a checkout's .git/HEAD, or None when it is not on a branch."""
+    prefix = "ref: refs/heads/"
+    text = (text or "").strip()
+    return text[len(prefix):] if text.startswith(prefix) and len(text) > len(prefix) else None
 
 
 def load_install_meta():
@@ -322,6 +335,7 @@ _aiov2_ctl()
         --repair
         --uninstall
         --update
+        --channel
         --check-update
         --autostart
         --no-autostart
@@ -540,6 +554,7 @@ USAGE:
   aiov2_ctl <FEATURE> on|off
   aiov2_ctl --install
   aiov2_ctl --update
+  aiov2_ctl --channel [stable|beta]
   aiov2_ctl --check-update
   aiov2_ctl --help
   aiov2_ctl --autostart
@@ -580,6 +595,7 @@ COMMANDS:
                [--only LIST] [--dry-run] [--yes]
   --update     Pull latest version from git and reinstall
   --check-update     Check for updates and prompt to install
+  --channel          Show the update channel, or switch it: --channel stable|beta [--yes]
   --autostart        Enable GUI autostart on login
   --no-autostart     Disable GUI autostart
         --mesh-on-boot     Enable meshtasticd autostart (or status)
@@ -6647,6 +6663,36 @@ def run_gui():
 
     # Initial check after 10 seconds
     QTimer.singleShot(10000, update_check)
+
+    def finish_prompt():
+        # An older updater put this version in place without running its installer: offer to finish, once.
+        stamp = file_stamp(INSTALLED_PATH)
+        try:
+            with open(FINISH_ASKED_PATH) as f:
+                asked = f.read()
+        except OSError:
+            asked = ""
+        if not finish_prompt_due(update_is_unfinished(), stamp, asked):
+            return
+        try:
+            os.makedirs(os.path.dirname(FINISH_ASKED_PATH), exist_ok=True)
+            with open(FINISH_ASKED_PATH, "w") as f:
+                f.write(stamp)
+        except OSError:
+            pass
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("AIO v2: finish the update")
+        box.setText(FINISH_PROMPT)
+        now = box.addButton("Finish now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is now:
+            subprocess.Popen([INSTALLED_PATH, "--installer"], start_new_session=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    QTimer.singleShot(5000, finish_prompt)
     
     # Periodic recheck every 3 hours
     update_timer = QTimer()
@@ -7835,6 +7881,24 @@ def _act_checkout(step, ctx, run=_run_text):
                      cwd="/", timeout=120)
     if rc != 0 or out.strip():
         return "already", f"{path} has changes of your own, so it was not updated and nothing in it was touched"
+    wanted = ((ctx.get("source") or (None, None, {}))[2] or {}).get("branch")
+    try:
+        with open(os.path.join(path, ".git", "HEAD")) as f:
+            current = branch_from_head(f.read())
+    except OSError:
+        current = None
+    if wanted and current and wanted != current and channel_of(wanted) and channel_of(current):
+        # The controller is on another channel than this folder: follow it where the app's repository has it.
+        rc, out, _ = run(as_user(user, ["git", "-C", path, "ls-remote", "--heads", "origin"],
+                                 env={"GIT_TERMINAL_PROMPT": "0"}), cwd="/", timeout=120)
+        target = app_branch_for(wanted, current, remote_heads(out) if rc == 0 else None)
+        if target != current:
+            for cmd in (["fetch", "--quiet", "origin", f"+refs/heads/{target}:refs/remotes/origin/{target}"],
+                        ["checkout", "--quiet", target]):
+                rc, _, _ = run(as_user(user, ["git", "-C", path, *cmd], env={"GIT_TERMINAL_PROMPT": "0"}),
+                               cwd="/", timeout=900)
+                if rc != 0:
+                    return "already", f"{path} could not be moved to the {target} branch; it was left as it is"
     rc, out, err = run(as_user(user, ["git", "-C", path, "pull", "--ff-only"], env={"GIT_TERMINAL_PROMPT": "0"}),
                        cwd="/", timeout=900)
     if rc != 0:
@@ -8138,7 +8202,7 @@ def update_is_unfinished():
 UNFINISHED_NOTICE = ("aiov2_ctl was updated, but the new version's installer has not run yet, so some of it is "
                      "not set up.\nFinish the update with: sudo aiov2_ctl --install")
 # Commands a person runs to look at things, where the notice is worth a line.
-NOTICE_ARGS = (None, "--status", "--help", "-h", "--doctor", "--features", "--check-update")
+NOTICE_ARGS = (None, "--status", "--help", "-h", "--doctor", "--features", "--check-update", "--channel")
 
 
 def unfinished_notice_for(arg, rest, isatty, unfinished):
@@ -8149,32 +8213,323 @@ def unfinished_notice_for(arg, rest, isatty, unfinished):
     return UNFINISHED_NOTICE if unfinished() else ""
 
 
-def update_commands(python3, installed, two_steps):
-    """What an update runs as root once the new code is pulled. The first step is the installed (old) program
-    copying the new one into place; the second is the new program running its own installer, which keeps to
-    the features already installed. Both run the root-owned installed copy, never the checkout."""
-    last = ["sudo", python3, installed, "--install", "--yes", "--show-mesh-status"]
-    first = ["sudo", python3, installed, "--install", "--only", "core", "--yes"]
-    return [first, last] if two_steps else [last]
+def update_install_steps(python3, installed):
+    """The two installs an update is made of. The first is the installed (old) program copying the new one into
+    place; the second is the new program running its own installer, which keeps to the features already
+    installed. Both run the root-owned installed copy, never the checkout."""
+    return [[python3, installed, "--install", "--only", "core", "--yes"],
+            [python3, installed, "--install", "--yes", "--show-mesh-status"]]
 
 
-def finish_update(two_steps, run=subprocess.call, trusted=None, say=print):
+def update_commands(python3, installed, two_steps, lead=("sudo",)):
+    """What an update runs as root once the new code is pulled: one command, so root is asked for once. With
+    two_steps it is --update-install, which runs both installs; without, it is the new program's installer
+    alone (finishing an update an older updater left half done)."""
+    if two_steps:
+        return [[*lead, python3, installed, "--update-install"]]
+    return [[*lead, *update_install_steps(python3, installed)[1]]]
+
+
+def root_lead(isatty, sudo_without_password, pkexec_path):
+    """How to start a command as root: sudo on a terminal (it can ask there); otherwise sudo when it needs no
+    password, or the desktop's password box. None when there is no way from here."""
+    if isatty:
+        return ["sudo"]
+    how = elevation(sudo_without_password(), pkexec_path)
+    return {"sudo": ["sudo", "-n"], "pkexec": [pkexec_path]}.get(how)
+
+
+def update_install_command(run=subprocess.call, say=print, euid=None, trusted=None):
+    """--update-install: the root half of an update, both installs one after the other. Each is a fresh run of
+    the installed program, so the second one is the new version."""
+    if (os.geteuid() if euid is None else euid) != 0:
+        say("This is the root half of an update. Run: aiov2_ctl --update")
+        return 1
+    if not (is_trusted_file(INSTALLED_PATH) if trusted is None else trusted):
+        say(f"{INSTALLED_PATH} is not a root-owned program, so it was not run.")
+        return 1
+    python3 = shutil.which("python3") or "/usr/bin/python3"
+    steps = update_install_steps(python3, INSTALLED_PATH)
+    for i, cmd in enumerate(steps, 1):
+        say(f"\nStep {i} of {len(steps)}: "
+            + ("putting the new program in place" if i == 1 else "running the new version's installer") + "\n")
+        sys.stdout.flush()
+        if run(cmd) != 0:
+            say("\nThe update stopped here. Finish it with: sudo aiov2_ctl --install")
+            return 1
+    return 0
+
+
+def finish_update(two_steps, run=subprocess.call, trusted=None, say=print, lead=None):
     """Run the root half of an update. Returns an exit code."""
     trusted = is_trusted_file(INSTALLED_PATH) if trusted is None else trusted
     if not trusted:
         # Not installed yet, so there is no root-owned copy to run: install from here, as before.
         rerun_with_sudo(["--install", "--yes", "--show-mesh-status"], allow_untrusted=True)
         return 0
+    if lead is None:
+        lead = root_lead(sys.stdin.isatty(), lambda: _run_text(["sudo", "-n", "true"], timeout=10)[0] == 0,
+                         shutil.which("pkexec"))
+    if lead is None:
+        say("\nThere is no way to get root from here. Run this in a terminal: aiov2_ctl --update")
+        return 1
     python3 = shutil.which("python3") or "/usr/bin/python3"
-    commands = update_commands(python3, INSTALLED_PATH, two_steps)
-    for i, cmd in enumerate(commands, 1):
-        if len(commands) > 1:
-            say(f"\nStep {i} of {len(commands)}: "
-                + ("putting the new program in place" if i == 1 else "running the new version's installer") + "\n")
+    sys.stdout.flush()
+    for cmd in update_commands(python3, INSTALLED_PATH, two_steps, lead):
         if run(cmd) != 0:
             say("\nThe update stopped here. Finish it with: sudo aiov2_ctl --install")
             return 1
     return 0
+
+
+# ---- channels -------------------------------------------------------------------------------------------------
+# A channel is a branch of the repository this was installed from. Stable is main; beta is the branch where
+# changes are tried first. Switching checks out the other branch and then updates in the usual way, so it keeps
+# to the installed features. Going back to stable installs an older version: what beta added is not removed.
+
+CHANNELS = (("stable", "main"), ("beta", "beta"))
+CHANNEL_USAGE = ("Usage: aiov2_ctl --channel                 show the channel and what is waiting\n"
+                 "       aiov2_ctl --channel stable|beta [--yes]   switch, then update\n"
+                 "       aiov2_ctl --channel --json")
+
+
+def channel_of(branch):
+    """'stable' or 'beta' for a branch, or None for a branch that is not a channel (someone's own work)."""
+    for name, b in CHANNELS:
+        if b == branch:
+            return name
+    return None
+
+
+def channel_branch(name):
+    return dict(CHANNELS).get(name)
+
+
+def update_branch(meta, checkout_branch):
+    """The branch an update follows: the one the checkout is on; failing that, the recorded one; else main."""
+    if checkout_branch and checkout_branch != "HEAD":
+        return checkout_branch
+    return (meta or {}).get("branch") or "main"
+
+
+def remote_heads(text):
+    """The branch names in the output of `git ls-remote --heads`."""
+    heads = set()
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+            heads.add(parts[1][len("refs/heads/"):])
+    return heads
+
+
+def channel_report(branch, heads, incoming, how, error=""):
+    """The channels as data, for the ops app. `heads` is the branches the repository has, or None when it could
+    not be reached; `incoming` is the waiting changes, one line each, or None when not known."""
+    return {
+        "version": 1,
+        "channel": channel_of(branch),
+        "branch": branch,
+        "channels": [{"name": name, "branch": b, "available": heads is not None and b in heads,
+                      "current": b == branch} for name, b in CHANNELS],
+        "incoming": None if incoming is None else list(incoming),
+        "root": how,
+        "error": error,
+    }
+
+
+def format_channel(report):
+    name = report["channel"]
+    lines = [f"Channel: {name} (branch {report['branch']})" if name
+             else f"Channel: none. This checkout is on its own branch, {report['branch']}."]
+    if report["error"]:
+        lines.append(report["error"])
+    elif report["incoming"] is not None:
+        n = len(report["incoming"])
+        lines.append("Up to date." if n == 0 else f"{n} change{'s' if n != 1 else ''} waiting. "
+                     "Install with: aiov2_ctl --update")
+    for ch in report["channels"]:
+        if ch["current"]:
+            continue
+        if ch["available"]:
+            lines.append(f"Switch to {ch['name']} with: aiov2_ctl --channel {ch['name']}")
+        elif not report["error"]:
+            lines.append(f"This repository has no {ch['name']} channel.")
+    return "\n".join(lines)
+
+
+def switch_problem(name, current, heads, dirty):
+    """Why a switch to a channel cannot go ahead, or ''."""
+    target = channel_branch(name)
+    if target is None:
+        return f"Unknown channel: {name}. The channels are: " + ", ".join(n for n, _ in CHANNELS) + "."
+    if target == current:
+        return f"Already on the {name} channel. Update with: aiov2_ctl --update"
+    if heads is None:
+        return "The repository could not be reached, so nothing was changed."
+    if target not in heads:
+        return f"This repository has no {name} channel yet, so nothing was changed."
+    if dirty:
+        return ("The checkout this was installed from has changes of your own, so it was left as it is. "
+                "Commit or stash them, then switch.")
+    return ""
+
+
+def switch_summary(name, incoming, leaving):
+    """What a switch means, before it is confirmed."""
+    lines = [f"Switching to the {name} channel."]
+    if incoming:
+        lines.append(f"It brings {len(incoming)} change{'s' if len(incoming) != 1 else ''}:")
+        lines += ["  " + line for line in incoming[:15]]
+        if len(incoming) > 15:
+            lines.append(f"  and {len(incoming) - 15} more")
+    if leaving:
+        lines.append(f"It leaves {leaving} newer change{'s' if leaving != 1 else ''} behind: this installs an "
+                     "older version. What the newer one set up is not removed.")
+    if name == "beta":
+        lines.append("Beta gets changes first, before they are well tested.")
+    return "\n".join(lines)
+
+
+def app_branch_for(wanted, current, heads):
+    """The branch the ops app's folder should be on when the controller follows `wanted`. The app follows the
+    same channel when its repository has it, and stable otherwise. A folder on a branch that is not a channel
+    is someone's own work and is left where it is."""
+    if channel_of(wanted) is None or channel_of(current) is None or heads is None:
+        return current
+    if wanted in heads:
+        return wanted
+    return "main" if "main" in heads else current
+
+
+def _update_source():
+    """(repo, branch) to update from, or (None, None) after saying why not."""
+    meta = load_install_meta()
+    if not meta or "repo_path" not in meta:
+        print("No install metadata found.")
+        print("Reinstall from the original git checkout.")
+        return None, None
+    repo = os.path.realpath(meta["repo_path"])
+    if not os.path.isdir(repo):
+        print(f"Source repo not found: {repo}")
+        print("Reinstall required.")
+        return None, None
+    return repo, update_branch(meta, get_git_branch(repo))
+
+
+def channel_look(repo, branch, run=_run_text):
+    """(heads or None, incoming lines or None, error) from the repository. Fetches; changes no file."""
+    rc, out, _ = run(["git", "ls-remote", "--heads", "origin"], cwd=repo, timeout=30)
+    if rc != 0:
+        return None, None, "The repository could not be reached just now."
+    heads = remote_heads(out)
+    if branch not in heads:
+        return heads, None, ""
+    if run(["git", "fetch", "--quiet", "origin", branch], cwd=repo, timeout=120)[0] != 0:
+        return heads, None, "The repository could not be reached just now."
+    rc, out, _ = run(["git", "log", "--oneline", "--no-decorate", f"HEAD..origin/{branch}"], cwd=repo, timeout=60)
+    return heads, (out.strip().splitlines() if rc == 0 else None), ""
+
+
+def channel_command(args=()):
+    args = list(args or ())
+    yes = any(a in ("--yes", "-y") for a in args)
+    rest = [a for a in args if a not in ("--yes", "-y")]
+    if rest in ([], ["--json"]):
+        if os.geteuid() == 0:
+            print("Run this as yourself, not with sudo.")
+            return 1
+        repo, branch = _update_source()
+        if not repo:
+            return 1
+        heads, incoming, error = channel_look(repo, branch)
+        how = None
+        if rest:
+            how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
+        report = channel_report(branch, heads, incoming, how, error)
+        print(json.dumps(report, indent=1) if rest else format_channel(report))
+        return 0
+    if len(rest) != 1 or rest[0].startswith("-"):
+        print(CHANNEL_USAGE)
+        return 2
+    return switch_channel(rest[0], confirmed=yes)
+
+
+def switch_channel(name, confirmed=False):
+    if os.geteuid() == 0:
+        print("Do not switch channel with sudo.")
+        print(f"Run: aiov2_ctl --channel {name}")
+        return 1
+    repo, current = _update_source()
+    if not repo:
+        return 1
+    rc, out, _ = _run_text(["git", "ls-remote", "--heads", "origin"], cwd=repo, timeout=30)
+    heads = remote_heads(out) if rc == 0 else None
+    rc, out, _ = _run_text(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, timeout=60)
+    problem = switch_problem(name, current, heads, rc != 0 or bool(out.strip()))
+    if problem:
+        print(problem)
+        return 1
+    target = channel_branch(name)
+    if not run_cmd(["git", "fetch", "--quiet", "origin", target], cwd=repo):
+        print("Git fetch failed. Nothing was changed.")
+        return 1
+    incoming = _run_text(["git", "log", "--oneline", "--no-decorate", f"HEAD..origin/{target}"],
+                         cwd=repo, timeout=60)[1].strip().splitlines()
+    leaving = _run_text(["git", "rev-list", "--count", f"origin/{target}..HEAD"], cwd=repo, timeout=60)[1].strip()
+    print(switch_summary(name, incoming, int(leaving) if leaving.isdigit() else 0))
+
+    if load_config().get("require_signed_updates"):
+        if not run_cmd(["git", "verify-commit", f"origin/{target}"], cwd=repo):
+            print("\nrequire_signed_updates is on and the newest commit is not validly signed. Not switching.")
+            return 1
+
+    if not confirmed:
+        if not sys.stdin.isatty():
+            print("\nNot interactive. Re-run with --yes to switch and install as root.")
+            return 1
+        resp = input("\nThis will run that version's code as root to install it. Continue? [y/N]: ")
+        if resp.strip().lower() not in ("y", "yes"):
+            print("Left on the channel it was on.")
+            return 0
+
+    def back(why):
+        run_cmd(["git", "checkout", "--quiet", current], cwd=repo)
+        print(f"\n{why} Nothing was changed: still on {channel_of(current) or current}.")
+        return 1
+
+    local = _run_text(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{target}"], cwd=repo)[0] == 0
+    checkout = (["git", "checkout", "--quiet", target] if local
+                else ["git", "checkout", "--quiet", "-b", target, "--track", f"origin/{target}"])
+    if not run_cmd(checkout, cwd=repo):
+        return back("The checkout could not change branch.")
+    if local and not run_cmd(["git", "merge", "--quiet", "--ff-only", f"origin/{target}"], cwd=repo):
+        return back(f"Your copy of {target} has gone its own way.")
+
+    print("\nInstalling that version…\n")
+    report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
+    before = file_stamp(INSTALLED_PATH)
+    said = []
+    code = finish_update(two_steps=True, say=said.append)
+    if code != 0 and file_stamp(INSTALLED_PATH) == before:
+        return back("The install did not start.")
+    for line in said:
+        print(line)
+    if code == 0:
+        print(f"\nNow on the {name} channel.")
+    return code
+
+
+# ---- the tray's offer to finish an update ---------------------------------------------------------------------
+FINISH_ASKED_PATH = os.path.expanduser("~/.config/aiov2_ctl/finish_asked")
+FINISH_PROMPT = ("aiov2_ctl was updated, and the new version has more to set up: the ops app, its console and "
+                 "the installer's menu entries.\n\nFinish now opens the installer. It shows what it will do and "
+                 "asks before it changes anything.")
+
+
+def finish_prompt_due(unfinished, stamp, asked):
+    """True when the tray should offer to finish the update: it is unfinished, and this version has not asked
+    yet (Later is remembered, so the box does not come back at every login; the menu item stays)."""
+    return bool(unfinished and stamp and (asked or "").strip() != stamp)
 
 
 def repair_selection(state, meta=None):
@@ -9103,7 +9458,7 @@ def update_self(confirmed=False):
         print("Reinstall required.")
         return 1
 
-    branch = meta.get("branch") or get_git_branch(repo) or "main"
+    branch = update_branch(meta, get_git_branch(repo))
     print(f"Current branch: {branch}\n")
 
     # The install step runs the new code as root, so look before pulling.
@@ -9181,7 +9536,7 @@ def check_update_interactive():
         print("Reinstall required.")
         return 1
 
-    branch = meta.get("branch") or get_git_branch(repo) or "main"
+    branch = update_branch(meta, get_git_branch(repo))
     print(f"Repository: {repo}")
     print(f"Branch: {branch}\n")
 
@@ -9240,12 +9595,7 @@ def check_update_interactive():
 def check_update_available(repo):
     """Quick check if updates are available (used by GUI)."""
     try:
-        meta = load_install_meta()
-        branch = "main"
-        if meta and "branch" in meta:
-            branch = meta["branch"]
-        elif repo:
-            branch = get_git_branch(repo) or "main"
+        branch = update_branch(load_install_meta(), get_git_branch(repo) if repo else None)
 
         # fetch quietly, timeout-safe
         subprocess.check_call(
@@ -9304,6 +9654,12 @@ def main():
 
     elif arg == "--update":
         sys.exit(update_self())
+
+    elif arg == "--update-install":
+        sys.exit(update_install_command())
+
+    elif arg == "--channel":
+        sys.exit(channel_command(sys.argv[2:]))
 
     elif arg == "--check-update":
         sys.exit(check_update_interactive())

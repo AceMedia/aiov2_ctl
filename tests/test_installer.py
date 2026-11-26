@@ -500,6 +500,30 @@ class CheckoutTests(unittest.TestCase):
         (status, _), _ = self.act("pull", "ours", {"pull": (0, "Already up to date.\n", "")})
         self.assertEqual(status, "already")
 
+    def test_the_apps_folder_moves_to_the_controllers_channel_before_it_is_pulled(self):
+        run, calls = self.runner({"ls-remote": (0, "a\trefs/heads/main\nb\trefs/heads/beta\n", ""),
+                                  "pull": (0, "Already up to date.\n", "")})
+        ctx = {"user": "shane", "home": "/home/shane", "source": ("/x/aiov2_ctl.py", None, {"branch": "beta"})}
+        with mock.patch.object(a, "checkout_state", return_value="ours"), \
+                mock.patch.object(a.os, "geteuid", return_value=0), \
+                mock.patch("builtins.open", mock.mock_open(read_data="ref: refs/heads/main\n")):
+            a._act_checkout(self.step("pull"), ctx, run)
+        words = [" ".join(c) for c in calls]
+        self.assertTrue(any("checkout --quiet beta" in w for w in words))
+        self.assertLess(next(i for i, w in enumerate(words) if "checkout --quiet beta" in w),
+                        next(i for i, w in enumerate(words) if "pull --ff-only" in w))
+        for cmd in calls:
+            self.assertEqual(cmd[:5], ["sudo", "-u", "shane", "-H", "--"])
+
+    def test_the_apps_folder_stays_put_when_the_controller_is_on_the_same_channel(self):
+        run, calls = self.runner({"pull": (0, "Already up to date.\n", "")})
+        ctx = {"user": "shane", "home": "/home/shane", "source": ("/x/aiov2_ctl.py", None, {"branch": "main"})}
+        with mock.patch.object(a, "checkout_state", return_value="ours"), \
+                mock.patch.object(a.os, "geteuid", return_value=0), \
+                mock.patch("builtins.open", mock.mock_open(read_data="ref: refs/heads/main\n")):
+            a._act_checkout(self.step("pull"), ctx, run)
+        self.assertFalse(any("ls-remote" in c or "checkout" in c for c in calls))
+
     def test_a_checkout_with_local_changes_is_reported_and_not_pulled(self):
         (status, words), calls = self.act("pull", "ours", {"status": (0, " M ops.py\n", "")})
         self.assertEqual(status, "already")
@@ -798,7 +822,7 @@ class CommandTests(unittest.TestCase):
     def test_the_update_starts_the_install_without_a_second_question(self):
         import inspect
         self.assertIn("finish_update(two_steps=True)", inspect.getsource(a.update_self))
-        for cmd in a.update_commands("/usr/bin/python3", "/usr/local/bin/aiov2_ctl", True):
+        for cmd in a.update_install_steps("/usr/bin/python3", "/usr/local/bin/aiov2_ctl"):
             self.assertIn("--yes", cmd)
 
     def test_install_and_features_are_commands(self):
@@ -1603,28 +1627,70 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((meta["installed_by"], meta["features"], meta["repo_path"]), ("abc", ["core"], "/x"))
 
     def test_an_update_runs_the_root_owned_copy_twice_and_never_the_checkout(self):
-        first, last = a.update_commands("/usr/bin/python3", "/usr/local/bin/aiov2_ctl", True)
-        self.assertEqual(first, ["sudo", "/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--only", "core", "--yes"])
-        self.assertEqual(last, ["sudo", "/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--yes", "--show-mesh-status"])
+        first, last = a.update_install_steps("/usr/bin/python3", "/usr/local/bin/aiov2_ctl")
+        self.assertEqual(first, ["/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--only", "core", "--yes"])
+        self.assertEqual(last, ["/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--install", "--yes", "--show-mesh-status"])
         # The second is a plain install: it keeps to what is installed.
-        opts = a.parse_install_args(last[4:])
+        opts = a.parse_install_args(last[3:])
         self.assertTrue(opts["only"] is None and not opts["all"] and not opts["without"])
         # The first is one every version with features understands, and it copies the program.
-        self.assertIn("core.copy", ids(a.install_plan(a.select_features(a.parse_install_args(first[4:])), NOTHING_THERE, state())))
+        self.assertIn("core.copy", ids(a.install_plan(a.select_features(a.parse_install_args(first[3:])), NOTHING_THERE, state())))
+
+    def test_root_is_asked_for_once(self):
+        self.assertEqual(a.update_commands("p", "i", True), [["sudo", "p", "i", "--update-install"]])
+        self.assertEqual(a.update_commands("p", "i", True, ["pkexec"]), [["pkexec", "p", "i", "--update-install"]])
 
     def test_finishing_an_unfinished_update_is_only_the_second_step(self):
         self.assertEqual(a.update_commands("p", "i", False), [["sudo", "p", "i", "--install", "--yes", "--show-mesh-status"]])
 
-    def test_the_steps_run_in_order_and_stop_at_a_failure(self):
+    def test_root_comes_from_sudo_on_a_terminal_and_from_the_desktop_otherwise(self):
+        def boom():
+            raise AssertionError("looked")
+        self.assertEqual(a.root_lead(True, boom, "/usr/bin/pkexec"), ["sudo"])
+        self.assertEqual(a.root_lead(False, lambda: True, "/usr/bin/pkexec"), ["sudo", "-n"])
+        self.assertEqual(a.root_lead(False, lambda: False, "/usr/bin/pkexec"), ["/usr/bin/pkexec"])
+        self.assertIsNone(a.root_lead(False, lambda: False, None))
+
+    def test_the_root_half_runs_both_installs_in_order_and_stops_at_a_failure(self):
         ran, said = [], []
-        self.assertEqual(a.finish_update(True, run=lambda c: ran.append(c) or 0, trusted=True, say=said.append), 0)
-        self.assertEqual(len(ran), 2)
+        self.assertEqual(a.update_install_command(lambda c: ran.append(c) or 0, said.append, euid=0, trusted=True), 0)
+        self.assertEqual([c[2:] for c in ran], [["--install", "--only", "core", "--yes"],
+                                               ["--install", "--yes", "--show-mesh-status"]])
+        self.assertTrue(all(c[1] == a.INSTALLED_PATH for c in ran))
         self.assertIn("Step 1 of 2", "".join(said))
         ran.clear()
         said.clear()
-        self.assertEqual(a.finish_update(True, run=lambda c: ran.append(c) or 1, trusted=True, say=said.append), 1)
+        self.assertEqual(a.update_install_command(lambda c: ran.append(c) or 1, said.append, euid=0, trusted=True), 1)
         self.assertEqual(len(ran), 1)
         self.assertIn("sudo aiov2_ctl --install", "".join(said))
+
+    def test_the_root_half_refuses_without_root_or_a_root_owned_program(self):
+        ran = []
+        self.assertEqual(a.update_install_command(ran.append, lambda t: None, euid=1000, trusted=True), 1)
+        self.assertEqual(a.update_install_command(ran.append, lambda t: None, euid=0, trusted=False), 1)
+        self.assertEqual(ran, [])
+
+    def test_the_update_runs_one_command_and_says_how_to_finish_when_it_fails(self):
+        ran, said = [], []
+        self.assertEqual(a.finish_update(True, run=lambda c: ran.append(c) or 0, trusted=True, say=said.append,
+                                         lead=["sudo"]), 0)
+        self.assertEqual([c[-1] for c in ran], ["--update-install"])
+        self.assertEqual(a.finish_update(True, run=lambda c: 1, trusted=True, say=said.append, lead=["sudo"]), 1)
+        self.assertIn("sudo aiov2_ctl --install", "".join(said))
+
+    def test_no_way_to_root_is_said_and_nothing_runs(self):
+        ran, said = [], []
+        with mock.patch.object(a, "root_lead", return_value=None):
+            self.assertEqual(a.finish_update(True, run=ran.append, trusted=True, say=said.append), 1)
+        self.assertEqual(ran, [])
+        self.assertIn("aiov2_ctl --update", "".join(said))
+
+    def test_the_tray_offers_to_finish_once_per_version(self):
+        self.assertTrue(a.finish_prompt_due(True, "abc", ""))
+        self.assertTrue(a.finish_prompt_due(True, "abc", "older\n"))
+        self.assertFalse(a.finish_prompt_due(True, "abc", "abc\n"))      # Later was pressed for this version
+        self.assertFalse(a.finish_prompt_due(False, "abc", ""))
+        self.assertFalse(a.finish_prompt_due(True, None, ""))
 
     def test_the_notice_is_for_a_person_looking_not_for_a_program_reading(self):
         yes = lambda: True
@@ -1641,6 +1707,107 @@ class UpdateTests(unittest.TestCase):
             raise AssertionError("looked")
         self.assertEqual(a.unfinished_notice_for("--gui", [], True, boom), "")
         self.assertEqual(a.unfinished_notice_for("--status", [], False, boom), "")
+
+
+class ChannelTests(unittest.TestCase):
+    """Channels: stable is main, beta is the beta branch. Switching checks out the other and updates."""
+
+    def test_the_channels(self):
+        self.assertEqual((a.channel_of("main"), a.channel_of("beta"), a.channel_of("my-work")), ("stable", "beta", None))
+        self.assertEqual((a.channel_branch("stable"), a.channel_branch("beta"), a.channel_branch("x")), ("main", "beta", None))
+
+    def test_the_branch_is_read_from_the_head_file(self):
+        self.assertEqual(a.branch_from_head("ref: refs/heads/beta\n"), "beta")
+        self.assertEqual(a.branch_from_head("ref: refs/heads/feat/x\n"), "feat/x")
+        self.assertIsNone(a.branch_from_head("0123456789abcdef0123456789abcdef01234567\n"))   # not on a branch
+        self.assertIsNone(a.branch_from_head(""))
+
+    def test_an_update_follows_the_branch_the_checkout_is_on(self):
+        self.assertEqual(a.update_branch({"branch": "main"}, "beta"), "beta")
+        self.assertEqual(a.update_branch({"branch": "beta"}, None), "beta")
+        self.assertEqual(a.update_branch({"branch": "beta"}, "HEAD"), "beta")
+        self.assertEqual(a.update_branch({}, None), "main")
+        self.assertEqual(a.update_branch(None, None), "main")
+
+    def test_the_branches_a_repository_has(self):
+        text = "aaa\trefs/heads/main\nbbb\trefs/heads/beta\nccc\trefs/tags/v1\n"
+        self.assertEqual(a.remote_heads(text), {"main", "beta"})
+        self.assertEqual(a.remote_heads(""), set())
+
+    def test_the_report_says_which_channels_there_are(self):
+        r = a.channel_report("main", {"main"}, ["abc one", "def two"], "sudo")
+        self.assertEqual((r["channel"], r["branch"], r["incoming"], r["root"], r["error"]),
+                         ("stable", "main", ["abc one", "def two"], "sudo", ""))
+        self.assertEqual(r["channels"], [
+            {"name": "stable", "branch": "main", "available": True, "current": True},
+            {"name": "beta", "branch": "beta", "available": False, "current": False}])
+        r = a.channel_report("my-work", None, None, None, "offline")
+        self.assertIsNone(r["channel"])
+        self.assertFalse(any(c["available"] or c["current"] for c in r["channels"]))
+
+    def test_the_report_in_words(self):
+        text = a.format_channel(a.channel_report("main", {"main", "beta"}, ["abc one"], None))
+        self.assertIn("Channel: stable", text)
+        self.assertIn("1 change waiting", text)
+        self.assertIn("aiov2_ctl --channel beta", text)
+        text = a.format_channel(a.channel_report("main", {"main"}, [], None))
+        self.assertIn("Up to date.", text)
+        self.assertIn("no beta channel", text)
+
+    def test_what_stops_a_switch(self):
+        both = {"main", "beta"}
+        self.assertEqual(a.switch_problem("beta", "main", both, False), "")
+        self.assertEqual(a.switch_problem("stable", "beta", both, False), "")
+        self.assertIn("Unknown channel", a.switch_problem("nightly", "main", both, False))
+        self.assertIn("Already on the beta channel", a.switch_problem("beta", "beta", both, False))
+        self.assertIn("could not be reached", a.switch_problem("beta", "main", None, False))
+        self.assertIn("no beta channel yet", a.switch_problem("beta", "main", {"main"}, False))
+        self.assertIn("changes of your own", a.switch_problem("beta", "main", both, True))
+
+    def test_what_a_switch_means_is_said_first(self):
+        text = a.switch_summary("beta", ["abc one", "def two"], 0)
+        self.assertIn("brings 2 changes", text)
+        self.assertIn("before they are well tested", text)
+        text = a.switch_summary("stable", [], 3)
+        self.assertIn("leaves 3 newer changes behind", text)
+        self.assertIn("older version", text)
+        self.assertNotIn("well tested", text)
+        self.assertIn("and 5 more", a.switch_summary("beta", [str(i) for i in range(20)], 0))
+
+    def test_the_apps_folder_follows_the_channel_where_its_repository_has_it(self):
+        self.assertEqual(a.app_branch_for("beta", "main", {"main", "beta"}), "beta")
+        self.assertEqual(a.app_branch_for("beta", "main", {"main"}), "main")          # no beta there: stay
+        self.assertEqual(a.app_branch_for("main", "beta", {"main", "beta"}), "main")  # back to stable
+        self.assertEqual(a.app_branch_for("beta", "my-work", {"main", "beta"}), "my-work")   # someone's own branch
+        self.assertEqual(a.app_branch_for("my-work", "main", {"main", "beta"}), "main")
+        self.assertEqual(a.app_branch_for("beta", "main", None), "main")              # could not look
+
+    def test_looking_at_the_channel_changes_no_file(self):
+        calls = []
+
+        def run(cmd, cwd=None, timeout=None):
+            calls.append(cmd)
+            if "ls-remote" in cmd:
+                return 0, "a\trefs/heads/main\n", ""
+            if "log" in cmd:
+                return 0, "abc one\n", ""
+            return 0, "", ""
+        self.assertEqual(a.channel_look("/r", "main", run), ({"main"}, ["abc one"], ""))
+        self.assertEqual({c[1] for c in calls}, {"ls-remote", "fetch", "log"})
+        self.assertEqual(a.channel_look("/r", "main", lambda *x, **k: (1, "", "no network"))[:2], (None, None))
+
+    def test_the_commands_are_wired(self):
+        for argv, name in ((["--channel", "beta"], "channel_command"), (["--update-install"], "update_install_command")):
+            with mock.patch.object(sys, "argv", ["aiov2_ctl", *argv]), \
+                    mock.patch.object(a, name, return_value=0) as cmd, self.assertRaises(SystemExit):
+                a.main()
+            cmd.assert_called_once()
+
+    def test_a_switch_as_root_or_to_an_unknown_channel_changes_nothing(self):
+        with mock.patch.object(a.os, "geteuid", return_value=0), mock.patch.object(a, "run_cmd") as run, \
+                mock.patch("builtins.print"):
+            self.assertEqual(a.switch_channel("beta", True), 1)
+        run.assert_not_called()
 
 
 class ApplyTests(unittest.TestCase):

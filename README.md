@@ -80,6 +80,20 @@ aiov2_ctl --update          # run it as yourself; it asks before it uses root
 - An update keeps to the features you have. It does not bring back one you removed, and it does not add new ones; see those with `aiov2_ctl --features`.
 - **Coming from an older version** (before the feature installer, including the project this was forked from): that version's updater pulls the new program but installs it with its own old steps. The new program notices, says so on `aiov2_ctl --status` and in the tray ("Finish the update"), and `sudo aiov2_ctl --install` or a second `aiov2_ctl --update` finishes the job. On a machine with no record of features that first install brings the usual set and keeps what was already there.
 
+### Channels
+
+```bash
+aiov2_ctl --channel         # which channel this is on, and what is waiting
+aiov2_ctl --channel beta    # switch to beta, then update
+aiov2_ctl --channel stable  # and back
+```
+
+- **Stable** is the `main` branch. **Beta** is the `beta` branch, where changes are tried first.
+- Switching checks out the other branch of the checkout this was installed from, then updates in the usual way. It keeps to the features you have, and the ops app's folder follows the same channel where its repository has one.
+- Going back to stable installs an older version. What the newer one set up is not removed.
+- A repository with no `beta` branch has no beta channel; the command says so and changes nothing.
+- The ops app has the same switch under Settings > Features.
+
 What it does and does not do:
 
 - `--uninstall` removes only what this tool wrote. It never removes a package, switches a rail, or stops a radio service, and your saved rail settings and the app's logs and settings are left. The ops app folder is removed only when it holds nothing of yours (no changed files, nothing unpushed, nothing stashed). Add `--dry-run` to see the plan first.
