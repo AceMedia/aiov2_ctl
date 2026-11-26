@@ -1374,6 +1374,68 @@ class UninstallTests(unittest.TestCase):
             self.assertIn(why, said)
             self.assertFalse(any("rm" in c for c in r.calls))
 
+    TABLE = [
+        (1, 0, 0, ["/sbin/init"], "/"),
+        (50, 1000, 1, ["/usr/bin/python3", "/usr/local/bin/aiov2_ctl", "--gui"], "/home/shane"),
+        (60, 1000, 1, ["/usr/bin/python3", "-m", "ops_gui"], "/home/shane/ops-agentic"),
+        (61, 1000, 1, ["python3", "/home/shane/ops-agentic/ops.py"], "/home/shane/ops-agentic"),
+        (62, 1000, 1, ["bash"], "/home/shane/ops-agentic"),
+        (63, 1000, 1, ["/usr/bin/python3", "-m", "ops_gui"], "/home/shane/somewhere-else"),
+        (64, 1001, 1, ["/usr/bin/python3", "-m", "ops_gui"], "/home/shane/ops-agentic"),
+        (70, 1000, 60, ["pkexec", "aiov2_ctl", "--uninstall"], "/"),
+        (71, 0, 70, ["python3", "/usr/local/bin/aiov2_ctl", "--uninstall"], "/"),
+    ]
+
+    def test_only_the_users_own_app_and_console_in_that_folder_are_closed(self):
+        wanted = a.runs_ops_from("/home/shane/ops-agentic")
+        self.assertEqual(a.processes_to_close(self.TABLE, 1000, 999, wanted), ([60, 61], False))
+
+    def test_the_app_that_asked_for_the_removal_is_not_closed(self):
+        wanted = a.runs_ops_from("/home/shane/ops-agentic")
+        self.assertEqual(a.processes_to_close(self.TABLE, 1000, 71, wanted), ([61], True))
+
+    def test_the_tray_is_closed_unless_it_asked(self):
+        closed = []
+        close = lambda pids: closed.extend(pids) or len(pids)
+        with mock.patch.object(a.pwd, "getpwnam", return_value=mock.Mock(pw_uid=1000)), \
+                mock.patch.object(a.os, "getpid", return_value=999):
+            self.assertEqual(a._un_close_tray({}, {"user": "shane"}, table=self.TABLE, close=close), ("done", ""))
+            self.assertEqual(closed, [50])
+            self.assertEqual(a._un_close_tray({}, {"user": "shane"}, table=self.TABLE[:1], close=close),
+                             ("already", ""))
+            mine = self.TABLE + [(80, 0, 50, ["python3", "x"], "/")]
+        with mock.patch.object(a.pwd, "getpwnam", return_value=mock.Mock(pw_uid=1000)), \
+                mock.patch.object(a.os, "getpid", return_value=80):
+            self.assertEqual(a._un_close_tray({}, {"user": "shane"}, table=mine, close=close)[0], "note")
+        self.assertEqual(closed, [50])
+
+    def test_closing_asks_and_never_forces(self):
+        sent, left = [], {7}
+        def kill(pid, sig):
+            sent.append((pid, sig))
+            left.discard(pid) if pid == 7 else None
+        left.add(8)
+        gone = a.close_processes([7, 8], kill=kill, alive=lambda p: p in left, sleep=lambda s: None, wait=0.4)
+        self.assertEqual(sent, [(7, 15), (8, 15)])
+        self.assertEqual(gone, 1)
+
+    def test_the_compiled_copies_of_the_program_are_found(self):
+        names = ["aiov2_ctlcpython-313.pyc", "aiov2_ctl.cpython-311.pyc", "other.cpython-313.pyc",
+                 "aiov2_ctl_helper.cpython-313.pyc", "aiov2_ctlcpython-313.txt"]
+        got = a.compiled_copies("/usr/local/bin/aiov2_ctl", listdir=lambda d: names)
+        self.assertEqual(got, ["/usr/local/bin/__pycache__/aiov2_ctl.cpython-311.pyc",
+                               "/usr/local/bin/__pycache__/aiov2_ctlcpython-313.pyc"])
+        def missing(d):
+            raise FileNotFoundError(d)
+        self.assertEqual(a.compiled_copies("/usr/local/bin/aiov2_ctl", listdir=missing), [])
+
+    def test_the_plan_says_the_login_entry_does_not_come_back_by_itself(self):
+        everything = a.uninstall_selection()
+        self.assertIn("aiov2_ctl --autostart", a.format_uninstall_plan(a.uninstall_plan(everything, self.st()),
+                                                                       everything))
+        only = a.uninstall_selection(["tray"])
+        self.assertNotIn("aiov2_ctl --autostart", a.format_uninstall_plan(a.uninstall_plan(only, self.st()), only))
+
     def test_a_clean_checkout_holds_nothing(self):
         r = self.runner([])
         self.assertEqual(a.checkout_holds_nothing("/home/shane/ops-agentic", "shane", r.run), (True, ""))
@@ -1391,8 +1453,16 @@ class UninstallTests(unittest.TestCase):
             dirty = self.runner([("status --porcelain", (0, "?? notes.txt\n", ""))])
             self.assertEqual(a._un_checkout(step, ctx, run=dirty.run)[0], "note")
             self.assertFalse(any("rm" in c for c in dirty.calls))
+            closed = []
+            self.assertEqual(a._un_checkout(step, ctx, run=dirty.run, closer=lambda u, w: closed.append(u))[0],
+                             "note")
+            self.assertEqual(closed, [], "nothing is closed when the folder stays")
+            asked = self.runner([])
+            status, words = a._un_checkout(step, ctx, run=asked.run, closer=lambda u, w: (0, True))
+            self.assertEqual(status, "done")
+            self.assertIn("still open", words)
             clean = self.runner([])
-            self.assertEqual(a._un_checkout(step, ctx, run=clean.run), ("done", ""))
+            self.assertEqual(a._un_checkout(step, ctx, run=clean.run, closer=lambda u, w: (0, False)), ("done", ""))
             self.assertEqual(clean.calls[-1][-4:], ["rm", "-rf", "--", "/home/shane/ops-agentic"])
         with mock.patch.object(a, "checkout_state", return_value="other"):
             other = self.runner([])
@@ -1403,7 +1473,8 @@ class UninstallTests(unittest.TestCase):
         sel = ["flipper", "gps", "app", "tray"]
         plan = a.uninstall_plan(sel, self.st())
         by = {"un.flipper.udev": ("done", ""), "un.gps.kept": ("note", ""), "un.app.shortcut": ("already", ""),
-              "un.app.checkout-kept": ("note", ""), "un.tray.desktop-entry": ("failed", "busy")}
+              "un.app.checkout-kept": ("note", ""), "un.tray.close": ("already", ""),
+              "un.tray.desktop-entry": ("failed", "busy")}
         rows = dict((k, s) for k, s, _ in a.uninstall_results(sel, [(s, *by[s["id"]]) for s in plan]))
         self.assertEqual(rows, {"flipper": "removed", "gps": "nothing to remove", "app": "was not there",
                                 "tray": "failed"})
