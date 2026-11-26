@@ -969,6 +969,55 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertNotIn("rm -rf \"$DIR\"", text)
 
 
+class OpsIncomingTests(unittest.TestCase):
+    """An update also offers changes that are only in the ops app."""
+
+    def runner(self, url="https://github.com/AceMedia/uConsole-AIO-OPS.git", branch="beta", fetch=0,
+               log="abc123 one\ndef456 two\n"):
+        calls = []
+
+        def run(cmd, cwd=None, timeout=None):
+            calls.append(cmd)
+            if "get-url" in cmd:
+                return 0, url + "\n", ""
+            if "rev-parse" in cmd:
+                return 0, branch + "\n", ""
+            if "fetch" in cmd:
+                return fetch, "", ""
+            if "log" in cmd:
+                return 0, log, ""
+            return 1, "", ""
+        return run, calls
+
+    def look(self, **kw):
+        run, calls = self.runner(**kw)
+        return a.ops_incoming("/home/u/ops-agentic", run=run, isdir=lambda p: True), calls
+
+    def test_it_lists_what_waits_on_the_folders_own_branch(self):
+        got, calls = self.look()
+        self.assertEqual(got, ["abc123 one (ops app)", "def456 two (ops app)"])
+        self.assertIn("HEAD..origin/beta", calls[-1])
+        self.assertTrue(all(c[:2] == ["env", "GIT_TERMINAL_PROMPT=0"] for c in calls))
+
+    def test_it_changes_no_file(self):
+        _, calls = self.look()
+        for c in calls:
+            self.assertFalse({"pull", "merge", "checkout", "reset"} & set(c), c)
+
+    def test_nothing_when_there_is_no_checkout_or_it_is_another_repository(self):
+        run, calls = self.runner()
+        self.assertEqual(a.ops_incoming("/home/u/ops-agentic", run=run, isdir=lambda p: False), [])
+        self.assertEqual(calls, [])
+        got, calls = self.look(url="https://github.com/someone/else.git")
+        self.assertEqual(got, [])
+        self.assertFalse(any("fetch" in c for c in calls))
+
+    def test_nothing_when_it_cannot_be_reached_or_is_on_no_branch_or_is_up_to_date(self):
+        self.assertEqual(self.look(fetch=1)[0], [])
+        self.assertEqual(self.look(branch="HEAD")[0], [])
+        self.assertEqual(self.look(log="")[0], [])
+
+
 class SourceCheckoutTests(unittest.TestCase):
     """Which copy of the program an install puts in place."""
 
