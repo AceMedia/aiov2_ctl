@@ -104,7 +104,7 @@ What it does and does not do:
 - The ops app lives in the home of the user who ran `sudo`, and every `git` and `python3` command in that home runs as that user, never as root. An existing checkout is updated with `git pull --ff-only`; one with your own changes, or one that has gone its own way, is reported and left alone.
 - The ops app repository is private. If the clone is refused, sign in with `gh auth login` (then `gh auth setup-git`), or clone it by hand to `~/ops-agentic`, and run the install again.
 - The console's remaining Python packages (`meshtastic`, and `textual` or `numpy` where apt does not have them) are installed by the console itself on its first run, as you. The installer never runs pip as root.
-- If `install.sh` had to fall back to downloading the one program file (no `git`, or the clone failed), there is no checkout of this tool: the tray uses a stock icon and `aiov2_ctl --update` has nothing to pull from. Install `git` and run `install.sh` again.
+- If `install.sh` had to fall back to downloading the one program file (`git` was missing and was not installed, or the clone failed), there is no checkout of this tool: the tray uses a stock icon and `aiov2_ctl --update` has nothing to pull from. Install `git` and run `install.sh` again.
 
 ---
 

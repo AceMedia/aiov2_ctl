@@ -574,6 +574,22 @@ class CheckoutTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_package_lists_are_seen_only_when_apt_has_fetched_some(self):
+        self.assertTrue(a.package_lists_present(lambda p: ["lock", "deb.debian.org_debian_dists_trixie_main_binary-arm64_Packages"]))
+        self.assertTrue(a.package_lists_present(lambda p: ["x_main_binary-arm64_Packages.lz4"]))
+        self.assertFalse(a.package_lists_present(lambda p: ["lock", "partial", "x_InRelease"]))
+        def gone(p):
+            raise FileNotFoundError(p)
+        self.assertFalse(a.package_lists_present(gone))
+
+    def test_with_no_package_lists_the_plan_says_so_and_calls_no_package_missing(self):
+        plan = a.install_plan(a.feature_keys(), NOTHING_THERE, state(no_package_lists=True))
+        text = a.format_plan(plan, a.feature_keys())
+        self.assertEqual(text.count("has not fetched its package lists"), 1)
+        self.assertNotIn("is not in this system's package sources", text)
+        usual = a.format_plan(a.install_plan(a.feature_keys(), NOTHING_THERE, state()), a.feature_keys())
+        self.assertNotIn("has not fetched its package lists", usual)
+
     def test_the_version_apt_would_install_is_read_and_none_means_not_available(self):
         self.assertEqual(a.apt_candidate("gpsd:\n  Installed: (none)\n  Candidate: 3.22-4.1\n"), "3.22-4.1")
         self.assertIsNone(a.apt_candidate("meshtasticd:\n  Installed: (none)\n  Candidate: (none)\n"))
@@ -960,6 +976,55 @@ class BootstrapScriptTests(unittest.TestCase):
                 self.assertNotIn("using the checkout", done.stdout, origin)
                 self.assertNotIn("STUB", done.stdout, origin)
                 self.assertIn("DOWNLOADED", done.stdout, origin)
+
+    def without_git(self, base, args):
+        """Run the script with a PATH that has no git, and stand-ins for sudo, apt-get and curl that only
+        note what they were asked."""
+        bin_dir = os.path.join(base, "bin")
+        os.makedirs(bin_dir)
+        for tool in ("sh", "sed", "tr", "id", "python3", "mktemp", "rm", "cat"):
+            os.symlink(shutil.which(tool), os.path.join(bin_dir, tool))
+        log = os.path.join(base, "asked.txt")
+        stand_ins = {
+            "sudo": f'#!/bin/sh\necho "sudo $*" >> {log}\n[ "$1" = python3 ] && exit 0\nexec "$@"\n',
+            "apt-get": f'#!/bin/sh\necho "apt-get $*" >> {log}\n',
+            "curl": '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n'
+                    'echo "print(1)" > "$out"\n',
+        }
+        for name, text in stand_ins.items():
+            with open(os.path.join(bin_dir, name), "w") as f:
+                f.write(text)
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+        env = {"HOME": base, "PATH": bin_dir, "AIOV2_RECORD": os.path.join(base, "none.json")}
+        done = subprocess.run(["sh", self.PATH, *args], env=env, capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+        asked = open(log).read() if os.path.exists(log) else ""
+        return done, asked
+
+    @unittest.skipUnless(os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs a Debian-like system and an ordinary user")
+    def test_without_git_and_with_yes_it_installs_git_first_and_says_so(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            done, asked = self.without_git(base, ["--yes", "--only", "core"])
+            self.assertIn("git is not installed", done.stdout)
+            self.assertIn("About to run as root: sudo apt-get update, then sudo apt-get install -y git", done.stdout)
+            self.assertIn("apt-get update -q\n", asked)
+            self.assertIn("apt-get install -y -q git\n", asked)
+            self.assertLess(asked.index("apt-get install"), asked.index("sudo python3"))
+
+    @unittest.skipUnless(os.path.exists("/etc/os-release") and os.geteuid() != 0,
+                         "needs a Debian-like system and an ordinary user")
+    def test_without_git_and_nobody_to_ask_it_installs_nothing_extra(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as base:
+            done, asked = self.without_git(base, ["--only", "core"])
+            self.assertIn("carrying on without git", done.stdout)
+            self.assertNotIn("apt-get", asked)
+        with tempfile.TemporaryDirectory() as base:
+            done, asked = self.without_git(base, ["--dry-run"])
+            self.assertNotIn("git is not installed", done.stdout)
+            self.assertEqual(asked, "")
 
     def test_a_folder_that_is_some_other_project_is_never_pulled_or_run(self):
         text = self.text()
