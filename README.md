@@ -58,8 +58,8 @@ sudo aiov2_ctl --install --yes             # do not ask; needed when there is no
 | --- | --- | --- |
 | `core` | always | the `aiov2_ctl` command, bash completion, the rail boot service, the password-free rules |
 | `tray` | on | the tray (`--gui`), its icons and start-menu entry, the installer window's start-menu entry, `python3-pyqt6` |
-| `app` | on | the uConsole Ops app, fetched to `~/ops-agentic`, with its start-menu shortcut, `python3-pyqt6`, `fonts-spleen` |
-| `console` | on | the Ops console (`ops.py`) from the same checkout, `python3-textual`, `python3-numpy` |
+| `app` | on | the uConsole Ops app (`ops_gui/` in this repository), with its start-menu shortcut, `python3-pyqt6`, `fonts-spleen` |
+| `console` | on | the Ops console (`ops.py` and `ops_agent/` in this repository), `python3-textual`, `python3-numpy` |
 | `gps` | on | `gpsd` |
 | `mesh` | on | `meshtasticd` |
 | `sdr` | on | `rtl-sdr` and the readsb tuner recovery |
@@ -89,20 +89,20 @@ aiov2_ctl --channel stable  # and back
 ```
 
 - **Stable** is the `main` branch. **Beta** is the `beta` branch, where changes are tried first.
-- Switching checks out the other branch of the checkout this was installed from, then updates in the usual way. It keeps to the features you have, and the ops app's folder follows the same channel where its repository has one.
+- Switching checks out the other branch of the checkout this was installed from, then updates in the usual way. It keeps to the features you have. The ops app and console are in the same checkout, so they change channel with it.
 - Going back to stable installs an older version. What the newer one set up is not removed.
 - A repository with no `beta` branch has no beta channel; the command says so and changes nothing.
 - The ops app has the same switch under Settings > Features.
 
 What it does and does not do:
 
-- `--uninstall` removes only what this tool wrote. It never removes a package, switches a rail, or stops a radio service, and your saved rail settings and the app's logs and settings are left. The ops app folder is removed only when it holds nothing of yours (no changed files, nothing unpushed, nothing stashed). Add `--dry-run` to see the plan first.
+- `--uninstall` removes only what this tool wrote. It never removes a package, switches a rail, or stops a radio service, and your saved rail settings and the app's logs and settings are left. The ops app's files are part of this tool's checkout and stay there. Add `--dry-run` to see the plan first.
 - `--repair` goes by the installer's own record of what was installed, so it never adds a feature you did not have.
 - It prints the plan and asks once before changing anything. It ends with a line per feature: installed, already there, or failed and why. One feature failing does not stop the others.
 - It never switches a rail on or starts a radio. Nothing is made to start at boot except the tool's own rail boot service and SDR check (as install has always done) and, if you pick `autostart`, the tray. A service that a package enables as it installs (`gpsd`, `meshtasticd`, `readsb`) is switched back off when this install is what added it; one that was already there is left exactly as it is.
 - Hardware that is not found (a rail that is off, no Flipper plugged in) does not stop a feature being installed: the plan says what was not found.
-- The ops app lives in the home of the user who ran `sudo`, and every `git` and `python3` command in that home runs as that user, never as root. An existing checkout is updated with `git pull --ff-only`; one with your own changes, or one that has gone its own way, is reported and left alone.
-- The ops app repository is private. If the clone is refused, sign in with `gh auth login` (then `gh auth setup-git`), or clone it by hand to `~/ops-agentic`, and run the install again.
+- The ops app and the ops console are part of this repository (`ops_gui/`, `ops_agent/`, `ops.py`). They run from the checkout this tool was installed from, as the user who ran `sudo`, never as root. An install made from a single downloaded file has no checkout and so no app: install `git` and run `install.sh` again.
+- Earlier versions kept the ops app in a folder of its own, `~/ops-agentic`. An install or update removes that folder when it holds nothing of yours (no changed files, nothing unpushed, nothing stashed), and otherwise leaves it and says why.
 - The console's remaining Python packages (`meshtastic`, and `textual` or `numpy` where apt does not have them) are installed by the console itself on its first run, as you. The installer never runs pip as root.
 - If `install.sh` had to fall back to downloading the one program file (`git` was missing and was not installed, or the clone failed), there is no checkout of this tool: the tray uses a stock icon and `aiov2_ctl --update` has nothing to pull from. Install `git` and run `install.sh` again.
 
@@ -417,13 +417,26 @@ Behaviour:
 
 ## 9) Running the tests
 
-The tests mock all GPIO, sysfs and systemd access, so they run on any machine without touching the board:
+The tests cover this tool, the ops app and the ops console. They mock all GPIO, sysfs and systemd access and need no display, so they run on any machine without touching the board:
 
 ```bash
 python3 -m unittest discover -s tests
 ```
 
 `python3 -m pytest tests` works too if pytest is installed.
+
+### Where things are
+
+| Path | What is in it |
+|---|---|
+| `aiov2_ctl.py` | The command line, the tray, the installer and everything that runs as root. |
+| `ops_gui/` | The ops app: one module per tab or page, with `app.py` as the window. |
+| `ops_agent/` | The ops console (`ui.py`) and the GPS, LoRa and SDR engines the app shares with it. |
+| `ops.py` | Starts the ops console. |
+| `tests/` | Unit tests for all of the above. |
+| `docs/DESIGN.md` | The ops app's pixel look: where colours, corners, fonts and the Home screen layout live. |
+
+The ops app keeps each module's logic in plain functions above the code that builds the page, so it can be tested without a screen or a radio. Anything that draws is checked by running it on a real uConsole.
 
 ---
 

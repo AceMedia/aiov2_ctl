@@ -6751,8 +6751,12 @@ def ensure_sudo_path_link(dst):
 #     is switched back off if this install is what added it;
 #   - root does only what needs root: git and python in the user's home run as that user.
 
+# The ops app and the ops console are part of this repository: ops_gui/, ops_agent/ and ops.py, beside this
+# file. They run, as the user, from the same checkout this tool is installed from. They used to be a repository
+# of their own, cloned into a folder in the user's home; that folder is only recognised now, so that an install
+# or an uninstall can clear it away.
+APP_FILES = (os.path.join("ops_gui", "__main__.py"), "ops.py")
 OPS_REPO_NAME = "AceMedia/uConsole-AIO-OPS"
-OPS_REPO_URL = f"https://github.com/{OPS_REPO_NAME}.git"
 OPS_CHECKOUT_NAME = "ops-agentic"
 FLIPPER_USB_ID = ("0483", "5740")
 RTLSDR_USB_IDS = (("0bda", "2832"), ("0bda", "2838"))
@@ -7052,11 +7056,29 @@ def as_user(user, cmd, euid=None, env=None):
 
 
 def ops_checkout_path(home):
+    """Where the ops app used to be cloned, when it was a repository of its own."""
     return os.path.join(home, OPS_CHECKOUT_NAME)
 
 
+def app_source(repo, isfile=os.path.isfile):
+    """The folder the ops app and console run from: this tool's checkout when it holds them, else None. An
+    install made from a single downloaded file has no checkout, and so no app."""
+    if repo and all(isfile(os.path.join(repo, name)) for name in APP_FILES):
+        return repo
+    return None
+
+
+def source_repo():
+    """The checkout this run would install from, or None: the one it is run from, else the one an earlier
+    install recorded."""
+    recorded = (load_install_meta() or {}).get("repo_path")
+    repo = source_checkout(os.path.realpath(__file__), os.path.realpath(INSTALLED_PATH), get_git_root(),
+                           recorded if recorded and os.path.isdir(recorded) else None)
+    return os.path.realpath(repo) if repo else None
+
+
 def is_ops_remote(url):
-    """True when a git remote address is the ops repository, however it is spelled (https, ssh, with or without
+    """True when a git remote address is the old ops repository, however it is spelled (https, ssh, with or without
     .git)."""
     text = (url or "").strip().lower()
     if text.endswith(".git"):
@@ -7078,8 +7100,8 @@ def _run_text(cmd, cwd=None, timeout=None):
 
 
 def checkout_state(path, user, run=_run_text, lstat=os.lstat, euid=None):
-    """What is at the place the ops checkout goes: 'missing', 'ours' (that repository), 'link' (a symbolic link,
-    never followed), 'not-git' (something else is there) or 'other' (a different repository). git runs as the
+    """What is at the place the ops app used to be cloned: 'missing', 'ours' (that repository), 'link' (a
+    symbolic link, never followed), 'not-git' (something else is there) or 'other' (a different repository). git runs as the
     user, never as root."""
     try:
         st = lstat(path)
@@ -7161,17 +7183,18 @@ def install_state(environ=None, euid=None, run=_run_text):
         present.add("udev")
     if os.path.isfile(SDR_RECOVERY_DROPIN_PATH):
         present.add("sdr-recovery")
-    checkout = "missing"
+    source = app_source(source_repo())
+    old_checkout = False
     if who:
-        checkout = checkout_state(ops_checkout_path(who.pw_dir), who.pw_name, run, euid=euid)
+        old_checkout = checkout_state(ops_checkout_path(who.pw_dir), who.pw_name, run, euid=euid) == "ours"
         apps = os.path.join(who.pw_dir, ".local", "share", "applications")
         for marker, (_, name, _) in zip(("gui-shortcut", "console-shortcut"), OPS_SHORTCUTS):
             if os.path.isfile(os.path.join(apps, name)):
                 present.add(marker)
         if os.path.isfile(os.path.join(who.pw_dir, ".config", "autostart", "aiov2_ctl.desktop")):
             present.add("autostart")
-    if checkout == "ours":
-        present.add("checkout")
+    if source:
+        present.add("app-files")
     # The rules file can only be read by root; anyone else asks sudo what they may run, which needs no password
     # once the rules are there.
     listening = None
@@ -7190,7 +7213,8 @@ def install_state(environ=None, euid=None, run=_run_text):
     return {
         "user": who.pw_name if who else None,
         "home": who.pw_dir if who else None,
-        "checkout": checkout,
+        "app_source": source,
+        "old_checkout": old_checkout,
         "installed": installed,
         "unavailable": unavailable,
         "no_package_lists": not lists,
@@ -7202,8 +7226,8 @@ def install_state(environ=None, euid=None, run=_run_text):
 FEATURE_MARKERS = {
     "core": ("exe", "completion", "rails-unit"),
     "tray": ("desktop-entry",),
-    "app": ("checkout", "gui-shortcut"),
-    "console": ("checkout", "console-shortcut"),
+    "app": ("app-files", "gui-shortcut"),
+    "console": ("app-files", "console-shortcut"),
     "sdr": ("sdr-recovery",),
     "listening": ("sudoers-listening",),
     "flipper": ("udev",),
@@ -7270,7 +7294,7 @@ def _hold_step(key):
 
 
 def _ops_steps(key, selected, state):
-    """The checkout and the shortcuts, shared by the app and the console: planned once, under whichever of the
+    """The shortcuts, shared by the app and the console (their files are this tool's own checkout): planned once, under whichever of the
     two comes first, and counted for both."""
     both = [k for k in ("app", "console") if k in selected]
     if key != both[0]:
@@ -7279,37 +7303,31 @@ def _ops_steps(key, selected, state):
     user, home = state.get("user"), state.get("home")
     if not user or not home:
         return [_step(key, "no-user", "note", NO_USER_MESSAGE, False, "", shared_with=shared, blocks=True)]
-    path = ops_checkout_path(home)
-    kind = state.get("checkout", "missing")
-    steps = []
-    if kind == "missing":
-        steps.append(_step(key, "checkout", "clone",
-                           f"Fetch the ops app into {path} as {user}: git clone {OPS_REPO_URL}. The repository "
-                           f"is private, so this needs your GitHub access.", False,
-                           f"Remove the folder {path}", path=path, shared_with=shared))
-    elif kind == "ours":
-        steps.append(_step(key, "checkout", "pull",
-                           f"Update the ops app in {path} as {user}: git pull --ff-only. A checkout with your "
-                           f"own changes, or one that has gone its own way, is reported and left alone.", False,
-                           "", path=path, shared_with=shared))
-    else:
-        why = {"link": "is a link", "other": "is a different repository"}.get(kind, "is not that repository")
-        steps.append(_step(key, "checkout-blocked", "note",
-                           f"{path} is there but {why}, so the ops app is not put there and nothing in it is "
-                           f"changed. Move it away and run the install again.", False, "",
-                           shared_with=shared, blocks=True))
-        return steps
-    steps.append(_step(key, "launchers", "launchers",
-                       f"Write the start-menu shortcuts (uConsole Ops and uConsole Ops Console) as {user}: "
-                       f"python3 -m ops_gui --install-launchers, run in {path}.", False,
-                       f"Run in {path}: python3 -m ops_gui --remove-launchers", path=path, shared_with=shared))
+    path = state.get("app_source")
+    if not path:
+        return [_step(key, "no-files", "note",
+                      "The ops app and console come with this tool's git checkout, and this install has none: "
+                      "it was put in from a single downloaded file. Install git and run install.sh again, and "
+                      "they go in with it.", False, "", shared_with=shared, blocks=True)]
+    steps = [_step(key, "launchers", "launchers",
+                   f"Write the start-menu shortcuts (uConsole Ops and uConsole Ops Console) as {user}: "
+                   f"python3 -m ops_gui --install-launchers, run in {path}. The app and the console run from "
+                   f"that folder, as {user}.", False,
+                   f"Run in {path}: python3 -m ops_gui --remove-launchers", path=path, shared_with=shared)]
+    if state.get("old_checkout"):
+        old = ops_checkout_path(home)
+        steps.append(_step(key, "old-folder", "old-folder",
+                           f"Remove {old}, as {user}: the ops app used to be kept there and now comes with "
+                           f"this tool. Only if it holds nothing of yours: no changed files, nothing unpushed, "
+                           f"nothing stashed. Otherwise it is left and you are told why.", False, "",
+                           path=old, shared_with=shared))
     return steps
 
 
 def install_plan(selected_keys, facts, state):
     """The steps that install a selection, in order, as plain data. Pure: reads nothing and changes nothing.
 
-    Each step is a dict: id, feature, kind (apt, copy, sudoers, udev, systemd, service-off, clone, pull,
+    Each step is a dict: id, feature, kind (apt, copy, sudoers, udev, systemd, service-off, old-folder,
     launchers, desktop-entry, autostart, note), detail in plain words, root (whether it needs root), undo (how
     to take it back, '' when there is nothing to take back). Dependencies are added. A feature whose hardware
     was not found is still planned, with a note saying what was missing."""
@@ -7685,21 +7703,6 @@ def pick_features(picker, state, facts, ask=input, say=print, screen=pick_on_scr
 # ---- carrying a plan out --------------------------------------------------------------------------------------
 # Each action returns (status, words): 'done', 'already' (nothing needed changing), 'failed' or 'note'.
 
-def clone_failure_message(stderr, path):
-    """What to tell the user when git clone failed."""
-    text = (stderr or "").lower()
-    no_access = any(s in text for s in (
-        "authentication failed", "could not read username", "could not read password", "repository not found",
-        "permission denied", "terminal prompts disabled", "403", "access denied", "invalid credentials"))
-    if no_access:
-        return (f"GitHub would not let this account read {OPS_REPO_NAME}: it is a private repository. Sign in "
-                f"with 'gh auth login' (then 'gh auth setup-git'), or clone it by hand to {path}, and run the "
-                f"install again. Everything else was still installed.")
-    last = [l for l in (stderr or "").strip().splitlines() if l.strip()]
-    return (f"git clone failed{': ' + last[-1].strip() if last else ''}. Check the network, or clone "
-            f"{OPS_REPO_URL} by hand to {path}, and run the install again.")
-
-
 def source_checkout(this_file, installed_path, git_root, recorded):
     """The checkout to install from, or None to install the running file itself. The file being run always
     wins: its own git checkout if it is in one, else itself. Only the installed copy running itself falls back
@@ -7878,50 +7881,11 @@ def _act_sdr_recovery(step, ctx):
     return ("done" if changed else "already"), ""
 
 
-def _act_checkout(step, ctx, run=_run_text):
-    user, path = ctx.get("user"), step["path"]
-    if not user:
-        return "failed", NO_USER_MESSAGE
-    # Looked at again now: the plan may be minutes old.
-    kind = checkout_state(path, user, run)
-    if kind == "missing":
-        # No prompt for a name and password: GitHub no longer takes them, and an unattended run must not hang.
-        rc, _, err = run(as_user(user, ["git", "clone", OPS_REPO_URL, path], env={"GIT_TERMINAL_PROMPT": "0"}),
-                         cwd="/", timeout=900)
-        if rc != 0:
-            return "failed", clone_failure_message(err, path)
-        return "done", ""
-    if kind != "ours":
-        return "failed", (f"{path} is there but is not a checkout of {OPS_REPO_NAME}; it was left alone. Move it "
-                          f"away and run the install again")
-    rc, out, _ = run(as_user(user, ["git", "-C", path, "status", "--porcelain", "--untracked-files=no"]),
-                     cwd="/", timeout=120)
-    if rc != 0 or out.strip():
-        return "already", f"{path} has changes of your own, so it was not updated and nothing in it was touched"
-    wanted = ((ctx.get("source") or (None, None, {}))[2] or {}).get("branch")
-    try:
-        with open(os.path.join(path, ".git", "HEAD")) as f:
-            current = branch_from_head(f.read())
-    except OSError:
-        current = None
-    if wanted and current and wanted != current and channel_of(wanted) and channel_of(current):
-        # The controller is on another channel than this folder: follow it where the app's repository has it.
-        rc, out, _ = run(as_user(user, ["git", "-C", path, "ls-remote", "--heads", "origin"],
-                                 env={"GIT_TERMINAL_PROMPT": "0"}), cwd="/", timeout=120)
-        target = app_branch_for(wanted, current, remote_heads(out) if rc == 0 else None)
-        if target != current:
-            for cmd in (["fetch", "--quiet", "origin", f"+refs/heads/{target}:refs/remotes/origin/{target}"],
-                        ["checkout", "--quiet", target]):
-                rc, _, _ = run(as_user(user, ["git", "-C", path, *cmd], env={"GIT_TERMINAL_PROMPT": "0"}),
-                               cwd="/", timeout=900)
-                if rc != 0:
-                    return "already", f"{path} could not be moved to the {target} branch; it was left as it is"
-    rc, out, err = run(as_user(user, ["git", "-C", path, "pull", "--ff-only"], env={"GIT_TERMINAL_PROMPT": "0"}),
-                       cwd="/", timeout=900)
-    if rc != 0:
-        return "already", (f"{path} could not be updated (it has gone its own way, or GitHub could not be "
-                           f"reached); it was left as it is")
-    return ("already" if "up to date" in out.lower() else "done"), ""
+def _act_old_folder(step, ctx, run=_run_text, closer=None):
+    """Clear away the folder the ops app used to be cloned into, under the same rule an uninstall uses: only
+    when it holds nothing of the user's. An app running from it that asked for this install keeps its folder:
+    it goes at the next install, once the app has been started again from its new place."""
+    return _remove_ops_folder(step["path"], ctx, run, closer, keep_if_asked=True)
 
 
 def _shortcut_texts(home):
@@ -7943,7 +7907,7 @@ def _act_launchers(step, ctx, run=_run_text):
     user, home, path = ctx.get("user"), ctx.get("home"), step["path"]
     if not user or not home:
         return "failed", NO_USER_MESSAGE
-    if checkout_state(path, user, run) != "ours":
+    if not app_source(path):
         return "failed", "the ops app is not there, so no shortcuts were written"
     before = _shortcut_texts(home)
     python3 = "/usr/bin/python3"
@@ -7984,8 +7948,7 @@ INSTALL_ACTIONS = {
 INSTALL_ACTIONS_BY_KIND = {
     "apt": _act_apt,
     "service-off": _act_service_off,
-    "clone": _act_checkout,
-    "pull": _act_checkout,
+    "old-folder": _act_old_folder,
     "launchers": _act_launchers,
     "note": _act_note,
 }
@@ -8131,7 +8094,7 @@ MARKER_WORDS = {
     "completion": "bash completion",
     "rails-unit": "the rail boot service",
     "desktop-entry": "the tray's start-menu entry",
-    "checkout": "the ops app folder",
+    "app-files": "the ops app's own files, which come with this tool's checkout",
     "gui-shortcut": "the uConsole Ops shortcut",
     "console-shortcut": "the uConsole Ops Console shortcut",
     "sdr-recovery": "the readsb recovery",
@@ -8153,12 +8116,12 @@ def feature_missing(key, state):
 def features_in_place(state):
     """The features that look installed, for a machine set up before installs were recorded. A package on its
     own proves nothing (git and iw are on most machines), so a feature counts only by something this tool wrote
-    for it. The app and the console count by their own shortcut, since they share the folder. The features that
+    for it. The app and the console count by their own shortcut, since they share their files. The features that
     are only a package (GPS, mesh, aircraft) count when the package is here and this tool is too."""
     present = state.get("present", ())
     found = []
     for key in feature_keys():
-        own = [m for m in FEATURE_MARKERS.get(key, ()) if m != "checkout"]
+        own = [m for m in FEATURE_MARKERS.get(key, ()) if m != "app-files"]
         if own and any(m in present for m in own):
             found.append(key)
     if found:
@@ -8407,17 +8370,6 @@ def switch_summary(name, incoming, leaving):
     return "\n".join(lines)
 
 
-def app_branch_for(wanted, current, heads):
-    """The branch the ops app's folder should be on when the controller follows `wanted`. The app follows the
-    same channel when its repository has it, and stable otherwise. A folder on a branch that is not a channel
-    is someone's own work and is left where it is."""
-    if channel_of(wanted) is None or channel_of(current) is None or heads is None:
-        return current
-    if wanted in heads:
-        return wanted
-    return "main" if "main" in heads else current
-
-
 def _update_source():
     """(repo, branch) to update from, or (None, None) after saying why not."""
     meta = load_install_meta()
@@ -8447,32 +8399,6 @@ def channel_look(repo, branch, run=_run_text):
     return heads, (out.strip().splitlines() if rc == 0 else None), ""
 
 
-def ops_incoming(path, run=_run_text, isdir=os.path.isdir):
-    """The ops app's changes waiting on the branch its folder is on, newest first, each marked '(ops app)'. []
-    when there is no checkout at `path`, it is not the ops repository, or it could not be reached. Fetches;
-    changes no file. An update pulls the app as well as this tool, so a change to the app alone is an update."""
-    if not isdir(os.path.join(path, ".git")):
-        return []
-    git = ["env", "GIT_TERMINAL_PROMPT=0", "git", "-C", path]
-    rc, url, _ = run(git + ["remote", "get-url", "origin"], timeout=10)
-    if rc != 0 or not is_ops_remote(url):
-        return []
-    rc, branch, _ = run(git + ["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
-    branch = branch.strip()
-    if rc != 0 or not branch or branch == "HEAD":
-        return []
-    if run(git + ["fetch", "--quiet", "origin", branch], timeout=120)[0] != 0:
-        return []
-    rc, out, _ = run(git + ["log", "--oneline", "--no-decorate", f"HEAD..origin/{branch}"], timeout=60)
-    if rc != 0:
-        return []
-    return [f"{line.strip()} (ops app)" for line in out.splitlines() if line.strip()]
-
-
-def ops_waiting():
-    return ops_incoming(ops_checkout_path(os.path.expanduser("~")))
-
-
 def channel_command(args=()):
     args = list(args or ())
     yes = any(a in ("--yes", "-y") for a in args)
@@ -8485,8 +8411,6 @@ def channel_command(args=()):
         if not repo:
             return 1
         heads, incoming, error = channel_look(repo, branch)
-        if incoming is not None:
-            incoming = incoming + ops_waiting()
         how = None
         if rest:
             how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
@@ -8594,7 +8518,7 @@ def format_repair(selected, state):
 
 # ---- uninstall ------------------------------------------------------------------------------------------------
 # Removes what this tool wrote and nothing else. It never removes a package, never switches a rail, never stops
-# a radio service, and never deletes your saved data. The ops app folder goes only when it holds nothing of
+# a radio service, and never deletes your saved data. The old ops app folder goes only when it holds nothing of
 # yours: no changed files, nothing unpushed, nothing stashed.
 
 UNINSTALL_USAGE = (
@@ -8691,22 +8615,26 @@ def uninstall_plan(selected, state):
             plan.append(_unstep(key, "shortcut", "user-file",
                                 f"Remove the start-menu shortcut '{title}', as {user}.", False,
                                 paths=(os.path.join(apps, name),)))
+            src = state.get("app_source")
+            if src:
+                what = "uConsole Ops app" if key == "app" else "Ops console"
+                plan.append(_unstep(key, "close", "close-ops",
+                                    f"Close the {what} if it is running. If it is what asked for this, it is "
+                                    f"left open.", False, path=src, which=which))
             other = "console" if key == "app" else "app"
-            path = ops_checkout_path(home)
-            if other in selected:
-                # Planned once, under whichever of the two comes last, so both shortcuts go first.
-                if key == [k for k in selected if k in ("app", "console")][-1]:
-                    plan.append(_unstep(key, "checkout", "checkout",
-                                        f"Remove the ops app folder {path}, as {user}, but only if it holds "
-                                        f"nothing of yours: no changed files, nothing unpushed, nothing "
-                                        f"stashed. Otherwise it is left and you are told why. An ops app or "
-                                        f"console running from it is closed first. Your logs and "
-                                        f"settings in ~/.local/state/ops_gui are never touched.", False,
-                                        path=path, shared_with=(other,)))
-            else:
-                other_title = feature_row(other)["title"]
-                plan.append(_unstep(key, "checkout-kept", "note",
-                                    f"The ops app folder {path} stays: the {other_title} uses it too.", False))
+            last = key == [k for k in selected if k in ("app", "console")][-1]
+            if state.get("old_checkout") and other in selected and last:
+                old = ops_checkout_path(home)
+                plan.append(_unstep(key, "checkout", "checkout",
+                                    f"Remove {old}, as {user}: the folder the ops app used to be kept in. Only "
+                                    f"if it holds nothing of yours: no changed files, nothing unpushed, nothing "
+                                    f"stashed. Otherwise it is left and you are told why. An ops app or "
+                                    f"console running from it is closed first.", False,
+                                    path=old, shared_with=(other,)))
+            if last:
+                plan.append(_unstep(key, "files-kept", "note",
+                                    "The app's own files are part of this tool's checkout and stay there. Your "
+                                    "logs and settings in ~/.local/state/ops_gui are never touched.", False))
         elif key == "tray":
             plan.append(_unstep(key, "close", "close-tray",
                                 "Close the tray if it is running. If the tray is what asked for this, it is "
@@ -8799,14 +8727,15 @@ def is_tray_process(argv, cwd):
     return INSTALLED_PATH in argv[:2] and "--gui" in argv
 
 
-def runs_ops_from(path):
+def runs_ops_from(path, which=None):
     """A test for process_table rows: the ops app or the ops console, started in `path`. Not a shell or an
-    editor that merely has the folder open."""
+    editor that merely has the folder open. `which` narrows it to the app ('gui') or the console."""
     def test(argv, cwd):
         if cwd != path:
             return False
         app = any(a == "-m" and b == "ops_gui" for a, b in zip(argv, argv[1:]))
-        return app or any(os.path.basename(a) == "ops.py" for a in argv[1:])
+        console = any(os.path.basename(a) == "ops.py" for a in argv[1:])
+        return {"gui": app, "console": console}.get(which, app or console)
     return test
 
 
@@ -8971,12 +8900,14 @@ def checkout_holds_nothing(path, user, run=_run_text):
     return True, ""
 
 
-def _un_checkout(step, ctx, run=_run_text, closer=None):
-    user, home, path = ctx.get("user"), ctx.get("home"), step["path"]
+def _remove_ops_folder(path, ctx, run=_run_text, closer=None, keep_if_asked=False):
+    """Remove the folder the ops app used to be cloned into, and nothing else, when it holds nothing of the
+    user's. With `keep_if_asked`, an app running from it that asked for this keeps its folder."""
+    user, home = ctx.get("user"), ctx.get("home")
     if not user or not home:
         return "failed", NO_USER_MESSAGE
     if path != ops_checkout_path(home):
-        return "failed", f"{path} is not where the ops app goes; nothing was removed"
+        return "failed", f"{path} is not where the ops app used to go; nothing was removed"
     kind = checkout_state(path, user, run)
     if kind == "missing":
         return "already", ""
@@ -8986,10 +8917,27 @@ def _un_checkout(step, ctx, run=_run_text, closer=None):
     if not empty:
         return "note", f"{path} was left: {why}. Delete it yourself if you want it gone"
     _, asked = (closer or _close_users)(user, runs_ops_from(path))
+    if asked and keep_if_asked:
+        return "note", (f"{path} was left for now: the app that asked for this is running from it. Start the "
+                        f"app again from the start menu; the folder goes at the next install or update")
     rc, _, err = run(as_user(user, ["rm", "-rf", "--", path]), cwd="/", timeout=120)
     if rc != 0:
         return "failed", (err.strip().splitlines() or [f"{path} could not be removed"])[-1]
     return "done", ("the ops app asked for this, so it is still open: close it yourself" if asked else "")
+
+
+def _un_checkout(step, ctx, run=_run_text, closer=None):
+    return _remove_ops_folder(step["path"], ctx, run, closer)
+
+
+def _un_close_ops(step, ctx, closer=None):
+    user = ctx.get("user")
+    if not user:
+        return "already", ""
+    closed, asked = (closer or _close_users)(user, runs_ops_from(step["path"], step.get("which")))
+    if asked:
+        return "note", "it asked for this, so it is still open: close it yourself"
+    return ("done" if closed else "already"), ""
 
 
 def _un_note(step, ctx):
@@ -9004,6 +8952,7 @@ UNINSTALL_ACTIONS = {
     "sudoers-quiet": _un_sudoers_quiet,
     "exe": _un_exe,
     "close-tray": _un_close_tray,
+    "close-ops": _un_close_ops,
     "checkout": _un_checkout,
     "note": _un_note,
 }
@@ -9632,8 +9581,7 @@ def update_self(confirmed=False):
         ["git", "log", "--oneline", "--no-decorate", incoming],
         cwd=repo, text=True, capture_output=True,
     ).stdout.strip()
-    app_waiting = ops_waiting()
-    if not summary and not app_waiting:
+    if not summary:
         print("Already up to date.")
         if update_is_unfinished():
             print("\n" + UNFINISHED_NOTICE.split("\n")[0])
@@ -9649,16 +9597,12 @@ def update_self(confirmed=False):
             return finish_update(two_steps=False)
         return 0
 
-    if summary:
-        print("Incoming changes:\n")
-        print(summary)
-        run_cmd(["git", "diff", "--stat", incoming], cwd=repo)
-    if app_waiting:
-        print("\nIncoming changes to the ops app:\n")
-        print("\n".join(app_waiting))
+    print("Incoming changes:\n")
+    print(summary)
+    run_cmd(["git", "diff", "--stat", incoming], cwd=repo)
 
-    # The signature is on this tool's commits: they are what runs as root. The app is pulled and run as the user.
-    if summary and load_config().get("require_signed_updates"):
+    # The signature covers the whole repository: this tool, which runs as root, and the ops app, which does not.
+    if load_config().get("require_signed_updates"):
         if not run_cmd(["git", "verify-commit", f"origin/{branch}"], cwd=repo):
             print("\nrequire_signed_updates is on and the newest commit is not "
                   "validly signed. Not updating.")
@@ -9674,11 +9618,10 @@ def update_self(confirmed=False):
             print("Update cancelled.")
             return 0
 
-    if summary:
-        print("\nPulling latest changes…\n")
-        if not run_cmd(["git", "pull", "--ff-only", "origin", branch], cwd=repo):
-            print("Git pull failed. Resolve manually.")
-            return 1
+    print("\nPulling latest changes…\n")
+    if not run_cmd(["git", "pull", "--ff-only", "origin", branch], cwd=repo):
+        print("Git pull failed. Resolve manually.")
+        return 1
 
     print("\nReinstalling updated version…\n")
 
