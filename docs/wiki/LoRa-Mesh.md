@@ -40,7 +40,7 @@ The LoRa tab is there while the LoRa rail is on. It has three pages.
 
 Receiving is the default. Sending has to be switched on with **Allow sending** each time you open the tab, because a message goes out over the air.
 
-[![LoRa, Mesh](img/app/tab-lora-mesh.png)](img/app/tab-lora-mesh.png)
+[![LoRa, Mesh](img/app/tab-lora-mesh.webp)](img/app/tab-lora-mesh.webp)
 
 The node names are covered in this picture and the next.
 
@@ -57,7 +57,7 @@ Nodes that have told the mesh their position, drawn around this node by bearing 
 - A node appears only if it sends its position. Nothing here is worked out from signal strength.
 - The Alerts list beside it names nodes inside the ring and nodes not heard for a while.
 
-[![LoRa, Radar](img/app/tab-lora-radar.png)](img/app/tab-lora-radar.png)
+[![LoRa, Radar](img/app/tab-lora-radar.webp)](img/app/tab-lora-radar.webp)
 
 ### Notices
 

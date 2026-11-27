@@ -203,6 +203,25 @@ def arrow(direction):
     down = ["".join(col) for col in zip(*right)]
     return down if direction == "down" else down[::-1]
 
+TAB_ICONS["Wiki"] = [                                  # a page of text
+    "................",
+    "..############..",
+    "..#oooooooooo#..",
+    "..#o########o#..",
+    "..#oooooooooo#..",
+    "..#o######ooo#..",
+    "..#oooooooooo#..",
+    "..#o########o#..",
+    "..#oooooooooo#..",
+    "..#o#####oooo#..",
+    "..#oooooooooo#..",
+    "..#o########o#..",
+    "..#oooooooooo#..",
+    "..############..",
+    "................",
+    "................",
+]
+
 
 def tab_icon(name):
     return TAB_ICONS.get(name, TAB_ICONS["Overview"])

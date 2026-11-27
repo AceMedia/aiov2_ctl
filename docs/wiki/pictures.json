@@ -1,0 +1,198 @@
+{
+ "img/app/aio-ops-logo-full.webp": {
+  "bytes": 1784,
+  "sha256": "e8b1ae31a5a0c0943ee493a8da5b593bba755e759459e9910652a1ce26c8c13c"
+ },
+ "img/app/aio-ops-logo.webp": {
+  "bytes": 1190,
+  "sha256": "0f468f38f62c452e080fd447a53c31e3d910a9ac98427a7be737d0cd30214ab8"
+ },
+ "img/app/app-01-home.webp": {
+  "bytes": 26498,
+  "sha256": "76a61da7cca0408da3ca490031b07f4d0d09abecad400abc3b2c9a5153605522"
+ },
+ "img/app/app-02-overview.webp": {
+  "bytes": 32266,
+  "sha256": "422ed53a56643a79ca1b1024e5603ca88f96fe1f7068f97fcd1dfb27a5f32de3"
+ },
+ "img/app/app-03-everything.webp": {
+  "bytes": 35024,
+  "sha256": "feeb16fde39f7ecdf7551e4c9e1d85cb95a64c2e95d6d084f8729278b3ae6983"
+ },
+ "img/app/app-04-wi-fi.webp": {
+  "bytes": 16674,
+  "sha256": "12b31732cb82c8bbf65f63c54d035477f55dedb21793662b669cf6f8b8a9a404"
+ },
+ "img/app/app-06-settings.webp": {
+  "bytes": 33058,
+  "sha256": "2ef9ba3a16b72e71705d0a00bf40c17e8b9d90fadf520249c6f4718d71f92a15"
+ },
+ "img/app/app-07-help.webp": {
+  "bytes": 33508,
+  "sha256": "dde32810200f3e76bda3333112a374c17e6e166d346fb6a25b9b1bcd242d5168"
+ },
+ "img/app/divider.webp": {
+  "bytes": 320,
+  "sha256": "8a83ea31244aaea3d59b8062acd6ee4bb4619da3f6062ceb53563596900da724"
+ },
+ "img/app/rails-on-overview.webp": {
+  "bytes": 39118,
+  "sha256": "eb8842193beb03607c6ecacab69748a074a595a08147497e670849dc5738721f"
+ },
+ "img/app/settings-01-general.webp": {
+  "bytes": 33114,
+  "sha256": "5f44a77dc6f7fdae6e9ae5bbe9a65a6f157a72631a8b7878bdc3a08c639bc57d"
+ },
+ "img/app/settings-02-notifications.webp": {
+  "bytes": 21396,
+  "sha256": "41d8494d7b3e728613cf8271e408f0b55e6fcfe240737db36c7c87d0802a36e2"
+ },
+ "img/app/settings-03-dashboard.webp": {
+  "bytes": 30096,
+  "sha256": "43535ce25d6792beae4d377ae8b70a4ccfb6faeeaac91e10336c8a10869f0c88"
+ },
+ "img/app/settings-04-power.webp": {
+  "bytes": 29220,
+  "sha256": "6167243dd63e7223fab04d7a66dd6f0709a79276278c785e3d3800f4428bbb17"
+ },
+ "img/app/settings-05-lora.webp": {
+  "bytes": 24232,
+  "sha256": "220770d38fe0fa1f02321014af61d5facced9158b3be2605e277a4d128d507ea"
+ },
+ "img/app/settings-06-wi-fi.webp": {
+  "bytes": 20996,
+  "sha256": "be29f3acf8bd7b4618a73d80587dd8ebf5438d8cc0a036a1f575c56c5acfaab7"
+ },
+ "img/app/settings-07-flipper.webp": {
+  "bytes": 19430,
+  "sha256": "f77b1c9a58181df013721ddb32e4ff764d4c44c502a26a3d1ecdd45a6b67801d"
+ },
+ "img/app/settings-08-features.webp": {
+  "bytes": 47026,
+  "sha256": "8a8798cd315f4f67f03d483cf697f342b8ae7805596829cf83a8b4a41b3859a5"
+ },
+ "img/app/settings-09-debug.webp": {
+  "bytes": 45136,
+  "sha256": "84f5dc442c2ba617d0534ee4f6f8e4b2974a017dc8176b28d53c054197a5027d"
+ },
+ "img/app/tab-bluetooth.webp": {
+  "bytes": 30392,
+  "sha256": "b259744fc2f1b8b0d93fa5833f3bb04e42bb987c6e09cf7163c7195c33813284"
+ },
+ "img/app/tab-gps-live.webp": {
+  "bytes": 28466,
+  "sha256": "10e9a1b9b9a7db5d9442e15e7a91811e7637759a16e8d7740ba60eecc6ab6acc"
+ },
+ "img/app/tab-gps-track.webp": {
+  "bytes": 20240,
+  "sha256": "1b07f7ec2bd8f311d9c3f71638d77b0968f04d697360689c7aa7da8c4b21cc5f"
+ },
+ "img/app/tab-lora-mesh.webp": {
+  "bytes": 22832,
+  "sha256": "c59c0208ecc3eaf78cd598e649f4375310cceb9ce06c74171fcce2e7de7fbacd"
+ },
+ "img/app/tab-lora-radar.webp": {
+  "bytes": 31624,
+  "sha256": "cdc6285a383b778d78a1c16c2284758951c2677b7c6f870e5c53163aedbbf0e0"
+ },
+ "img/app/tab-network.webp": {
+  "bytes": 22478,
+  "sha256": "113c3521fc55ce986c12a04d0bf630ef95ec3f7d89e68496a2858856b0e6b112"
+ },
+ "img/app/tab-sdr.webp": {
+  "bytes": 74858,
+  "sha256": "e628dec4cff893837be8255d724b09cad30eea330abc1a44018d150dc0f39c48"
+ },
+ "img/install/cli-01-features.webp": {
+  "bytes": 27996,
+  "sha256": "c9e98f138fc3a8e4d5d9aa06b05aed3607abb8d16f15dba8cd70e9c6dc0cb648"
+ },
+ "img/install/cli-02-uninstall-plan.webp": {
+  "bytes": 26894,
+  "sha256": "ede2c10adac06403bcf7cb63f4ce42ad944b459b04a27837cfe256c6ce9835b8"
+ },
+ "img/install/cli-03-uninstall-question.webp": {
+  "bytes": 28002,
+  "sha256": "a77da6f4350d1b246fb227111880a9541bf74d9f0620234dd2376eb9e013a4b9"
+ },
+ "img/install/cli-04-uninstall-result.webp": {
+  "bytes": 21874,
+  "sha256": "a072c58c26f72f930cfe18c99baa1539fb2a42cc428615f8317d4d417fe55ae5"
+ },
+ "img/install/cli-05-install-plan.webp": {
+  "bytes": 30792,
+  "sha256": "7d6e36bfb1e00eb703d2ae6ed6cdba8b3c8033f934aeb9fee6481e83532b9f85"
+ },
+ "img/install/cli-06-install-question.webp": {
+  "bytes": 28758,
+  "sha256": "d346b73041d3cb226629f9b543779b7ec93980232e64798d9a81af23402bce4b"
+ },
+ "img/install/cli-07-install-result.webp": {
+  "bytes": 23092,
+  "sha256": "9ec55aef940d1d84662cd281f4e6ec855c5fd207241552ff7a92d904062fa6e9"
+ },
+ "img/install/cli-08-install-picker.webp": {
+  "bytes": 18222,
+  "sha256": "c6e59600f3b42af13a5ab0977a3de915fc217373123ba328f2c92730309c38dc"
+ },
+ "img/install/cli-09-status.webp": {
+  "bytes": 8272,
+  "sha256": "01bde62d2392749931cf86e6b0cebf21da9b59a735c2848fbfdbfdbd13ff9c88"
+ },
+ "img/install/cli-10-channel.webp": {
+  "bytes": 4520,
+  "sha256": "4b1675ec50a4278d5ffad26e7cbbe95a7085a65932c296d6ef797bfddc07270a"
+ },
+ "img/install/cli-11-doctor.webp": {
+  "bytes": 2730,
+  "sha256": "43f720d2eabf5027a4ce5860d8748f9873b2d9252df547e1c5bb2ad068a44c39"
+ },
+ "img/install/gui-01-choose.webp": {
+  "bytes": 27298,
+  "sha256": "a85b6663da61e8fa5d0bf0b5b6eba4167f6af31b4f4f77e97a1c4cd3d847d44a"
+ },
+ "img/install/gui-02-everything-ticked.webp": {
+  "bytes": 25864,
+  "sha256": "753888e770e99de95b11d1de73e199a62d509e4e06750e5bac940d4f51f032f4"
+ },
+ "img/install/gui-03-one-feature-unticked.webp": {
+  "bytes": 28156,
+  "sha256": "cae04666ba81dccdf27ebd885f72645b1f96956adc136afbd4d0148ccef96fdb"
+ },
+ "img/install/gui-04-plan-to-remove.webp": {
+  "bytes": 29846,
+  "sha256": "8e9cf9440f7231a870bc0f8ff5c1c23c6e621a59acd6f2453fb7fc1fa3052188"
+ },
+ "img/install/gui-05-removing.webp": {
+  "bytes": 29808,
+  "sha256": "3e89d86e1ec892c877787d985411aa885018a88f90a57bd56c62ed6a1bc524c1"
+ },
+ "img/install/gui-06-removed.webp": {
+  "bytes": 20824,
+  "sha256": "37e387ee95c7fd9bd8239cb1256ea7d92ece1f9ce00c64fd8ba8fb595b360e59"
+ },
+ "img/install/gui-07-list-after-removal.webp": {
+  "bytes": 27188,
+  "sha256": "bd0ecf88c884cacffec99fb5016734a485aa108cc8cb22da67025d3b0033cf94"
+ },
+ "img/install/gui-08-ticked-again.webp": {
+  "bytes": 26696,
+  "sha256": "5e1341d3f8992e4dde34bf3fdec9fc249af2d9165d789377a6294cdd6dc70599"
+ },
+ "img/install/gui-09-plan-to-install.webp": {
+  "bytes": 31590,
+  "sha256": "c041a6f6bc53387562ffe6b086776b3364c926fd308279ac103de107ba9b5503"
+ },
+ "img/install/gui-10-installed.webp": {
+  "bytes": 20440,
+  "sha256": "53f1d8e8d27972b9ed833325d3a7b2c77336cc9b03158d8b684500ba4ec18f92"
+ },
+ "img/install/gui-11-list-at-the-end.webp": {
+  "bytes": 27242,
+  "sha256": "a5f7b35d2ae64b8e42d55d960b1f4e0685fa4c425c3ebadf80dae3934909dbe1"
+ },
+ "img/install/gui-12-repair-plan.webp": {
+  "bytes": 24454,
+  "sha256": "3805bbbed7ca18db450172e14becd4941481ecf278a0f45b71142c0ec17e6d37"
+ }
+}

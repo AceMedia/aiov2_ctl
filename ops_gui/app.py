@@ -349,6 +349,10 @@ def build_window():
             self.home = home_panel.build_panel(self)
             self.pages = {"Home": self.home, "Network": net_panel.build_panel(self), "Overview": self.overview, "Wi-Fi": self.wifi, "Flipper": self.flip,
                           "Help": self.help}
+            from . import wiki
+            self.wiki_on = wiki.enabled()
+            if self.wiki_on:
+                self.pages["Wiki"] = wiki.build(self)
             from . import bt_panel
             self.bt_available = bt_panel.adapter_available
             self.pages["Bluetooth"] = bt_panel.build_page(self)
@@ -681,7 +685,8 @@ def build_window():
             switching a rail on or off does not make the whole bar flash."""
             names = data.tab_names(self.snap, self.flip_shown, self.marauder_shown,
                                   self.settings.get("home_tab") is not False, data.has_ethernet(),
-                                  self.bt_available(), everything=True)
+                                  self.bt_available(), everything=True,
+                                  wiki=getattr(self, "wiki_on", False))
             if getattr(self, "names", None) == names:
                 self.refresh_help()
                 return
@@ -804,6 +809,8 @@ def build_window():
                 self.drawer.close_drawer()
             elif self.isFullScreen():
                 self.showMaximized()
+            elif self.current_name() == "Wiki" and self.pages["Wiki"].back():
+                pass                                    # reading a wiki page: back is back to the list of pages
             elif self.names and self.current_name() != self.names[0]:
                 self.goto(0)
 
@@ -816,6 +823,8 @@ def build_window():
                 self.pages["Marauder"].toggle()
             elif name == "Flipper":
                 self.toggle_live()
+            elif name == "Wiki":
+                self.pages["Wiki"].main_action()        # to the page to read it, or back to the list
             elif name == "GPS":
                 live = self.pages["GPS"].live
                 if live.save_b.isEnabled():

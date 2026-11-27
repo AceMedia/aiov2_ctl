@@ -6,7 +6,7 @@ aiov2_ctl --doctor
 
 A read-only check of the uConsole. It changes nothing. Each line is `OK`, `INFO` or `WARN`.
 
-[![aiov2_ctl --doctor](img/install/cli-11-doctor.png)](img/install/cli-11-doctor.png)
+[![aiov2_ctl --doctor](img/install/cli-11-doctor.webp)](img/install/cli-11-doctor.webp)
 
 ## What it looks at
 

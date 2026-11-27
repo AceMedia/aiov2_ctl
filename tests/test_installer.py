@@ -57,9 +57,9 @@ class RegistryTests(unittest.TestCase):
             self.assertIsInstance(f["default"], bool)
             self.assertTrue(f["title"] and f["summary"])
 
-    def test_the_features_are_the_eleven_asked_for_in_order(self):
-        self.assertEqual(a.feature_keys(), ["core", "tray", "app", "console", "gps", "mesh", "sdr", "adsb",
-                                            "listening", "flipper", "autostart"])
+    def test_the_features_are_the_thirteen_asked_for_in_order(self):
+        self.assertEqual(a.feature_keys(), ["core", "tray", "app", "console", "wiki", "wikipics", "gps", "mesh",
+                                            "sdr", "adsb", "listening", "flipper", "autostart"])
 
     def test_keys_are_unique(self):
         self.assertEqual(len(a.feature_keys()), len(set(a.feature_keys())))
@@ -75,7 +75,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual([f["key"] for f in a.FEATURES if f["required"]], ["core"])
 
     def test_the_aircraft_receiver_and_tray_at_login_are_off_by_default(self):
-        self.assertEqual([f["key"] for f in a.FEATURES if not f["default"]], ["adsb", "autostart"])
+        self.assertEqual([f["key"] for f in a.FEATURES if not f["default"]], ["wikipics", "adsb", "autostart"])
 
     def test_every_hardware_key_is_one_the_facts_report_and_has_words_for_when_it_is_missing(self):
         facts = a.hardware_facts(usb_ids=set(), environ={}, exists=lambda p: False, listdir=lambda p: [])
@@ -97,7 +97,7 @@ class RegistryTests(unittest.TestCase):
 class SelectionTests(unittest.TestCase):
     def test_no_flag_gives_the_defaults(self):
         self.assertEqual(a.select_features([], ALL_THERE),
-                         ["core", "tray", "app", "console", "gps", "mesh", "sdr", "listening", "flipper"])
+                         ["core", "tray", "app", "console", "wiki", "gps", "mesh", "sdr", "listening", "flipper"])
 
     def test_all_gives_every_feature(self):
         self.assertEqual(a.select_features(["--all"], ALL_THERE), a.feature_keys())
@@ -159,7 +159,7 @@ class SelectionTests(unittest.TestCase):
 
 class PlanTests(unittest.TestCase):
     def test_every_step_is_a_small_dict_with_the_agreed_fields(self):
-        kinds = {"apt", "copy", "sudoers", "udev", "systemd", "service-off", "launchers", "old-folder",
+        kinds = {"apt", "copy", "sudoers", "udev", "systemd", "service-off", "launchers", "old-folder", "wiki-on", "wiki-pictures",
                  "desktop-entry", "autostart", "note"}
         for step in a.install_plan(a.feature_keys(), NOTHING_THERE, state()):
             for field in ("id", "feature", "kind", "detail", "root", "undo"):
@@ -1203,13 +1203,13 @@ class PickerTests(unittest.TestCase):
         self.assertTrue(wrapped[row + 1][0].startswith("     "))        # carried on under the title
 
     def test_the_plain_line_picker_takes_numbers_names_and_letters(self):
-        answers = iter(["8", "tray 99", "", ])
+        answers = iter(["10", "tray 99", "", ])
         said = []
         p = a.FeaturePicker(["core", "tray"])
         chosen = a.pick_by_lines(p, state(), ALL_THERE, ask=lambda _: next(answers), say=said.append)
         self.assertEqual(chosen, ["core", "sdr", "adsb"])
         self.assertTrue(any("'99' is not one of" in s for s in said))
-        self.assertTrue(any(" 8. [x] Aircraft receiver" in s for s in said))
+        self.assertTrue(any("10. [x] Aircraft receiver" in s for s in said))
 
     def test_the_plain_line_picker_can_be_quit(self):
         self.assertIsNone(a.pick_by_lines(a.FeaturePicker(), state(), ALL_THERE, ask=lambda _: "q", say=lambda _: 0))
@@ -1404,7 +1404,8 @@ class UninstallTests(unittest.TestCase):
         allowed = ("/etc/sudoers.d/aiov2_ctl", "/etc/systemd/system/aiov2-", "/etc/systemd/system/readsb.service.d/10-aiov2-",
                    "/etc/bash_completion.d/aiov2_ctl", "/usr/local/share/aiov2_ctl/", "/usr/share/applications/aiov2_ctl.desktop",
                    "/usr/share/applications/aiov2_ctl-installer.desktop", a.INSTALL_META_PATH,
-                   "/home/shane/.config/autostart/aiov2_ctl.desktop", "/home/shane/.local/share/applications/uconsole-ops")
+                   "/home/shane/.config/autostart/aiov2_ctl.desktop", "/home/shane/.local/share/applications/uconsole-ops",
+                   "/home/shane/.local/share/aiov2_ctl/wiki/enabled")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
         self.assertNotIn(a.CONFIG_PATH, paths)                          # saved rail settings are left

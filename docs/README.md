@@ -1,65 +1,67 @@
 # docs
 
-What is in this folder.
-
 | Path | What it is |
 |---|---|
-| `DESIGN.md` | How the code is laid out and why. |
-| `wiki/` | The source of the project's GitHub wiki: one `.md` file per page, `_Sidebar.md`, `_Footer.md`, and the pictures in `wiki/img/`. |
+| `DESIGN.md` | The ops app's pixel look: where colours, corners, fonts and the Home screen layout live. |
+| `wiki/` | The source of the project's GitHub wiki: one `.md` file per page, `_Sidebar.md`, `_Footer.md`, and `pictures.json`, the list of its pictures. The ops app's Wiki tab reads these same files. |
 
-The tools for the wiki are in `tools/`. Run them from the top of the repository.
+## The wiki's pictures
 
-## Edit a wiki page
+The pictures are not in this repository. They are lossless WebP files kept in the wiki itself, under `img/`, so
+that someone who installs without them downloads nothing they did not ask for. `wiki/pictures.json` lists each
+one with its size and SHA-256. The link checker uses that list to know a picture exists, and the installer uses
+it to check each picture it downloads.
 
-1. Edit the page in `docs/wiki/`. The file name is the page name, with `-` for spaces.
-2. A link to another page is its name without `.md`: `[Installation](Installation)`.
-3. A picture goes in `docs/wiki/img/` and is linked as `img/...`.
-4. A new page must be added to `docs/wiki/_Sidebar.md`.
+Lossless is on purpose: for screenshots and pixel art it is both exact and smaller than a lossy WebP.
 
-Do not rename `CLI‐Usage.md`. GitHub wrote its name with a special hyphen. Links to it use a plain one: `[CLI Usage](CLI-Usage)`.
+## Edit a page
 
-Look at every picture before you add it. A screenshot can show a user name, a host name, a Wi-Fi name or an address.
+1. Edit the `.md` file in `docs/wiki/`. A link to another page is its file name without `.md`, for example
+   `[Installation](Installation)`.
+2. Check it:
 
-## Check it
+   ```bash
+   python3 tools/wiki-check.py
+   ```
 
-```sh
-python3 tools/wiki-check.py
+   The test suite runs the same check, so a broken link fails the tests.
+3. Publish it (see below).
+
+## Add or change a picture
+
+1. Make the PNG, with nothing private in it.
+2. Convert it and put it in a clone of the wiki:
+
+   ```bash
+   git clone https://github.com/OWNER/REPO.wiki.git /tmp/wiki
+   mkdir -p /tmp/new/img/app && cp picture.png /tmp/new/img/app/
+   python3 tools/wiki-pictures.py convert /tmp/new /tmp/wiki      # writes /tmp/wiki/img/app/picture.webp
+   python3 tools/wiki-pictures.py list /tmp/wiki > docs/wiki/pictures.json
+   ```
+
+3. Link it in a page as `img/app/picture.webp`, commit `docs/wiki/`, push the picture in the wiki clone, then
+   publish the pages.
+
+## Publish the pages
+
+```bash
+tools/wiki-publish.sh --dry-run      # what would change; changes nothing
+tools/wiki-publish.sh --yes          # show the changes, then commit and push them
 ```
 
-It checks that every link names a page that exists, every picture exists, every `#heading` link names a real heading, and every page is in the sidebar. It prints each fault and exits with 1 if there is one. It does not use the network, so links to other sites are not tested.
+It publishes only what is committed under `docs/wiki/`, refuses when the checker finds a problem, never
+force-pushes, and never deletes a page or picture that is only in the wiki.
 
-The test suite runs the same check:
+## The logo
 
-```sh
-python3 -m unittest discover -s tests
+The logo and the divider are drawn by a script. It needs only Pillow (`python3-pil`).
+
+```bash
+python3 tools/logo.py                # writes three WebP files into a folder called logo
+python3 tools/logo.py /tmp/wiki/img/app
 ```
 
-## Publish it
+It writes `aio-ops-logo.webp`, `aio-ops-logo-full.webp` and `divider.webp`. Add `--preview FILE.png` to also get a
+picture of all three on a light page and a dark one. The font is Press Start 2P, under the SIL Open Font
+Licence (`tools/fonts/OFL.txt`).
 
-Commit your change first. Only committed files are published.
-
-```sh
-tools/wiki-publish.sh --dry-run    # show what would change
-tools/wiki-publish.sh --yes        # publish
-```
-
-The script runs the checker and stops if it fails. It then shows the changes. Without `--yes` it stops there.
-
-It publishes to the wiki of this checkout's `origin`. To choose another, add `--repo OWNER/REPO`.
-
-It never force-pushes. It never deletes a page that is only in the wiki. It names such pages and leaves them.
-
-You need to be able to push to the wiki. With `gh` installed and signed in, that works by itself.
-
-## Draw the logo again
-
-The logo and the divider in `docs/wiki/img/app/` are drawn by a script. It needs only Pillow (`python3-pil`).
-
-```sh
-python3 tools/logo.py              # writes into docs/wiki/img/app/
-python3 tools/logo.py /tmp/logo    # writes into another folder
-```
-
-It writes `aio-ops-logo.png`, `aio-ops-logo-full.png` and `divider.png`. Add `--preview FILE.png` to also get a picture of all three on a light page and a dark page.
-
-The font is `tools/fonts/press-start-2p.ttf` (Press Start 2P). Its licence is in `tools/fonts/OFL.txt`.

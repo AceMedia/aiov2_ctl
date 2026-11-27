@@ -33,7 +33,7 @@ The top of the page is a spectrum with a waterfall under it and the frequency dr
 
 A signal meter shows how far the tuned signal stands over the noise, in dB.
 
-[![The SDR tab](img/app/tab-sdr.png)](img/app/tab-sdr.png)
+[![The SDR tab](img/app/tab-sdr.webp)](img/app/tab-sdr.webp)
 
 ## Bias-T
 

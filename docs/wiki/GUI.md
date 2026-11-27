@@ -177,11 +177,11 @@ aiov2_ctl --installer
 
 Run it as yourself; it asks for root when it installs.
 
-[![The installer window](img/install/gui-01-choose.png)](img/install/gui-01-choose.png)
+[![The installer window](img/install/gui-01-choose.webp)](img/install/gui-01-choose.webp)
 
 Unticking a feature that is installed removes it. The plan says so before anything happens.
 
-[![The plan when a feature is being removed](img/install/gui-04-plan-to-remove.png)](img/install/gui-04-plan-to-remove.png)
+[![The plan when a feature is being removed](img/install/gui-04-plan-to-remove.webp)](img/install/gui-04-plan-to-remove.webp)
 
 See [Installation](Installation) and [Uninstall](Uninstall).
 

@@ -16,6 +16,7 @@ Links to other sites are not fetched: this script never uses the network.
 Usage: python3 tools/wiki-check.py [FOLDER]      (FOLDER defaults to docs/wiki next to this script's folder)
 Exit status: 0 when nothing is broken, 1 when something is, 2 when the folder is not there.
 """
+import json
 import os
 import re
 import sys
@@ -174,6 +175,13 @@ def read_wiki(folder):
                     pages[name] = fh.read()
             else:
                 files.add(rel)
+    listed = os.path.join(folder, "pictures.json")
+    if os.path.isfile(listed):
+        # The pictures are kept in the wiki itself and downloaded on request, not kept here: the list of them
+        # stands in for the files.
+        with open(listed, encoding="utf-8") as fh:
+            files.update(json.load(fh))
+        files.discard("pictures.json")
     return pages, files
 
 

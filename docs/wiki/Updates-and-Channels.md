@@ -25,7 +25,7 @@ See which you are on, and whether anything is waiting:
 aiov2_ctl --channel
 ```
 
-[![aiov2_ctl --channel](img/install/cli-10-channel.png)](img/install/cli-10-channel.png)
+[![aiov2_ctl --channel](img/install/cli-10-channel.webp)](img/install/cli-10-channel.webp)
 
 Switch:
 
@@ -36,7 +36,7 @@ aiov2_ctl --channel stable
 
 In the ops app: Settings, Features, "Switch to beta".
 
-[![Settings, Features in the ops app](img/app/settings-08-features.png)](img/app/settings-08-features.png)
+[![Settings, Features in the ops app](img/app/settings-08-features.webp)](img/app/settings-08-features.webp)
 
 Going back to stable returns to the tested version, which is older. What beta set up is not removed. The ops app and console change channel with the rest, since they are in the same checkout.
 
