@@ -19,7 +19,8 @@ import re
 
 SIDEBAR = "_Sidebar.md"
 HOME = "Home"
-ROW_HEIGHT, HEADING_HEIGHT = 44, 34            # a row is a touch-sized target; a heading is not a target at all
+ROW_HEIGHT, HEADING_HEIGHT = 44, 38            # a row is a touch-sized target; a heading is not a target at all
+INDENT = 22                                    # how far a page sits in from the heading it belongs to
 HINT_LIST = "Up and down: choose a page.  A or Enter: read it.  Left and right: other tabs."
 HINT_PAGE = "Up and down: scroll.  B, Esc or the right button: back to the list of pages."
 _PICTURE_LINK = re.compile(r"\[!\[([^\]]*)\]\(([^)\s]+)\)\]\(([^)\s]+)\)")      # a picture that links to itself
@@ -102,6 +103,48 @@ def row_of(entries, name):
     return -1
 
 
+def sidebar_tree(entries):
+    """The sidebar as a tree: [(heading words or None, [(words, page name), ...]), ...]. Pages that come before
+    any heading sit under None, at the top level."""
+    groups = []
+    for row in entries:
+        if row[0] == "heading":
+            groups.append((row[1], []))
+        else:
+            if not groups:
+                groups.append((None, []))
+            groups[-1][1].append((row[1], row[2]))
+    return groups
+
+
+def step_over(kinds, was, now):
+    """Where the highlight should land when up or down has put it on row `now` of a list whose rows are
+    'heading' or 'page' (`kinds`), having been on row `was`. A heading is a label, never a place to stop: the
+    highlight carries on the way it was going to the next page, and stays where it was when there is none."""
+    if not 0 <= now < len(kinds) or kinds[now] == "page":
+        return now
+    step = 1 if was is None or now > was else -1
+    i = now + step
+    while 0 <= i < len(kinds):
+        if kinds[i] == "page":
+            return i
+        i += step
+    return was if was is not None and 0 <= was < len(kinds) else now
+
+
+def block_spacing(heading, in_list, code, first=False):
+    """(space above, space below, line height in percent) for one block of a page, in pixels. Headings stand
+    clear of what is above them, paragraphs and list rows have air between them, and code keeps its own
+    line height so columns line up."""
+    if heading:
+        return (0 if first else {1: 22, 2: 26, 3: 20}.get(heading, 16), {1: 12, 2: 10}.get(heading, 8), 110)
+    if code:
+        return (0, 0, 100)
+    if in_list:
+        return (3, 5, 125)
+    return (4, 10, 130)
+
+
 def prepare(text, have_picture):
     """A page's Markdown made ready to show offline. A picture that is here is kept (without the link to
     itself, which would only open the same file); one that is not becomes a line saying what it shows. A
@@ -139,9 +182,11 @@ def fitted(width, height, room):
 
 def build(win):
     """The Wiki page: the list of pages on the left, the page on the right. Qt is imported here."""
-    from PyQt6.QtCore import QSize, Qt, QUrl
-    from PyQt6.QtGui import QColor, QDesktopServices, QImage, QImageReader, QTextCursor
-    from PyQt6.QtWidgets import QLabel, QListWidget, QListWidgetItem, QSplitter, QTextBrowser, QVBoxLayout, QWidget
+    from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
+    from PyQt6.QtGui import (QBrush, QColor, QDesktopServices, QFont, QImage, QImageReader, QTextBlockFormat,
+                             QTextCursor, QTextFormat, QTextListFormat)
+    from PyQt6.QtWidgets import (QAbstractItemView, QLabel, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem,
+                                 QVBoxLayout, QWidget)
     from . import style
 
     pages, user = pages_folder(), user_folder()
@@ -182,42 +227,56 @@ def build(win):
     note.hide()
     outer.addWidget(note)
     split = QSplitter()
-    side, page = QListWidget(), QTextBrowser()
+    side, page = QTreeWidget(), QTextBrowser()
     page.setOpenLinks(False)
     page.setOpenExternalLinks(False)
-    side.setUniformItemSizes(False)
-    side.setWordWrap(False)
+    side.setHeaderHidden(True)
+    side.setRootIsDecorated(False)                 # no arrows: every section is always open
+    side.setItemsExpandable(False)
+    side.setIndentation(INDENT)
+    side.setExpandsOnDoubleClick(False)
+    side.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     side.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    side.setStyleSheet("QListWidget { font-size: 14pt; } QListWidget::item { padding-left: 14px; }")
-    page.setStyleSheet("QTextBrowser { font-size: 12pt; }")
+    side.setStyleSheet("QTreeWidget { font-size: 14pt; padding: 6px 4px; } "
+                       "QTreeWidget::item { padding-left: 10px; }")
+    page.setStyleSheet("QTextBrowser { font-size: 12pt; padding: 6px 14px; }")
     split.addWidget(side)
     split.addWidget(page)
     split.setStretchFactor(0, 0)
     split.setStretchFactor(1, 1)
-    split.setSizes([300, 900])
+    split.setSizes([320, 900])
     outer.addWidget(split, 1)
     hint = QLabel(HINT_LIST)
     hint.setStyleSheet("font-size: 10pt;")
     outer.addWidget(hint)
 
     entries = sidebar_entries(read(SIDEBAR))
-    for row in entries:
-        item = QListWidgetItem(row[1].upper() if row[0] == "heading" else row[1])
-        if row[0] == "heading":
-            item.setFlags(Qt.ItemFlag.NoItemFlags)             # a label: not selectable, skipped by up and down
-            item.setSizeHint(QSize(0, HEADING_HEIGHT))
-            font = item.font()
+    rows = {}                                              # page name, plain and lower case -> its row in the tree
+    order = []                                             # every row top to bottom, headings included
+    for heading, members in sidebar_tree(entries):
+        parent = side.invisibleRootItem()
+        if heading is not None:
+            parent = QTreeWidgetItem(side, [heading.upper()])
+            parent.setFlags(Qt.ItemFlag.ItemIsEnabled)         # a label: shown, never selected, skipped by the D-pad
+            parent.setSizeHint(0, QSize(0, HEADING_HEIGHT))
+            font = parent.font(0)
             font.setBold(True)
-            item.setFont(font)
-        else:
-            item.setSizeHint(QSize(0, ROW_HEIGHT))
-        side.addItem(item)
+            parent.setFont(0, font)
+            parent.setForeground(0, QBrush(QColor(tokens()["accent2"])))
+            order.append(parent)
+        for words, name in members:
+            item = QTreeWidgetItem(parent, [words])
+            item.setSizeHint(0, QSize(0, ROW_HEIGHT))
+            item.setData(0, Qt.ItemDataRole.UserRole, name)
+            rows[plain(name).lower()] = item
+            order.append(item)
+    side.expandAll()
 
-    def spans(view, wanted):
-        """[(position, length, format)] of the pieces of a page that `wanted` picks. Collected first and changed
-        afterwards: changing a piece while walking the page moves the pieces under the walk."""
+    def spans(wanted):
+        """[(position, length, format)] of the pieces of the page that `wanted` picks. Collected first and
+        changed afterwards: changing a piece while walking the page moves the pieces under the walk."""
         found = []
-        block = view.document().begin()
+        block = page.document().begin()
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
@@ -229,8 +288,8 @@ def build(win):
             block = block.next()
         return found
 
-    def restyle(view, position, length, fmt):
-        cur = QTextCursor(view.document())
+    def restyle(position, length, fmt):
+        cur = QTextCursor(page.document())
         cur.setPosition(position)
         cur.setPosition(position + length, QTextCursor.MoveMode.KeepAnchor)
         cur.setCharFormat(fmt)
@@ -240,21 +299,75 @@ def build(win):
         read on the dark page, and neither the palette nor a style sheet changes that under the app's own
         style sheet, so each link is given its colour in the page itself."""
         ink = QColor(tokens()["accent2"])
-        for position, length, fmt in spans(page, lambda f: f.isAnchor() and not f.isImageFormat()):
+        for position, length, fmt in spans(lambda f: f.isAnchor() and not f.isImageFormat()):
             fmt.setForeground(ink)
             fmt.setFontUnderline(False)
-            restyle(page, position, length, fmt)
+            restyle(position, length, fmt)
 
     def fit_pictures():
-        room = max(200, page.viewport().width() - 28)
-        for position, length, fmt in spans(page, lambda f: f.isImageFormat()):
+        room = max(200, page.viewport().width() - 60)
+        for position, length, fmt in spans(lambda f: f.isImageFormat()):
             img = fmt.toImageFormat()
             picture = QImage(os.path.join(user, img.name()))
             if not picture.isNull():
                 w, h = fitted(picture.width(), picture.height(), room)
                 img.setWidth(w)
                 img.setHeight(h)
-                restyle(page, position, length, img)
+                restyle(position, length, img)
+
+    def space_out():
+        """Air between the blocks of a page (see block_spacing), bullets set in from the margin with a gap
+        before the words, and code on a panel of its own so it reads as something to type."""
+        doc = page.document()
+        t = tokens()
+        blocks, block, first = [], doc.begin(), True
+        while block.isValid():
+            fmt = block.blockFormat()
+            code = bool(fmt.property(QTextFormat.Property.BlockCodeLanguage)) or \
+                fmt.hasProperty(QTextFormat.Property.BlockCodeFence) or block.charFormat().fontFixedPitch()
+            blocks.append((block.position(), fmt.headingLevel(), block.textList() is not None, code, first))
+            if block.text().strip():
+                first = False
+            block = block.next()
+        lists = set()
+        for position, heading, in_list, code, is_first in blocks:
+            cur = QTextCursor(doc)
+            cur.setPosition(position)
+            fmt = cur.blockFormat()
+            above, below, height = block_spacing(heading, in_list, code, is_first)
+            fmt.setTopMargin(above)
+            fmt.setBottomMargin(below)
+            fmt.setLineHeight(float(height), QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+            if code:
+                fmt.setBackground(QBrush(QColor(t["field"])))
+                fmt.setLeftMargin(14)
+                fmt.setRightMargin(14)
+            cur.setBlockFormat(fmt)
+            if heading in (1, 2):
+                cur.select(QTextCursor.SelectionType.BlockUnderCursor)
+                ch = cur.charFormat()
+                ch.setForeground(QBrush(QColor(t["text"])))
+                ch.setFontWeight(QFont.Weight.Bold)
+                cur.mergeCharFormat(ch)
+            lst = cur.currentList()
+            if lst is not None and id(lst) not in lists:
+                lists.add(id(lst))
+                lf = lst.format()
+                lf.setIndent(max(1, lf.indent()))
+                lf.setProperty(QTextFormat.Property.ListNumberSuffix, ".")
+                if lf.style() in (QTextListFormat.Style.ListDisc, QTextListFormat.Style.ListCircle,
+                                  QTextListFormat.Style.ListSquare):
+                    lf.setStyle(QTextListFormat.Style.ListSquare if lf.indent() > 1 else QTextListFormat.Style.ListDisc)
+                lst.setFormat(lf)
+        for table in [f for f in doc.rootFrame().childFrames() if hasattr(f, "rows")]:
+            tf = table.format()
+            tf.setCellPadding(7)
+            tf.setCellSpacing(0)
+            tf.setBorder(1)
+            tf.setBorderBrush(QBrush(QColor(t["border"])))
+            tf.setTopMargin(8)
+            tf.setBottomMargin(14)
+            table.setFormat(tf)
 
     def go(name, anchor=""):
         file = page_file(name, names())
@@ -264,14 +377,16 @@ def build(win):
             return
         text = read(file)
         page.document().setBaseUrl(QUrl.fromLocalFile(user + os.sep))
+        page.document().setDocumentMargin(10)
         page.setMarkdown(with_title(prepare(text, have_picture), file[:-3]))
+        space_out()
         tint_links()
         fit_pictures()
         state["page"] = file
-        row = row_of(entries, file[:-3])
-        if row >= 0 and side.currentRow() != row:              # reached by a link in a page: the list follows
+        item = rows.get(plain(file[:-3]).lower())
+        if item is not None and side.currentItem() is not item:    # reached by a link in a page: the list follows
             state["quiet"] = True
-            side.setCurrentRow(row)
+            side.setCurrentItem(item)
             state["quiet"] = False
         if has_pictures(text) and not any(have_picture(m.group(2)) for m in _PICTURE.finditer(text)):
             if any(on_disk(m.group(2)) for m in _PICTURE.finditer(text)):
@@ -288,10 +403,18 @@ def build(win):
         else:
             page.verticalScrollBar().setValue(0)
 
-    def chosen(row):
-        if state["quiet"] or not 0 <= row < len(entries) or entries[row][0] != "page":
+    def chosen(item, previous=None):
+        if state["quiet"] or item is None:
             return
-        go(entries[row][2])
+        name = item.data(0, Qt.ItemDataRole.UserRole)
+        if not name:                                            # up or down landed on a heading: carry on past it
+            kinds = ["page" if it.data(0, Qt.ItemDataRole.UserRole) else "heading" for it in order]
+            was = order.index(previous) if previous in order else None
+            target = order[step_over(kinds, was, order.index(item))]
+            if target is not item:
+                QTimer.singleShot(0, lambda: side.setCurrentItem(target))
+            return
+        go(name)
 
     def clicked(url):
         kind = link_kind(url.toString())
@@ -321,15 +444,19 @@ def build(win):
         else:
             read_page()
 
-    side.currentRowChanged.connect(chosen)
-    side.itemActivated.connect(lambda _item: read_page())
+    def current_row():
+        """How far down the list the chosen page is, counting pages only: for a test driver."""
+        item = side.currentItem()
+        return list(rows.values()).index(item) if item in rows.values() else -1
+
+    side.currentItemChanged.connect(chosen)
+    side.itemActivated.connect(lambda _item, _col=0: read_page())
     page.anchorClicked.connect(clicked)
-    first = row_of(entries, HOME)
-    if first >= 0:
-        side.setCurrentRow(first)
+    first = rows.get(HOME.lower())
+    if first is not None:
+        side.setCurrentItem(first)
     if state["page"] is None:
         go(HOME)
-    box.go, box.current = go, (lambda: state["page"])
+    box.go, box.current, box.current_row = go, (lambda: state["page"]), current_row
     box.main_action, box.back, box.side, box.page = main_action, to_list, side, page
     return box
-

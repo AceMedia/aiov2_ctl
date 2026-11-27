@@ -235,6 +235,37 @@ class WikiTabTests(unittest.TestCase):
         self.assertEqual(wiki.row_of(rows, "Nowhere"), -1)
         self.assertEqual(wiki.sidebar_entries(""), [])
 
+    def test_the_sidebar_is_a_tree_with_pages_under_their_headings(self):
+        rows = [("page", "Start", "Start"), ("heading", "Setting up"), ("page", "Home", "Home"),
+                ("page", "Installation", "Installation"), ("heading", "Help"), ("page", "Health Check", "Health-Check")]
+        self.assertEqual(wiki.sidebar_tree(rows),
+                         [(None, [("Start", "Start")]),
+                          ("Setting up", [("Home", "Home"), ("Installation", "Installation")]),
+                          ("Help", [("Health Check", "Health-Check")])])
+        self.assertEqual(wiki.sidebar_tree([]), [])
+        self.assertGreaterEqual(wiki.INDENT, 16, "a page sits visibly inside its heading")
+
+    def test_up_and_down_never_stop_on_a_heading(self):
+        kinds = ["heading", "page", "page", "heading", "page", "heading"]
+        self.assertEqual(wiki.step_over(kinds, 2, 3), 4, "down from the last page of a section: the next section's first")
+        self.assertEqual(wiki.step_over(kinds, 4, 3), 2, "up from the first page of a section: the one above's last")
+        self.assertEqual(wiki.step_over(kinds, 1, 0), 1, "up from the first page of all: stays where it was")
+        self.assertEqual(wiki.step_over(kinds, 4, 5), 4, "down from the last page of all: stays where it was")
+        self.assertEqual(wiki.step_over(kinds, None, 0), 1, "nothing chosen yet: the first page")
+        self.assertEqual(wiki.step_over(kinds, 1, 2), 2, "a page is a place to stop")
+
+    def test_blocks_of_a_page_have_air_between_them(self):
+        para, item, code = wiki.block_spacing(0, False, False), wiki.block_spacing(0, True, False), \
+            wiki.block_spacing(0, False, True)
+        self.assertGreater(para[1], item[1], "list rows sit closer together than paragraphs")
+        self.assertGreater(item[1], 0)
+        self.assertEqual(code, (0, 0, 100), "code keeps its own line height so columns line up")
+        self.assertGreater(para[2], 100)
+        h1, h2, h3 = (wiki.block_spacing(n, False, False) for n in (1, 2, 3))
+        for h in (h1, h2, h3):
+            self.assertGreater(h[0], h[1], "a heading stands clear of what is above it")
+        self.assertEqual(wiki.block_spacing(1, False, False, first=True)[0], 0, "no gap above the page's title")
+
     def test_a_row_is_big_enough_for_a_trackball_and_the_hints_name_the_real_controls(self):
         self.assertGreaterEqual(wiki.ROW_HEIGHT, 40)
         for words in ("Up and down", "A or Enter"):
