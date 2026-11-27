@@ -1697,6 +1697,7 @@ def build_window():
             self.live_timer.stop()
             self.pad_timer.stop()
             if self.pad_fd is not None:
+                self.pad_notifier.setEnabled(False)             # first, or Qt warns that its socket has gone
                 os.close(self.pad_fd)
                 self.pad_fd = None
             shutil.rmtree(self.tmpdir, ignore_errors=True)
