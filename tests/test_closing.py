@@ -89,5 +89,16 @@ class LeavingTests(unittest.TestCase):
         self.assertNotIn("return app.exec()", source)
 
 
+class GamepadClosingTests(unittest.TestCase):
+    def test_the_gamepads_watcher_is_stopped_before_its_file_is_closed(self):
+        # Closing the file first made Qt print "QSocketNotifier: Invalid socket" on every exit.
+        import inspect
+        from ops_gui import app
+        source = inspect.getsource(app)
+        closing = source[source.index("def closeEvent"):]
+        stop, close = closing.index("self.pad_notifier.setEnabled(False)"), closing.index("os.close(self.pad_fd)")
+        self.assertLess(stop, close)
+
+
 if __name__ == "__main__":
     unittest.main()
