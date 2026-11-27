@@ -310,6 +310,57 @@ class IconTests(unittest.TestCase):
         self.assertIsNone(apps.icon_file("tetris", self.DIRS, lambda p: False))
 
 
+class ThemeTests(unittest.TestCase):
+    """Finding a picture in the desktop's icon theme, for entries that name one from it."""
+
+    def test_the_theme_named_in_a_desktop_settings_file(self):
+        self.assertEqual(apps.theme_from_settings("[Settings]\ngtk-theme-name=PiXnoir\ngtk-icon-theme-name=PiXtrix\n"), "PiXtrix")
+        self.assertEqual(apps.theme_from_settings('[Appearance]\nicon_theme="breeze-dark"\n'), "breeze-dark")
+        self.assertIsNone(apps.theme_from_settings("[Settings]\ngtk-icon-theme-name=\n"))
+        self.assertIsNone(apps.theme_from_settings("icon_theme_fallback=x\n"), "a longer key is not the key")
+        self.assertIsNone(apps.theme_from_settings(None))
+
+    def test_a_themes_fallbacks_come_from_its_index(self):
+        self.assertEqual(apps.theme_parents("[Icon Theme]\nName=PiXtrix\nInherits=Adwaita, gnome,hicolor\n"),
+                         ["Adwaita", "gnome", "hicolor"])
+        self.assertEqual(apps.theme_parents("[Icon Theme]\nName=x\n"), [])
+        self.assertEqual(apps.theme_parents(None), [])
+
+    def test_the_themes_to_look_in_end_with_hicolor_and_never_loop(self):
+        index = {"PiXtrix": "Inherits=Adwaita,hicolor", "Adwaita": "Inherits=AdwaitaLegacy,PiXtrix", "AdwaitaLegacy": None}
+        self.assertEqual(apps.theme_chain("PiXtrix", index.get), ["PiXtrix", "Adwaita", "AdwaitaLegacy", "hicolor"])
+        self.assertEqual(apps.theme_chain(None, index.get), ["hicolor"])
+        self.assertEqual(apps.theme_chain("hicolor", index.get), ["hicolor"])
+
+    def test_a_folders_size_is_read_from_either_layout(self):
+        self.assertEqual(apps.icon_size("/usr/share/icons/PiXtrix/48x48/apps/x.png"), 48)
+        self.assertEqual(apps.icon_size("/usr/share/icons/breeze-dark/apps/64/x.svg"), 64)
+        self.assertEqual(apps.icon_size("/usr/share/icons/Adwaita/scalable/apps/x.svg"), 512)
+        self.assertEqual(apps.icon_size("/usr/share/icons/odd/apps/x.png"), 0)
+
+    def test_the_file_chosen_is_the_smallest_that_fills_the_tile(self):
+        t = "/usr/share/icons/PiXtrix/"
+        index = apps.theme_index([t + "24x24/apps/utilities-system-monitor.png", t + "96x96/apps/utilities-system-monitor.png",
+                                  t + "64x64/apps/utilities-system-monitor.png", t + "48x48/apps/utilities-system-monitor.png",
+                                  t + "index.theme", t + "64x64/apps/readme"])
+        self.assertEqual(index, {"utilities-system-monitor": t + "64x64/apps/utilities-system-monitor.png"})
+
+    def test_with_nothing_big_enough_the_largest_is_used(self):
+        t = "/usr/share/icons/small/"
+        index = apps.theme_index([t + "16x16/apps/a.png", t + "48x48/apps/a.png", t + "32x32/apps/a.png"])
+        self.assertEqual(index["a"], t + "48x48/apps/a.png")
+
+    def test_outline_pictures_are_left_out_and_any_part_of_the_theme_counts(self):
+        t = "/usr/share/icons/breeze-dark/"
+        index = apps.theme_index([t + "devices/24/media-removable-symbolic.svg", t + "devices/64/media-removable.svg"])
+        self.assertEqual(index, {"media-removable": t + "devices/64/media-removable.svg"})
+
+    def test_this_projects_launchers_name_pictures_from_the_theme(self):
+        from ops_gui import launchers
+        named = {apps.parse_entry(text)["Icon"] for text in launchers.entries("/repo").values()}
+        self.assertEqual(named, {"utilities-system-monitor", "utilities-terminal"})
+
+
 class TabTests(unittest.TestCase):
     def test_the_apps_tab_is_only_there_when_asked_for_and_sits_before_settings(self):
         self.assertNotIn("Apps", data.tab_names({}, False))
