@@ -155,6 +155,36 @@ class RingTests(unittest.TestCase):
         self.assertEqual(len(navring.frame_region(4, 4, 3)), 4, "a tiny control still gets a frame")
 
 
+class TypingTests(unittest.TestCase):
+    """A stray arrow key must not take the highlight out of a box someone is typing in (typing_keeps)."""
+
+    def setUp(self):
+        from ops_gui import focusnav
+        self.keeps = focusnav.typing_keeps
+
+    def test_a_box_with_text_keeps_the_keyboards_up_and_down(self):
+        self.assertTrue(self.keeps("line", "up", True, "good mor"))
+        self.assertTrue(self.keeps("line", "down", True, "good mor"))
+
+    def test_an_empty_box_lets_the_keyboard_leave(self):
+        self.assertFalse(self.keeps("line", "up", True, ""))
+        self.assertFalse(self.keeps("line", "down", True, ""))
+
+    def test_the_terminals_box_always_keeps_them_for_its_history(self):
+        self.assertTrue(self.keeps("history", "up", True, ""))
+        self.assertTrue(self.keeps("history", "down", True, "ls"))
+
+    def test_the_gamepad_can_always_move_on(self):
+        for kind in ("line", "history"):
+            for direction in ("up", "down"):
+                self.assertFalse(self.keeps(kind, direction, False, "typed"))
+
+    def test_left_and_right_and_other_controls_are_not_its_business(self):
+        self.assertFalse(self.keeps("line", "left", True, "typed"))
+        self.assertFalse(self.keeps("history", "right", True, "typed"))
+        self.assertFalse(self.keeps("list", "up", True, "typed"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

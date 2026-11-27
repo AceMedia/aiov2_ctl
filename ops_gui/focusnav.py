@@ -117,3 +117,16 @@ def back_step(drawer_open, reading, in_page, full_screen, first_tab):
         return "window"
     return None if first_tab else "first"
 
+
+
+def typing_keeps(kind, direction, from_keyboard, has_text):
+    """Whether a box that is typed in keeps an up or down arrow instead of letting the highlight leave it.
+    Once the highlight has left a box, letters are shortcuts again (g, m and d switch rails, q quits), so a
+    stray arrow key in the middle of typing must not move it: a box with something typed in it keeps the
+    keyboard's up and down. The terminal's box always keeps them, since there they recall earlier commands.
+    The gamepad's D-pad is not a typing key, so it can always move on."""
+    if direction not in ("up", "down") or not from_keyboard:
+        return False
+    if kind == "history":
+        return True
+    return kind == "line" and bool(has_text)
