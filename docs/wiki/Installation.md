@@ -47,7 +47,7 @@ When it finishes it lists what happened to each feature:
 | `app` | The ops app (the full-screen window) | yes |
 | `console` | The ops console (terminal) | yes |
 | `wiki` | This wiki as a tab in the ops app, read offline | yes |
-| `wikipics` | The wiki's pictures, downloaded once (about 1.3 MB) | no |
+| `wikipics` | The wiki's pictures, downloaded once (about 2 MB) | no |
 | `gps` | GPS (`gpsd`) | yes |
 | `mesh` | LoRa mesh (`meshtasticd`) | yes |
 | `sdr` | Software radio (`rtl-sdr`, and a check that recovers `readsb`) | yes |

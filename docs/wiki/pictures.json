@@ -111,6 +111,18 @@
   "bytes": 74858,
   "sha256": "e628dec4cff893837be8255d724b09cad30eea330abc1a44018d150dc0f39c48"
  },
+ "img/clips/apps.webp": {
+  "bytes": 183666,
+  "sha256": "86b7c04bac82491ede5c5cc6d272c30a25a20787020778c79180364f1ae2d2e3"
+ },
+ "img/clips/dpad.webp": {
+  "bytes": 146250,
+  "sha256": "33dfb9851e04b65bc7eb5e90ae4d82b45cefd7a94ecfbe463cbde103b6fb9e67"
+ },
+ "img/clips/looks.webp": {
+  "bytes": 214684,
+  "sha256": "832c7edca0600504de5f4beb91b2dc523eb57358d3ed9a7101e289214742b964"
+ },
  "img/install/cli-01-features.webp": {
   "bytes": 27996,
   "sha256": "c9e98f138fc3a8e4d5d9aa06b05aed3607abb8d16f15dba8cd70e9c6dc0cb648"
