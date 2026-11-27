@@ -125,7 +125,11 @@ class PictureListTests(unittest.TestCase):
     def test_the_real_list_is_sound_and_every_picture_a_page_links_is_on_it(self):
         pictures = a.load_wiki_pictures(REPO)
         self.assertGreater(len(pictures), 40)
-        self.assertLess(sum(p["bytes"] for p in pictures.values()), 2_000_000, "the pictures are meant to be small")
+        # Still pictures were 1.5 MB. The clips (docs/README.md, "Record a clip") add a few hundred KB each, so the
+        # ceiling has room for a handful of them and no more: a clip that breaks it wants fewer frames.
+        self.assertLess(sum(p["bytes"] for p in pictures.values()), 3_000_000, "the pictures are meant to be small")
+        clips = [p["bytes"] for path, p in pictures.items() if path.startswith("img/clips/")]
+        self.assertLess(max(clips), 400_000, "one clip is meant to be a few hundred KB at most")
         self.assertEqual(a.load_wiki_pictures("/nonexistent"), {})
 
     def test_the_address_follows_the_repository_this_was_installed_from(self):
