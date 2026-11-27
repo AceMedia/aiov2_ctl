@@ -187,6 +187,8 @@ Off until you switch it on: **Settings > General > Show the Games tab**. It list
 
 The app only starts the game. It downloads nothing and sends nothing.
 
+[![Games](img/app/app-08-games.webp)](img/app/app-08-games.webp)
+
 ## Settings pages
 
 ### General
