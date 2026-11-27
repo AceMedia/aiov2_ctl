@@ -6804,7 +6804,7 @@ FEATURES = (
      "summary": "The project's wiki as a tab in the ops app, read offline. The pages come with the checkout.",
      "required": False, "default": True, "apt": (), "hardware": None, "needs": ("app",)},
     {"key": "wikipics", "title": "Wiki pictures",
-     "summary": "The wiki's pictures, downloaded once (about 1.3 MB), and the package that lets the app show them.",
+     "summary": "The wiki's pictures, downloaded once (about 2 MB), and the package that lets the app show them.",
      "required": False, "default": False, "apt": ("qt6-image-formats-plugins",), "hardware": None,
      "needs": ("wiki",)},
     {"key": "gps", "title": "GPS",

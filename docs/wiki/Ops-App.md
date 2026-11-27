@@ -65,6 +65,10 @@ The uConsole's own controls:
 
 A, B, X and Y work with the back switch in gamepad mode. In keyboard mode they send `j`, `k`, `u` and `i`.
 
+Moving round with the D-pad:
+
+[![Moving round the app with the D-pad](img/clips/dpad.webp)](img/clips/dpad.webp)
+
 ## The terminal drawer
 
 `X` slides a panel up over the bottom of the app, so you do not have to leave full screen to see what the app did or to run a command.
@@ -175,7 +179,7 @@ The tabs with their number keys, the keys, each rail's key with whether that rai
 This wiki, inside the app, read from the copy that came with the install. It works with no network. The list of
 pages is on the left and the page on the right; a link to another site opens in your web browser.
 
-The pictures are a separate feature, "Wiki pictures": about 1.3 MB, downloaded once. Without them each picture
+The pictures are a separate feature, "Wiki pictures": about 2 MB, downloaded once. Without them each picture
 is replaced by a line saying what it shows. Add either in Settings > Features or with
 `sudo aiov2_ctl --install --only wikipics`.
 
@@ -191,6 +195,8 @@ The app only starts the program. It downloads nothing and sends nothing.
 
 [![Apps](img/app/app-08-apps.webp)](img/app/app-08-apps.webp)
 
+[![Moving through the Apps grid with the D-pad](img/clips/apps.webp)](img/clips/apps.webp)
+
 ## Settings pages
 
 ### General
@@ -198,6 +204,10 @@ The app only starts the program. It downloads nothing and sends nothing.
 The display (light, dark or following the system; high contrast; the background as a dotted gradient, one flat colour or solid black; a font from the uConsole in place of the app's own), the feature colour used for borders and highlights on every screen, whether to show the Home tab, whether to show the Apps tab, whether to open in full screen at login, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
 
 [![Settings, General](img/app/settings-01-general.webp)](img/app/settings-01-general.webp)
+
+High contrast, then the plain and black backgrounds:
+
+[![High contrast and the plain and black backgrounds](img/clips/looks.webp)](img/clips/looks.webp)
 
 ### Notifications
 
