@@ -91,6 +91,14 @@ def build_settings(win, Bridge_signals):
     home_box.clicked.connect(lambda on: (win.set_flag("home_tab", on), win.rebuild_tabs()))
     v.addWidget(home_box)
 
+    v = card("Games", lay)
+    v.addWidget(label("A tab listing the games installed on this computer, to start them from here.", True))
+    games_box = QCheckBox("Show the Games tab")
+    games_box.setStyleSheet("font-size: 13pt;")
+    games_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    games_box.clicked.connect(lambda on: (win.set_flag("games_tab", on), win.rebuild_tabs()))
+    v.addWidget(games_box)
+
     v = card("Refresh", lay)
     v.addWidget(label("How often the Overview checks the hardware.", True))
     combo = QComboBox()
@@ -643,6 +651,7 @@ def build_settings(win, Bridge_signals):
         dash_page.refresh()
         refresh_notifications()
         home_box.setChecked(win.flag("home_tab") is not False)
+        games_box.setChecked(bool(win.flag("games_tab")))
         idx = REFRESH_CHOICES.index(win.refresh_seconds) if win.refresh_seconds in REFRESH_CHOICES else 0
         combo.blockSignals(True)
         combo.setCurrentIndex(idx)

@@ -8,7 +8,7 @@ Click a picture to see it full size.
 
 ## Which tabs you see
 
-In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, LoRa, SDR, Flipper, Settings, Help, Wiki.
+In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, LoRa, SDR, Flipper, Games, Settings, Help, Wiki.
 
 | Tab | When it is there |
 |---|---|
@@ -19,6 +19,7 @@ In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, 
 | GPS, LoRa, SDR | while that rail is on |
 | Flipper | while a Flipper Zero is plugged in |
 | Marauder | while an ESP32 Marauder board answers |
+| Games | when you turn it on in Settings > General |
 | Wiki | when the Local wiki feature is installed |
 
 Most of the pictures below were taken with every rail off, so the hardware tabs are not in their tab bar.
@@ -180,11 +181,17 @@ is replaced by a line saying what it shows. Add either in Settings > Features or
 
 ![](img/app/divider.webp)
 
+### Games
+
+Off until you switch it on: **Settings > General > Show the Games tab**. It lists the games installed on the uConsole, the same ones the desktop's menu shows under Games, whether they came from a package, a Flatpak or an entry you added yourself. Choose one and press **Play**, `Enter` or **A** to start it; a game that draws in a terminal is opened in one. **Look again**, `R`, or **X** on the gamepad rereads the list after you install or remove a game.
+
+The app only starts the game. It downloads nothing and sends nothing.
+
 ## Settings pages
 
 ### General
 
-Appearance (follow the system, light or dark), the feature colour used for borders and highlights on every screen, whether to show the Home tab, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
+Appearance (follow the system, light or dark), the feature colour used for borders and highlights on every screen, whether to show the Home tab, whether to show the Games tab, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
 
 [![Settings, General](img/app/settings-01-general.webp)](img/app/settings-01-general.webp)
 
