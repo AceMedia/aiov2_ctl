@@ -24,8 +24,8 @@
   "sha256": "12b31732cb82c8bbf65f63c54d035477f55dedb21793662b669cf6f8b8a9a404"
  },
  "img/app/app-06-settings.webp": {
-  "bytes": 33058,
-  "sha256": "2ef9ba3a16b72e71705d0a00bf40c17e8b9d90fadf520249c6f4718d71f92a15"
+  "bytes": 59790,
+  "sha256": "b5850a8880a53faaa81b4f52cf6a110c94ea8eaa283cc6e72e50fb860da263ce"
  },
  "img/app/app-07-help.webp": {
   "bytes": 33508,
@@ -48,40 +48,40 @@
   "sha256": "eb8842193beb03607c6ecacab69748a074a595a08147497e670849dc5738721f"
  },
  "img/app/settings-01-general.webp": {
-  "bytes": 33114,
-  "sha256": "5f44a77dc6f7fdae6e9ae5bbe9a65a6f157a72631a8b7878bdc3a08c639bc57d"
+  "bytes": 59790,
+  "sha256": "b5850a8880a53faaa81b4f52cf6a110c94ea8eaa283cc6e72e50fb860da263ce"
  },
  "img/app/settings-02-notifications.webp": {
-  "bytes": 21396,
-  "sha256": "41d8494d7b3e728613cf8271e408f0b55e6fcfe240737db36c7c87d0802a36e2"
+  "bytes": 45658,
+  "sha256": "cbc266e4743476b071acdd073328e045bdbcfd85280433439cea1a667c094f26"
  },
  "img/app/settings-03-dashboard.webp": {
-  "bytes": 30096,
-  "sha256": "43535ce25d6792beae4d377ae8b70a4ccfb6faeeaac91e10336c8a10869f0c88"
+  "bytes": 30210,
+  "sha256": "31f8d7ec989bdd212511245dd58a862c3e4efda72c8815a045325a0237b2a509"
  },
  "img/app/settings-04-power.webp": {
-  "bytes": 29220,
-  "sha256": "6167243dd63e7223fab04d7a66dd6f0709a79276278c785e3d3800f4428bbb17"
+  "bytes": 29148,
+  "sha256": "b14b5dc856f226eb0ed73c5defbe78879d08be1abb7f1d4b931d07eecada8e1a"
  },
  "img/app/settings-05-lora.webp": {
-  "bytes": 24232,
-  "sha256": "220770d38fe0fa1f02321014af61d5facced9158b3be2605e277a4d128d507ea"
+  "bytes": 24364,
+  "sha256": "06a539f1d4fdc1672a92525272d399f102c0662f2da747125049e1716f2bcfea"
  },
  "img/app/settings-06-wi-fi.webp": {
-  "bytes": 20996,
-  "sha256": "be29f3acf8bd7b4618a73d80587dd8ebf5438d8cc0a036a1f575c56c5acfaab7"
+  "bytes": 20162,
+  "sha256": "56f9c6885947c2f207e6f90766396be451a4daf4bee658b323e343fcf211c255"
  },
  "img/app/settings-07-flipper.webp": {
-  "bytes": 19430,
-  "sha256": "f77b1c9a58181df013721ddb32e4ff764d4c44c502a26a3d1ecdd45a6b67801d"
+  "bytes": 19620,
+  "sha256": "ba8455848f42c997197786da8abbaed851db79094075fd8a85140835392bcf71"
  },
  "img/app/settings-08-features.webp": {
-  "bytes": 47026,
-  "sha256": "8a8798cd315f4f67f03d483cf697f342b8ae7805596829cf83a8b4a41b3859a5"
+  "bytes": 62856,
+  "sha256": "7da484b482e63c43a003d1875980607560b10e0eb24e1944f013be87671c40f8"
  },
  "img/app/settings-09-debug.webp": {
-  "bytes": 45136,
-  "sha256": "84f5dc442c2ba617d0534ee4f6f8e4b2974a017dc8176b28d53c054197a5027d"
+  "bytes": 63418,
+  "sha256": "e1ffcc3bdc7d563d05e4dcd8c7e5c9c10a0c12f21eb07c9c7383667778d2f56a"
  },
  "img/app/tab-bluetooth.webp": {
   "bytes": 30392,
