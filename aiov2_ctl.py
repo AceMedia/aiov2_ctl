@@ -1978,6 +1978,7 @@ def boot_device_command(mode):
 # file in the user's runtime folder) so the others can show the change at once instead of at their next refresh.
 # The tray also opens the ops app and the ops console, through the same shortcuts the start menu uses.
 
+OPS_STARTUP_FILE = "uconsole-ops-fullscreen.desktop"   # written by the app (ops_gui/startup.py), in ~/.config/autostart
 OPS_SHORTCUTS = (("gui", "uconsole-ops-gui.desktop", "Open uConsole Ops"),
                  ("console", "uconsole-ops-console.desktop", "Open Ops Console"))
 OPS_GUI_PROCESS = "python3 -m ops_gui"
@@ -8422,22 +8423,52 @@ def file_stamp(path):
         return None
 
 
-def update_unfinished(meta, installed_stamp):
-    """True when the installed program is not the one whose installer last ran. An updater from an older
+def update_state(meta, installed_stamp, source_stamp=None):
+    """What is left of an update: '' (nothing), 'program' or 'installer'.
+
+    'program': the checkout holds a different aiov2_ctl from the installed one. The new code was pulled, by
+    `git pull` in the checkout or by anything else that is not --update, and never put in place. Everything
+    that follows the copy has not happened either: the new installer has not run, and what it keeps up to date
+    (the wiki's pictures, for one) is stale.
+    'installer': the installed program is not the one whose installer last ran. An updater from an older
     version pulls the new program and then installs it with the old code, so the new version's own install
-    steps have not happened yet. No record or no installed program means nothing is installed, not that an
-    update is half done."""
+    steps have not happened yet.
+
+    No record or no installed program means nothing is installed, not that an update is half done."""
     if not isinstance(meta, dict) or not installed_stamp:
-        return False
-    return meta.get("installed_by") != installed_stamp
+        return ""
+    if source_stamp and source_stamp != installed_stamp:
+        return "program"
+    return "installer" if meta.get("installed_by") != installed_stamp else ""
+
+
+def update_unfinished(meta, installed_stamp, source_stamp=None):
+    """True when an update has something left to do (see update_state)."""
+    return bool(update_state(meta, installed_stamp, source_stamp))
+
+
+def source_stamp(meta):
+    """The fingerprint of aiov2_ctl in the checkout this was installed from, or None when there is none."""
+    try:
+        return file_stamp(os.path.join(os.path.realpath(meta["repo_path"]), "aiov2_ctl.py"))
+    except (KeyError, TypeError):
+        return None
+
+
+def pending_update():
+    """'' , 'program' or 'installer' for this computer, now."""
+    meta = load_install_meta()
+    return update_state(meta, file_stamp(INSTALLED_PATH), source_stamp(meta))
 
 
 def update_is_unfinished():
-    return update_unfinished(load_install_meta(), file_stamp(INSTALLED_PATH))
+    return bool(pending_update())
 
 
 UNFINISHED_NOTICE = ("aiov2_ctl was updated, but the new version's installer has not run yet, so some of it is "
                      "not set up.\nFinish the update with: sudo aiov2_ctl --install")
+PENDING_NOTICE = ("A newer aiov2_ctl is in the checkout than the one installed: it was pulled but not put in place."
+                  "\nPut it in place with: aiov2_ctl --update")
 # Commands a person runs to look at things, where the notice is worth a line.
 NOTICE_ARGS = (None, "--status", "--help", "-h", "--doctor", "--features", "--check-update", "--channel")
 
@@ -8447,7 +8478,10 @@ def unfinished_notice_for(arg, rest, isatty, unfinished):
     nothing to say."""
     if not isatty or arg not in NOTICE_ARGS or "--json" in rest:
         return ""
-    return UNFINISHED_NOTICE if unfinished() else ""
+    state = unfinished()
+    if state == "program":
+        return PENDING_NOTICE
+    return UNFINISHED_NOTICE if state else ""
 
 
 def update_install_steps(python3, installed):
@@ -8886,6 +8920,11 @@ def uninstall_plan(selected, state):
             plan.append(_unstep(key, "shortcut", "user-file",
                                 f"Remove the start-menu shortcut '{title}', as {user}.", False,
                                 paths=(os.path.join(apps, name),)))
+            if key == "app":
+                plan.append(_unstep(key, "startup", "user-file",
+                                    f"Remove the file that opens the app in full screen at login, as {user}, if "
+                                    f"Settings > General put one there.", False,
+                                    paths=(os.path.join(home, ".config", "autostart", OPS_STARTUP_FILE),)))
             src = state.get("app_source")
             if src:
                 what = "uConsole Ops app" if key == "app" else "Ops console"
@@ -9882,19 +9921,32 @@ def update_self(confirmed=False):
         cwd=repo, text=True, capture_output=True,
     ).stdout.strip()
     if not summary:
-        print("Already up to date.")
-        if update_is_unfinished():
-            print("\n" + UNFINISHED_NOTICE.split("\n")[0])
+        print("Nothing new to fetch.")
+        state = pending_update()
+        if state:
+            pulled = state == "program"         # the new program is in the checkout and still has to be copied
+            print("\n" + (PENDING_NOTICE if pulled else UNFINISHED_NOTICE).split("\n")[0])
+            later = "aiov2_ctl --update --yes" if pulled else "sudo aiov2_ctl --install --yes"
+            if pulled and load_config().get("require_signed_updates"):
+                # Nothing was fetched to look over, so what goes in as root is the checkout as it stands: it has
+                # to be a signed commit with nothing changed on top.
+                changed = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo,
+                                         text=True, capture_output=True).stdout.strip()
+                if changed or not run_cmd(["git", "verify-commit", "HEAD"], cwd=repo):
+                    print("\nrequire_signed_updates is on, and the checkout is not a validly signed commit with "
+                          "nothing changed since. Not installing it.")
+                    return 1
             if not confirmed and "--yes" not in sys.argv:
                 if not sys.stdin.isatty():
-                    print("Finish the update with: sudo aiov2_ctl --install --yes")
+                    print(f"Finish the update with: {later}")
                     return 1
                 resp = input("\nRun the installer now, as root, to finish the update? [y/N]: ")
                 if resp.strip().lower() not in ("y", "yes"):
-                    print("Left as it is. Finish it later with: sudo aiov2_ctl --install")
+                    print(f"Left as it is. Finish it later with: {later.replace(' --yes', '')}")
                     return 0
             report_and_disable_mesh_autostart_if_default("Meshtastic boot config status:")
-            return finish_update(two_steps=False)
+            return finish_update(two_steps=pulled)
+        print("Already up to date.")
         return 0
 
     print("Incoming changes:\n")
@@ -10031,7 +10083,7 @@ def check_update_available(repo):
 # ==============================
 def main():
     notice = unfinished_notice_for(sys.argv[1] if len(sys.argv) > 1 else None, sys.argv[2:],
-                                   sys.stdout.isatty(), update_is_unfinished)
+                                   sys.stdout.isatty(), pending_update)
     if notice:
         print(notice + "\n", file=sys.stderr)
     if len(sys.argv) == 1:
