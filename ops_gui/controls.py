@@ -6,8 +6,9 @@ The stock keyboard firmware sends the D-pad as the arrow keys in keyboard mode, 
 clash with the shortcuts for the USB rail and the Flipper display, so they are only used in
 gamepad mode. The helpers at the top are pure so they can be tested without a device.
 
-    D-pad left / right   previous / next tab        D-pad up / down   move through lists
-    A                    the tab's main action      B                 back (leave full screen, or Overview)
+    D-pad                move the highlight: up to the row of tabs, left and right along it, down into the
+                         page, and between the controls of a page (the rules are in focusnav.py)
+    A                    press what is highlighted  B                 back one level
     X                    refresh                    Y                 full screen on or off
     Right button         back                       Middle button     refresh
 """
@@ -25,8 +26,8 @@ DEFAULT_BUTTONS = {0: "x", 1: "a", 2: "b", 3: "y"}
 AXES = {0: ("left", "right"), 1: ("up", "down")}
 
 ACTIONS = {
-    "left": "previous tab", "right": "next tab", "up": "up", "down": "down",
-    "a": "main action", "b": "back", "x": "refresh", "y": "full screen",
+    "left": "highlight left", "right": "highlight right", "up": "highlight up", "down": "highlight down",
+    "a": "press what is highlighted", "b": "back one level", "x": "refresh", "y": "full screen",
 }
 
 
@@ -79,9 +80,9 @@ def describe(event, mapping=None):
 def help_lines():
     return [
         "uConsole buttons:",
-        "D-pad left or right  previous or next tab, up or down  move through lists",
-        "A  main action of the tab (scan, start or stop, live display, save)",
-        "B  back (leaves full screen, else the first tab)    X  refresh    Y  full screen",
+        "D-pad  move the highlight: up to the tabs, left and right along them, down into the page",
+        "A  press what is highlighted (with nothing highlighted, the tab's main action)",
+        "B  back one level: out of the page to the tabs, then out of full screen    X  refresh    Y  full screen",
         "Right trackball button  back    Middle trackball button  refresh",
         "f or F11  full screen on or off (Esc leaves it)",
         "A B X Y need gamepad mode on the back switch: in keyboard mode they are the letters j k u i.",
