@@ -1447,6 +1447,29 @@ def build_window():
     return Window()
 
 
+def finish(code, streams=None, leave=os._exit, last_jobs=None):
+    """End the program once the window has gone. Everything the app saves or stops, it saves and stops in the
+    window's closeEvent, which has run by now. What would follow is Qt and Python each taking the same objects
+    apart from their own side, in an order neither controls, and on the uConsole that ended in a segmentation
+    fault more often than not: after the window had closed, so nothing was lost, but it is still a crash. There
+    is nothing left that is worth it, so what has been printed is flushed and the program leaves at once.
+    Leaving this way skips the jobs registered to run as Python ends (the radio registers one that stops its
+    helper programs), so those are run here first: they are plain Python and are not part of the crash."""
+    if last_jobs is None:
+        import atexit
+        last_jobs = atexit._run_exitfuncs
+    try:
+        last_jobs()
+    except Exception:
+        pass                                        # a job that fails must not stop the program leaving
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        try:
+            stream.flush()
+        except Exception:
+            pass                                    # a closed or broken pipe must not stop the program leaving
+    leave(int(code or 0))
+
+
 def main():
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
@@ -1455,7 +1478,7 @@ def main():
     if "--tab" in sys.argv:
         win.pending_tab = sys.argv[sys.argv.index("--tab") + 1] if len(sys.argv) > sys.argv.index("--tab") + 1 else ""
     win.showMaximized()
-    return app.exec()
+    finish(app.exec())
 
 
 if __name__ == "__main__":
