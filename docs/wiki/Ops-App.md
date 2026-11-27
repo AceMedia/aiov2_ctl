@@ -189,6 +189,8 @@ Choose a tile and press **Open**, `Enter` or **A** to start it; a program that d
 
 The app only starts the program. It downloads nothing and sends nothing.
 
+[![Apps](img/app/app-08-apps.webp)](img/app/app-08-apps.webp)
+
 ## Settings pages
 
 ### General
