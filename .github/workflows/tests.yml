@@ -1,0 +1,58 @@
+# Runs the tests on every pull request to, and every push to, the two update channels.
+# They run in the two Debian releases people have (12 with Python 3.11, 13 with Python 3.13), with Debian's own
+# packages, as an ordinary user: some tests are skipped for root.
+name: Tests
+
+on:
+  pull_request:
+    branches: [beta, main]
+  push:
+    branches: [beta, main]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests on ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:12", "debian:13"]
+    steps:
+      - name: Install the packages the tests use
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            python3 python3-numpy python3-textual python3-rich python3-pyqt6 \
+            git sudo curl ca-certificates
+
+      - name: Check out the code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Hand the checkout to an ordinary user
+        run: |
+          useradd -m -s /bin/sh tester
+          chown -R tester:tester "$GITHUB_WORKSPACE"
+          su tester -c 'git config --global user.name "Tests" && git config --global user.email "tests@example.invalid"'
+          su tester -c 'git config --global --add safe.directory "$PWD" && git config --global init.defaultBranch main'
+
+      - name: Versions
+        run: su tester -c 'id -un; python3 --version; git --version; python3 -c "import numpy, textual, rich, PyQt6; print(\"numpy\", numpy.__version__)"; dpkg-query -W python3-textual python3-rich python3-pyqt6'
+
+      - name: install.sh is valid shell
+        run: su tester -c 'sh -n install.sh'
+
+      - name: tools/clean-install-test.sh is valid shell
+        run: su tester -c 'sh -n tools/clean-install-test.sh'
+
+      - name: aiov2_ctl.py compiles
+        run: su tester -c 'python3 -m py_compile aiov2_ctl.py'
+
+      - name: Run the tests
+        run: su tester -c 'python3 -m unittest discover -s tests'
+
