@@ -578,6 +578,72 @@ def build_panel(win):
                     for idx, label in ((0, "1"), (5, "6"), (10, "11"), (13, "5G")):
                         self.text(p, x + 14 + idx * bw, base + 2, label, 16, pal["dim"])
 
+        # ---- the D-pad on the Home screen (see focusnav.py): the rail rows and the soft keys are its stops
+        def nav_targets(self):
+            """[(target, rect)] for everything on this screen that does something, as hit() would name it."""
+            from . import focusnav as _  # noqa: F401  (kept beside the rules it follows)
+            out = []
+            for row in range(len(self.lay["rack"])):
+                if pixel.rack_toggle(row) or row in (4, 5):
+                    r = self.rect_of(("rack", row))
+                    if r is not None:
+                        out.append((("row", row), (r.x(), r.y(), r.width(), r.height())))
+            for i in range(len(self.lay["keys"])):
+                r = self.rect_of(("key", i))
+                if r is not None:
+                    out.append((("key", i), (r.x(), r.y(), r.width(), r.height())))
+            return out
+
+        def nav_enter(self):
+            targets = dict(self.nav_targets())
+            if getattr(self, "nav_target", None) not in targets:
+                from . import focusnav
+                self.nav_target = focusnav.first_in_reading_order(list(targets.items()))
+
+        def nav_move(self, direction):
+            """Move between the rail rows and the soft keys. False when there is nothing further that way, so
+            the highlight can leave this screen (up, to the row of tabs)."""
+            from . import focusnav
+            targets = dict(self.nav_targets())
+            current = getattr(self, "nav_target", None)
+            if current not in targets:
+                self.nav_enter()
+                return self.nav_target is not None
+            there = focusnav.next_in_direction(targets[current], [(k, r) for k, r in targets.items() if k != current],
+                                               direction)
+            if there is None:
+                return False
+            self.nav_target = there
+            return True
+
+        def nav_rect(self):
+            from PyQt6.QtCore import QRect
+            rect = dict(self.nav_targets()).get(getattr(self, "nav_target", None))
+            return QRect(*rect) if rect else None
+
+        def nav_activate(self):
+            """A on the highlighted row or key: exactly what a tap on it does."""
+            target = getattr(self, "nav_target", None)
+            if target is not None:
+                self.activate(target)
+
+        def activate(self, target):
+            kind, n = target
+            if kind == "key":
+                win.home_key(n)
+                return
+            rail = pixel.rack_toggle(n)
+            if rail:
+                self.toggling, self.toggle_until = rail, time.time() + 25
+                win.toggle_rail(rail)
+                self.refresh(True)
+            elif n == 5:
+                win.home_key(0)
+            elif n == 4:                                # the Flipper or Bluetooth row opens its tab
+                tab = pixel.rack_tab((self.content.get(("rack", 4)) or ("",))[0])
+                if tab in getattr(win, "names", ()):
+                    win.goto(win.names.index(tab))
+
         def hit(self, x, y):
             """What the pointer is over that does something: a soft key, a rail row or the Wi-Fi row."""
             i = pixel.key_at(x, y, self.lay["keys"])
@@ -635,19 +701,10 @@ def build_panel(win):
             x, y = event.position().x(), event.position().y()
             i = pixel.key_at(x, y, self.lay["keys"])
             if i is not None:
-                win.home_key(i)
+                self.activate(("key", i))
                 return
             row = pixel.rack_at(x, y, self.lay["rack"])
-            rail = pixel.rack_toggle(row) if row is not None else None
-            if rail:
-                self.toggling, self.toggle_until = rail, time.time() + 25
-                win.toggle_rail(rail)
-                self.refresh(True)
-            elif row == 5:
-                win.home_key(0)
-            elif row == 4:                              # the Flipper or Bluetooth row opens its tab
-                tab = pixel.rack_tab((self.content.get(("rack", 4)) or ("",))[0])
-                if tab in getattr(win, "names", ()):
-                    win.goto(win.names.index(tab))
+            if row is not None:
+                self.activate(("row", row))
 
     return Home()

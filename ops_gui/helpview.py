@@ -166,10 +166,10 @@ RAILS = [
 ]
 # (symbol, variant, what it does): symbol is dpad, face, trackball
 BUTTONS = [
-    ("dpad", "lr", "previous or next tab"),
-    ("dpad", "ud", "move through lists"),
-    ("face", "A", "main action: scan, start, save"),
-    ("face", "B", "back, or leave full screen"),
+    ("dpad", "lr", "move the highlight; along the tabs"),
+    ("dpad", "ud", "move the highlight; up to the tabs"),
+    ("face", "A", "press what is highlighted"),
+    ("face", "B", "back one level"),
     ("face", "X", "refresh"),
     ("face", "Y", "full screen"),
     ("trackball", "rm", "trackball: right back, middle refresh"),

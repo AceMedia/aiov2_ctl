@@ -15,6 +15,7 @@ from ops_agent import handoff
 
 from . import fieldlog
 from . import runtime
+from . import focusnav, navring
 from . import (dither, helpview, controls, dashboard, data, drawer, flipper_panel, gps_panel, home_panel, lora_panel, marauder_panel, registry,
                     mesh_hub, net_panel, notify, pixel, reports, sdr_panel, settings_ui, skin, statusbar, style, wifi_panel)
 
@@ -433,8 +434,6 @@ def build_window():
             for key in ("f", "F11"):
                 QShortcut(QKeySequence(key), self, activated=self.toggle_fullscreen)
             QShortcut(QKeySequence("Escape"), self, activated=self.back)
-            QShortcut(QKeySequence("Left"), self, activated=lambda: self.dpad("left"))
-            QShortcut(QKeySequence("Right"), self, activated=lambda: self.dpad("right"))
             QShortcut(QKeySequence("Tab"), self, activated=lambda: self.step(1))
             QShortcut(QKeySequence("Shift+Tab"), self, activated=lambda: self.step(-1))
             QShortcut(QKeySequence("Backtab"), self, activated=lambda: self.step(-1))
@@ -804,14 +803,21 @@ def build_window():
             return lambda *a: None if self.typing() else fn()
 
         def back(self):
-            """Close the terminal drawer first, then leave full screen, otherwise go to the first tab."""
-            if self.drawer.isVisible():
+            """One level back at a time (the order is focusnav.back_step): close the terminal drawer, leave a
+            wiki page for its list, leave the page for the row of tabs, leave full screen, go to the first tab."""
+            step = focusnav.back_step(self.drawer.isVisible(),
+                                      self.current_name() == "Wiki" and self.pages["Wiki"].page.hasFocus(),
+                                      self.nav_on and self.nav_in_page(), self.isFullScreen(),
+                                      not self.names or self.current_name() == self.names[0])
+            if step == "drawer":
                 self.drawer.close_drawer()
-            elif self.isFullScreen():
+            elif step == "reading":
+                self.pages["Wiki"].back()
+            elif step == "tabs":
+                self.nav_to(self.tabs.tabBar())
+            elif step == "window":
                 self.showMaximized()
-            elif self.current_name() == "Wiki" and self.pages["Wiki"].back():
-                pass                                    # reading a wiki page: back is back to the list of pages
-            elif self.names and self.current_name() != self.names[0]:
+            elif step == "first":
                 self.goto(0)
 
         def primary(self):
@@ -832,28 +838,225 @@ def build_window():
             else:
                 self.refresh()
 
+        # ---- moving round the whole app with the D-pad or the arrow keys (the rules are in focusnav.py)
+        def nav_widgets(self):
+            """Every control the highlight can land on now: the row of tabs, the buttons beside it and what is
+            showing on this tab, or the terminal drawer while that is open. A control's own inner parts (the
+            rows of a list, the box inside a drop-down, the arrows of a row of tabs) are not separate stops."""
+            from PyQt6.QtWidgets import QAbstractSlider, QAbstractSpinBox, QScrollBar, QTabBar
+            if self.drawer.isVisible():
+                roots = [self.drawer]
+            else:
+                roots = [self.tabs.tabBar(), self.tabs.cornerWidget(Qt.Corner.TopRightCorner),
+                         self.pages.get(self.current_name())]
+            kinds = (QAbstractButton, QComboBox, QLineEdit, QAbstractItemView, QAbstractSlider, QAbstractSpinBox,
+                     QTextEdit, QPlainTextEdit, QTabBar)
+            whole = (QAbstractItemView, QComboBox, QAbstractSpinBox, QTabBar, QTextEdit, QPlainTextEdit)
+            found = []
+            for root in roots:
+                if root is None or not root.isVisible():
+                    continue
+                for w in [root] + root.findChildren(QWidget):
+                    if not w.isVisible() or not w.isEnabled() or w.width() < 6 or w.height() < 6 or \
+                            isinstance(w, QScrollBar):
+                        continue
+                    if not (isinstance(w, kinds) or hasattr(w, "nav_move") or focusnav.custom_clickable(type(w))):
+                        continue
+                    inside, p = False, w.parentWidget()
+                    while p is not None and p is not self:
+                        if isinstance(p, whole) or hasattr(p, "nav_move"):
+                            inside = True
+                            break
+                        p = p.parentWidget()
+                    if not inside:
+                        found.append(w)
+            return found
+
+        def nav_rect(self, w):
+            """A control's rectangle in the window's coordinates. A hand-drawn control says which part of
+            itself is highlighted."""
+            inner = w.nav_rect() if hasattr(w, "nav_rect") else None
+            r = inner if inner is not None else w.rect()
+            a, b = w.mapToGlobal(r.topLeft()), self.mapToGlobal(self.rect().topLeft())
+            return (a.x() - b.x(), a.y() - b.y(), r.width(), r.height())
+
+        def nav_focus(self, widgets=None):
+            """(the control that has the highlight, or None; every control it could move to)."""
+            widgets = self.nav_widgets() if widgets is None else widgets
+            f = QApplication.focusWidget()
+            while f is not None and f not in widgets:
+                f = f.parentWidget()
+            return f, widgets
+
+        def nav_kind(self, w):
+            """(what sort of control this is to an arrow key, whether it is at its first row, at its last)."""
+            from PyQt6.QtWidgets import QAbstractSlider, QAbstractSpinBox, QTabBar, QTreeWidget
+            if isinstance(w, QTreeWidget):
+                def more(step):
+                    item = step(w.currentItem()) if w.currentItem() is not None else None
+                    while item is not None:
+                        if item.flags() & Qt.ItemFlag.ItemIsSelectable:
+                            return True
+                        item = step(item)
+                    return False
+                return "list", not more(w.itemAbove), not more(w.itemBelow)
+            if isinstance(w, QAbstractItemView):
+                model, index = w.model(), w.currentIndex()
+                rows = model.rowCount(w.rootIndex()) if model is not None else 0
+                row = index.row() if index.isValid() else -1
+                return "list", row <= 0, row >= rows - 1
+            if isinstance(w, (QTextEdit, QPlainTextEdit)):
+                bar = w.verticalScrollBar()
+                return "text", bar.value() <= bar.minimum(), bar.value() >= bar.maximum()
+            if isinstance(w, QLineEdit):
+                return "line", True, True
+            if isinstance(w, QAbstractSlider):
+                return "slider", True, True
+            if isinstance(w, QAbstractSpinBox):
+                return "spin", True, True
+            if isinstance(w, QTabBar):
+                return "tabs", w.currentIndex() <= 0, w.currentIndex() >= w.count() - 1
+            return "other", True, True
+
+        def nav_into_page(self, widgets):
+            """Where down from the row of tabs lands: where the highlight last was on this tab, or the first
+            control a person would read."""
+            page = self.pages.get(self.current_name())
+            mine = [w for w in widgets if page is not None and (w is page or page.isAncestorOf(w))]
+            last = self.nav_last.get(self.current_name())
+            if last in mine:
+                return last
+            return focusnav.first_in_reading_order([(w, self.nav_rect(w)) for w in mine])
+
+        def nav_to(self, w):
+            """Give a control the highlight, and bring it into view if it is in a list that scrolls."""
+            from PyQt6.QtWidgets import QScrollArea
+            if w.focusPolicy() == Qt.FocusPolicy.NoFocus:      # made so that letter shortcuts kept working; they still do
+                w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            w.setFocus(Qt.FocusReason.TabFocusReason)
+            if hasattr(w, "nav_enter"):
+                w.nav_enter()
+            area = w.parentWidget()
+            while area is not None and not isinstance(area, QScrollArea):
+                area = area.parentWidget()
+            if area is not None:
+                area.ensureWidgetVisible(w, 30, 40)
+            page = self.pages.get(self.current_name())
+            if page is not None and (w is page or page.isAncestorOf(w)):
+                self.nav_last[self.current_name()] = w
+            self.nav_on = True
+            self.ring.follow()
+
+        def nav(self, direction, from_keyboard=False):
+            """Move the highlight one step. True when the arrow was used up here; False when the highlighted
+            control should have the key itself (only asked for a real key press, which Qt then delivers)."""
+            f, widgets = self.nav_focus()
+            bar = self.tabs.tabBar()
+            if f is None:                                      # nothing highlighted yet: start somewhere sensible
+                target = self.nav_into_page(widgets) if direction == "down" else None
+                self.nav_to(target if target is not None else bar)
+                return True
+            self.nav_on = True
+            if hasattr(f, "nav_move") and f.nav_move(direction):
+                self.ring.follow()
+                return True
+            kind, at_start, at_end = self.nav_kind(f)
+            if focusnav.passes_through(kind, direction, at_start, at_end):
+                self.ring.follow()
+                if from_keyboard:
+                    return False
+                key = {"up": Qt.Key.Key_Up, "down": Qt.Key.Key_Down, "left": Qt.Key.Key_Left,
+                       "right": Qt.Key.Key_Right}[direction]
+                self.nav_sending = True
+                try:
+                    for press in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                        QApplication.sendEvent(f, QKeyEvent(press, key, Qt.KeyboardModifier.NoModifier))
+                finally:
+                    self.nav_sending = False
+                return True
+            if f is bar and direction == "down":
+                target = self.nav_into_page(widgets)
+            else:
+                here = self.nav_rect(f)
+                target = focusnav.next_in_direction(here, [(w, self.nav_rect(w)) for w in widgets if w is not f],
+                                                    direction)
+            if target is not None:
+                self.nav_to(target)
+            return True
+
+        def nav_press(self, from_keyboard=False):
+            """A, or Enter: press what is highlighted. True when that was done here; False when the control
+            should have the key itself (a list row, a box being typed in), or there is nothing highlighted."""
+            from PyQt6.QtCore import QPointF
+            from PyQt6.QtGui import QMouseEvent
+            from PyQt6.QtWidgets import QTabBar
+            f, _ = self.nav_focus()
+            if f is None:
+                return False
+            if hasattr(f, "nav_activate"):
+                f.nav_activate()
+                self.ring.follow()
+                return True
+            if isinstance(f, QAbstractButton):
+                f.click()
+                return True
+            if isinstance(f, QComboBox):
+                f.showPopup()
+                return True
+            if isinstance(f, QTabBar):
+                self.nav("down")
+                return True
+            if isinstance(f, (QAbstractItemView, QTextEdit, QPlainTextEdit, QLineEdit)):
+                return False
+            if focusnav.custom_clickable(type(f)):                 # a hand-drawn control: the same as a click on it
+                at = QPointF(f.rect().center())
+                for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+                    QApplication.sendEvent(f, QMouseEvent(kind, at, f.mapToGlobal(at), Qt.MouseButton.LeftButton,
+                                                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+                return True
+            return False
+
+        def nav_ring_rect(self):
+            """The highlighted control's rectangle for the frame, or None when the frame should not show."""
+            if not self.nav_on or QApplication.activeWindow() is not self:
+                return None
+            f, _ = self.nav_focus()
+            return self.nav_rect(f) if f is not None and f.isVisible() else None
+
+        def nav_in_page(self):
+            f, _ = self.nav_focus()
+            page = self.pages.get(self.current_name())
+            return f is not None and page is not None and (f is page or page.isAncestorOf(f))
+
         def dpad(self, direction):
-            if direction in ("left", "right"):
-                self.step(-1 if direction == "left" else 1)
-                return
-            target = QApplication.focusWidget()
-            if target is None:
-                page = self.pages.get(self.current_name())
-                found = page.findChildren(QAbstractItemView) + page.findChildren(QPlainTextEdit) if page else []
-                found = [w for w in found if w.isVisible()]
-                if not found:
-                    return
-                target = found[0]
-                target.setFocus()
-            key = Qt.Key.Key_Up if direction == "up" else Qt.Key.Key_Down
-            for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
-                QApplication.sendEvent(target, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+            self.nav(direction)
+
+        def pad_to_dialog(self, action):
+            """While a question is on the screen the gamepad answers it: the D-pad moves between its buttons,
+            A presses the one that is highlighted and B is Esc."""
+            box = QApplication.activeModalWidget() or QApplication.activePopupWidget()
+            if box is None:
+                return False
+            key = {"up": Qt.Key.Key_Up, "down": Qt.Key.Key_Down, "left": Qt.Key.Key_Left, "right": Qt.Key.Key_Right,
+                   "a": Qt.Key.Key_Return, "b": Qt.Key.Key_Escape}.get(action)
+            if key is not None:
+                target = QApplication.focusWidget() or box
+                self.nav_sending = True
+                try:
+                    for press in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                        QApplication.sendEvent(target, QKeyEvent(press, key, Qt.KeyboardModifier.NoModifier))
+                finally:
+                    self.nav_sending = False
+            return True
 
         def act(self, action):
+            if self.pad_to_dialog(action):
+                return
             if action in ("left", "right", "up", "down"):
                 self.dpad(action)
             elif action == "a":
-                self.primary()
+                if not self.nav_press():                # nothing to press here: the tab's own main action
+                    self.primary()
             elif action == "b":
                 self.back()
             elif action == "x":
@@ -862,7 +1065,25 @@ def build_window():
                 self.toggle_fullscreen()
 
         def eventFilter(self, obj, event):
-            """The trackball's right button goes back and its middle button refreshes."""
+            """The arrow keys move the highlight and Enter presses it (see nav); the trackball's right button
+            goes back and its middle button refreshes."""
+            kind = event.type()
+            if kind == QEvent.Type.KeyPress and not self.nav_sending and QApplication.activeWindow() is self and \
+                    QApplication.activePopupWidget() is None and QApplication.activeModalWidget() is None and \
+                    obj is (QApplication.focusWidget() or self) and \
+                    event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
+                direction = {Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down", Qt.Key.Key_Left: "left",
+                             Qt.Key.Key_Right: "right"}.get(event.key())
+                if direction is not None:
+                    if self.nav(direction, from_keyboard=True):
+                        return True
+                elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.nav_on and \
+                        self.nav_press(from_keyboard=True):
+                    return True
+            elif kind == QEvent.Type.MouseButtonPress and self.nav_on and obj.isWidgetType() and \
+                    obj.window() is self:
+                self.nav_on = False                     # the pointer is in use: the highlight frame goes away
+                self.ring.drop()
             if event.type() == QEvent.Type.MouseButtonRelease and obj.isWidgetType() and \
                     obj.window() is self and not isinstance(obj, (QLineEdit, QPlainTextEdit, QComboBox)):
                 if event.button() == Qt.MouseButton.RightButton:
@@ -882,6 +1103,9 @@ def build_window():
                 self.pad_notifier.activated.connect(self.pad_read)
             self.pad_text = "Gamepad: none found." if self.pad_fd is None else "Gamepad: waiting for a button."
             self.pad_label.setText(self.pad_text)
+            self.nav_on, self.nav_sending, self.nav_last = False, False, {}
+            self.ring = navring.make(self, self.nav_ring_rect,
+                                     lambda: style.TOKENS["dark" if self.theme == "dark" else "light"]["accent2"])
             QApplication.instance().installEventFilter(self)
 
         def pad_read(self, *_):

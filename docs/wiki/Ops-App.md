@@ -29,6 +29,8 @@ Most of the pictures below were taken with every rail off, so the hardware tabs 
 |---|---|
 | `1` to `9` | open that tab |
 | `Tab` / `Shift`+`Tab` | next or previous tab |
+| Arrow keys | move the highlight, the same as the D-pad |
+| `Enter` | press what is highlighted |
 | `R` | refresh |
 | `S` | scan Wi-Fi |
 | `E` | Everything: open it and start a session |
@@ -53,10 +55,9 @@ The uConsole's own controls:
 
 | Control | What it does |
 |---|---|
-| D-pad left and right | previous or next tab |
-| D-pad up and down | move through lists |
-| A | main action: scan, start, save |
-| B | back, or leave full screen |
+| D-pad | move the highlight: up to the row of tabs, left and right along it, down into the page, and between the controls on a page |
+| A | press what is highlighted |
+| B | back one level: out of the page to the tabs, then out of full screen |
 | X | refresh |
 | Y | full screen |
 | Trackball buttons | right is back, middle is refresh |
