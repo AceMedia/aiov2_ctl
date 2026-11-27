@@ -1705,6 +1705,24 @@ def build_window():
     return Window()
 
 
+def finish(code, streams=None, leave=os._exit):
+    """End the program once the window has gone. Everything the app saves or stops, it saves and stops in the
+    window's closeEvent, which has run by now. What would follow is Qt and Python each taking the same objects
+    apart from their own side, in an order neither controls, and on the uConsole that ended in a segmentation
+    fault more often than not: after the window had closed, so nothing was lost, but it is still a crash. There
+    is nothing left that is worth it, so what has been printed is flushed and the program leaves at once.
+    The jobs registered to run as Python ends are deliberately not run: PyQt's own is one of them, and running
+    them here brought the crash straight back (4 of 6 exits on the uConsole). The only other one is the
+    radio's, which stops its helper programs; closeEvent has already done that through sdr_off, and those
+    helpers are started so that they end with this program in any case."""
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        try:
+            stream.flush()
+        except Exception:
+            pass                                    # a closed or broken pipe must not stop the program leaving
+    leave(int(code or 0))
+
+
 def main():
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
@@ -1713,7 +1731,7 @@ def main():
     if "--tab" in sys.argv:
         win.pending_tab = sys.argv[sys.argv.index("--tab") + 1] if len(sys.argv) > sys.argv.index("--tab") + 1 else ""
     win.showMaximized()
-    return app.exec()
+    finish(app.exec())
 
 
 if __name__ == "__main__":
