@@ -119,6 +119,10 @@
   "bytes": 146250,
   "sha256": "33dfb9851e04b65bc7eb5e90ae4d82b45cefd7a94ecfbe463cbde103b6fb9e67"
  },
+ "img/clips/everything.webp": {
+  "bytes": 343930,
+  "sha256": "86bbc621875246663748c4f3f338477d1bf641e6dcb04c8f629c99e3247145d0"
+ },
  "img/clips/looks.webp": {
   "bytes": 214684,
   "sha256": "832c7edca0600504de5f4beb91b2dc523eb57358d3ed9a7101e289214742b964"

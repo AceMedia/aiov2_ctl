@@ -61,6 +61,8 @@ recorded on a real uConsole and kept with the pictures, under `img/clips/`.
    network's name for stand-ins before the app starts. It does not hide what a screen lists: stay off the
    Network tab, Wi-Fi scans, GPS positions and mesh nodes, or cover them by hand. For a radio's screen, switch
    its rail on yourself first.
+   A clip that starts a scan or a session listens for real: what it hears is kept by the app as usual, and a
+   recorded session is saved like any other, so remove it afterwards if it was only for the clip.
 3. Turn the frames into the clip, in a clone of the wiki:
 
    ```bash

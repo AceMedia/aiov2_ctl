@@ -115,6 +115,10 @@ After Stop, or for a saved session, there is a map of the uConsole's own track w
 
 [![Everything](img/app/app-03-everything.webp)](img/app/app-03-everything.webp)
 
+A session of a minute and a half, played back in a few seconds:
+
+[![A session being recorded on the Everything tab](img/clips/everything.webp)](img/clips/everything.webp)
+
 ### Wi-Fi
 
 Passive listening only. Five pages:
@@ -179,7 +183,7 @@ The tabs with their number keys, the keys, each rail's key with whether that rai
 This wiki, inside the app, read from the copy that came with the install. It works with no network. The list of
 pages is on the left and the page on the right; a link to another site opens in your web browser.
 
-The pictures are a separate feature, "Wiki pictures": about 2 MB, downloaded once. Without them each picture
+The pictures are a separate feature, "Wiki pictures": about 2.5 MB, downloaded once. Without them each picture
 is replaced by a line saying what it shows. Add either in Settings > Features or with
 `sudo aiov2_ctl --install --only wikipics`.
 
