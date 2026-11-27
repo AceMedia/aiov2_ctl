@@ -107,13 +107,18 @@ def build_settings(win, Bridge_signals):
             made[value] = b
         return holder, made
 
+    def columns(lay, wide=1, narrow=1):
+        """Two columns of cards side by side on a page. Returns (left, right)."""
+        cols = QHBoxLayout()
+        cols.setSpacing(10)
+        left, right = QVBoxLayout(), QVBoxLayout()
+        cols.addLayout(left, wide)
+        cols.addLayout(right, narrow)
+        lay.addLayout(cols)
+        return left, right
+
     scroll, lay = page()
-    cols = QHBoxLayout()
-    cols.setSpacing(10)
-    left, right = QVBoxLayout(), QVBoxLayout()
-    cols.addLayout(left, 1)
-    cols.addLayout(right, 1)
-    lay.addLayout(cols)
+    left, right = columns(lay)
 
     v = card("Display", left)
     theme_row, theme_buttons = choices(((None, "System"), ("light", "Light"), ("dark", "Dark")),
@@ -214,30 +219,30 @@ def build_settings(win, Bridge_signals):
     sub.addTab(scroll, "General")
     # ---- Notifications
     scroll, lay = page()
-    v = card("What to tell me about", lay)
+    left, right = columns(lay)
+    v = card("What to tell me about", left)
     note_boxes = {}
     for key, name in notify.SOURCES:
-        box = QCheckBox(name)
-        box.setStyleSheet("font-size: 13pt;")
-        box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        box.clicked.connect(lambda on, k=key: win.set_notification(k, on))
-        v.addWidget(box)
+        box = onoff(lambda on, k=key: win.set_notification(k, on))
+        setting(v, name, "", box)
         note_boxes[key] = box
-    v = card("How", lay)
-    for key, name in (("toasts", "Pop-up notices inside the app"), ("system", "Desktop notifications too")):
-        box = QCheckBox(name)
-        box.setStyleSheet("font-size: 13pt;")
-        box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        box.clicked.connect(lambda on, k=key: win.set_notification(k, on))
-        v.addWidget(box)
+    left.addStretch(1)
+    v = card("How", right)
+    for key, name, hint in (("toasts", "Pop-up notices inside the app", "A notice over the corner of the window."),
+                            ("system", "Desktop notifications too", "The desktop's own, which show when the app "
+                                                                    "is behind another window.")):
+        box = onoff(lambda on, k=key: win.set_notification(k, on))
+        setting(v, name, hint, box)
         note_boxes[key] = box
     daemon_note = label("", True)
     v.addWidget(daemon_note)
-    test_b = button("Send a test notice")
+    test_b = button("Send")
     test_b.clicked.connect(lambda: win.notify_user("test", "Test notice", "This is what a notice looks like.", "good"))
-    v.addWidget(test_b)
+    setting(v, "Send a test notice", "To see what one looks like.", test_b)
     v.addWidget(label("Mesh notices need the LoRa rail on. The app keeps its connection to the mesh open for them, "
                       "and never sends anything.", True))
+    right.addStretch(1)
+    lay.addStretch(1)
     sub.addTab(scroll, "Notifications")
 
     def refresh_notifications():
@@ -253,15 +258,17 @@ def build_settings(win, Bridge_signals):
 
     # ---- Power
     scroll, lay = page()
-    v = card("Rails at boot", lay)
+    left, right = columns(lay)
+    v = card("Rails at boot", left)
     texts["boot"] = label("Checking...")
     v.addWidget(texts["boot"])
     v.addWidget(label("Rails stay off at boot unless you choose otherwise. To change one, run "
                       "sudo aiov2_ctl --boot-rail GPS on (or off).", True))
-    v = card("Measured rail power", lay)
+    left.addStretch(1)
+    v = card("Measured rail power", right)
     texts["measured"] = label("")
     v.addWidget(texts["measured"])
-    clear_m = button("Clear measurements")
+    clear_m = button("Clear")
 
     def do_clear_measurements():
         if win.ask("Forget every saved rail measurement?"):
@@ -274,7 +281,8 @@ def build_settings(win, Bridge_signals):
             refresh_measured()
 
     clear_m.clicked.connect(do_clear_measurements)
-    v.addWidget(clear_m)
+    clear_row = setting(v, "Clear measurements", "Forget every saved rail measurement.", clear_m)
+    right.addStretch(1)
     lay.addStretch(1)
     sub.addTab(scroll, "Power")
 
@@ -282,7 +290,7 @@ def build_settings(win, Bridge_signals):
         cache = data.load_rail_power()
         lines = [f"{data.RAIL_LABEL.get(n, n)}: {data.rail_power_text(n, cache)}" for n in data.RAILS if n in cache]
         texts["measured"].setText("\n".join(lines) or "Nothing measured yet. Measuring is offered on the Overview when the uConsole runs on battery.")
-        clear_m.setVisible(bool(lines))
+        clear_row.setVisible(bool(lines))
 
     # ---- LoRa
     scroll, lay = page()
@@ -314,7 +322,8 @@ def build_settings(win, Bridge_signals):
 
     # ---- Features: what the installer has put here, and adding or removing one
     scroll, lay = page()
-    v = card("Features", lay)
+    left, right = columns(lay, 3, 2)
+    v = card("Features", left)
     v.addWidget(label("What the installer has set up on this uConsole. Adding or removing one runs the same "
                       "installer as the command line and asks first. Removing never uninstalls a package, "
                       "switches a rail or deletes your saved settings.", True))
@@ -331,15 +340,17 @@ def build_settings(win, Bridge_signals):
     feat_log.hide()
     v.addWidget(feat_log)
     feat_rows = QVBoxLayout()
+    feat_rows.setSpacing(0)
     v.addLayout(feat_rows)
     feat_scroll = scroll
-    window_b = button("Open the installer window")
+    left.addStretch(1)
+    v = card("Installer", right)
+    window_b = button("Open")
     window_b.clicked.connect(lambda: subprocess.Popen(["aiov2_ctl", "--installer"], start_new_session=True,
                                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
-    v.addWidget(window_b, 0, Qt.AlignmentFlag.AlignLeft)
-    v.addWidget(label("The installer window does several at once, shows the full plan first, and repairs what "
-                      "is missing.", True))
-    v = card("Updates", lay)
+    setting(v, "The installer window", "Does several at once, shows the full plan first, and repairs what is "
+                                       "missing.", window_b)
+    v = card("Updates", right)
     update_note = label(features.UNFINISHED)
     update_note.hide()
     v.addWidget(update_note)
@@ -360,6 +371,7 @@ def build_settings(win, Bridge_signals):
     switch_l.hide()
     v.addWidget(switch_l)
     v.addWidget(label(features.UPDATE_HELP, True))
+    right.addStretch(1)
     lay.addStretch(1)
     sub.addTab(scroll, "Features")
     feat = {"report": None, "buttons": [], "busy": None, "channel": None, "job": None}
@@ -507,30 +519,37 @@ def build_settings(win, Bridge_signals):
             feat_note.setVisible(report["root"] is None)
             feat_note.setText("This app cannot get root here, so each button shows the command to type instead.")
         for row in report["features"]:
-            line = QHBoxLayout()
+            frame = QFrame()                                # one line per feature, as on every other page
+            frame.setObjectName("setting")
+            line = QHBoxLayout(frame)
+            line.setContentsMargins(2, 7, 2, 7)
+            line.setSpacing(18)
             words = QVBoxLayout()
+            words.setSpacing(1)
             name = label(row["title"])
             name.setStyleSheet("font-size: 13pt; font-weight: bold;")
             words.addWidget(name)
-            words.addWidget(label(row["summary"], True))
-            words.addWidget(label(features.state_text(row)))
+            about = label(row["summary"], True)
+            about.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+            words.addWidget(about)
+            state = label(features.state_text(row))
+            state.setStyleSheet("font-size: 11pt;")
+            words.addWidget(state)
             reason = features.kept_reason(row)
             if reason:
-                words.addWidget(label(reason, True))
+                why = label(reason, True)
+                why.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+                words.addWidget(why)
             line.addLayout(words, 1)
             what = features.action(row)
             if what:
                 b = button("Add" if what == "add" else "Remove")
-                b.setMinimumWidth(110)
+                b.setFixedWidth(110)
                 b.setEnabled(feat["busy"] is None)
                 b.clicked.connect(lambda _=False, r=row, w=what: change_feature(r, w))
                 feat["buttons"].append(b)
-                line.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
-            feat_rows.addLayout(line)
-            rule = QFrame()
-            rule.setFrameShape(QFrame.Shape.HLine)
-            rule.setStyleSheet("color: #444;")
-            feat_rows.addWidget(rule)
+                line.addWidget(b, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            feat_rows.addWidget(frame)
 
     def change_feature(row, what):
         report = feat["report"]
@@ -602,17 +621,15 @@ def build_settings(win, Bridge_signals):
 
     # ---- Debug
     scroll, lay = page()
-    v = card("Privacy first", lay)
+    left, right = columns(lay)
+    v = card("Privacy first", left)
     v.addWidget(label("Nothing is sent anywhere by this app. Logging and crash reports are off until "
                       "you turn them on, they stay on this uConsole, and sharing is always a step you "
                       "take yourself.", True))
-    log_box = QCheckBox("Keep a local log of what the app does")
-    crash_box = QCheckBox("Save a local crash report if the app crashes")
-    for cb in (log_box, crash_box):
-        cb.setStyleSheet("font-size: 13pt;")
-        v.addWidget(cb)
-    log_box.clicked.connect(lambda on: win.set_flag("debug_log", on))
-    crash_box.clicked.connect(lambda on: win.set_flag("crash_reports", on))
+    log_box = onoff(lambda on: win.set_flag("debug_log", on))
+    crash_box = onoff(lambda on: win.set_flag("crash_reports", on))
+    setting(v, "Keep a local log", "What the app does, kept on this uConsole.", log_box)
+    setting(v, "Save crash reports", "A local report if the app crashes.", crash_box)
     v.addWidget(label("With the log on, the app also keeps a field log for reading afterwards: every few seconds "
                       "the GPS reading (position, altitude, satellites), and every half minute the rails, battery, "
                       "temperature and what each scan has gathered. It holds positions, so it is never put into a "
@@ -622,7 +639,7 @@ def build_settings(win, Bridge_signals):
     texts["crashes"] = label("", True)
     v.addWidget(texts["crashes"])
 
-    v = card("Report a problem", lay)
+    v = card("Report a problem", right)
     v.addWidget(label("Prepare a report to read it first. It has versions, the status and --doctor output "
                       "and the recent log, with your username, host name, IP and MAC addresses removed. "
                       "No Wi-Fi scans or captures are included.", True))
@@ -711,8 +728,8 @@ def build_settings(win, Bridge_signals):
     QTimer.singleShot(9000, offer_crash)
     Bridge_signals.report.connect(got_report)
 
-    v = card("Clear", lay)
-    clear_b = button("Delete local log and crash reports")
+    v = card("Clear", left)
+    clear_b = button("Delete")
 
     def do_clear():
         if win.ask("Delete the local log and every saved crash report?"):
@@ -721,7 +738,10 @@ def build_settings(win, Bridge_signals):
             preview.clear()
 
     clear_b.clicked.connect(do_clear)
-    v.addWidget(clear_b)
+    setting(v, "Delete the local log and crash reports", "The log, the field log and every saved crash report.",
+            clear_b)
+    left.addStretch(1)
+    right.addStretch(1)
     lay.addStretch(1)
     sub.addTab(scroll, "Debug")
 
