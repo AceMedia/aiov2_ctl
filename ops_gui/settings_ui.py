@@ -55,25 +55,105 @@ def build_settings(win, Bridge_signals):
     sub.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     texts = {}      # key -> label that a background fetch fills in
 
-    # ---- General
-    scroll, lay = page()
-    v = card("Appearance", lay)
-    row = QHBoxLayout()
-    theme_buttons = {}
-    for choice, name in ((None, "Follow system"), ("light", "Light"), ("dark", "Dark")):
-        b = button(name)
+    # ---- General: two columns of cards; each line is a setting, what it is on the left, its control on the right
+    from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import QFontComboBox
+    from . import startup, style
+
+    def setting(v, title, hint, control):
+        line = QFrame()
+        line.setObjectName("setting")
+        h = QHBoxLayout(line)
+        h.setContentsMargins(2, 7, 2, 7)
+        h.setSpacing(18)
+        words = QVBoxLayout()
+        words.setSpacing(1)
+        name = QLabel(title)
+        name.setStyleSheet("font-size: 13pt;")
+        words.addWidget(name)
+        if hint:
+            small = QLabel(hint)
+            small.setWordWrap(True)
+            small.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+            words.addWidget(small)
+        h.addLayout(words, 1)
+        h.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        v.addWidget(line)
+        return line
+
+    def onoff(changed):
+        """A switch that says what it is: ON or OFF."""
+        b = QPushButton("OFF")
         b.setCheckable(True)
-        b.clicked.connect(lambda _=False, c=choice: (win.set_theme_choice(c), refresh_theme()))
-        row.addWidget(b)
-        theme_buttons[choice] = b
-    row.addStretch(1)
-    v.addLayout(row)
+        b.setFixedWidth(92)
+        b.setStyleSheet("font-size: 13pt;")
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.toggled.connect(lambda on: b.setText("ON" if on else "OFF"))
+        b.clicked.connect(changed)
+        return b
+
+    def choices(options, chosen):
+        """A row of buttons of which one is down. Returns (the row, {value: its button})."""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        made = {}
+        for value, name in options:
+            b = button(name)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, v=value: chosen(v))
+            row.addWidget(b)
+            made[value] = b
+        return holder, made
+
+    scroll, lay = page()
+    cols = QHBoxLayout()
+    cols.setSpacing(10)
+    left, right = QVBoxLayout(), QVBoxLayout()
+    cols.addLayout(left, 1)
+    cols.addLayout(right, 1)
+    lay.addLayout(cols)
+
+    v = card("Display", left)
+    theme_row, theme_buttons = choices(((None, "System"), ("light", "Light"), ("dark", "Dark")),
+                                       lambda c: (win.set_theme_choice(c), refresh_theme()))
+    setting(v, "Theme", "Light, dark, or whichever the desktop is using.", theme_row)
+    contrast_box = onoff(lambda on: win.set_contrast(on))
+    setting(v, "High contrast", "Pure black and white with solid edges, nothing see-through and no gradient.", contrast_box)
+    back_row, back_buttons = choices((("gradient", "Gradient"), ("plain", "Plain"), ("black", "Black")),
+                                     lambda c: (win.set_background(c), refresh_theme()))
+    setting(v, "Background", "The dotted gradient behind everything, one flat colour, or solid black.", back_row)
+    font_holder = QWidget()
+    font_row = QHBoxLayout(font_holder)
+    font_row.setContentsMargins(0, 0, 0, 0)
+    font_row.setSpacing(4)
+    font_box = QFontComboBox()
+    font_box.setMaximumWidth(250)
+    font_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    font_own = button("App's own")
+    font_own.setCheckable(True)
+    font_box.currentFontChanged.connect(lambda f: (win.set_font_family(f.family()), refresh_theme()))
+    font_own.clicked.connect(lambda: (win.set_font_family(""), refresh_theme()))
+    font_row.addWidget(font_box)
+    font_row.addWidget(font_own)
+    setting(v, "Font", "Any font on this computer in place of the app's own. Some screens pick it up the next "
+                       "time the app is opened.", font_holder)
 
     def refresh_theme():
         for choice, b in theme_buttons.items():
             b.setChecked(choice == win.saved_theme)
+        contrast_box.setChecked(bool(win.flag("high_contrast")))
+        for choice, b in back_buttons.items():
+            b.setChecked(choice == style.background(win.flag("background")))
+        family = win.flag("font") or ""
+        font_own.setChecked(not family)
+        if family:
+            font_box.blockSignals(True)
+            font_box.setCurrentFont(QFont(family))
+            font_box.blockSignals(False)
 
-    v = card("Feature colour", lay)
+    v = card("Feature colour", left)
     v.addWidget(label("Used for borders, the open tab, buttons as you press them and highlights, on every screen. "
                       "Drag in the square and the strip, type a hex colour, or pick a preset. It changes as you go "
                       "and is remembered.", True))
@@ -82,21 +162,11 @@ def build_settings(win, Bridge_signals):
     picker.changed.connect(lambda hx: win.set_feature_colour(hx))
     picker.committed.connect(lambda hx: win.set_feature_colour(hx, save=True))
     v.addWidget(picker)
+    left.addStretch(1)
 
-    v = card("Home screen", lay)
-    v.addWidget(label("A pixel art start screen in Debian colours, with soft keys on F1 to F5.", True))
-    home_box = QCheckBox("Show the Home tab")
-    home_box.setStyleSheet("font-size: 13pt;")
-    home_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    home_box.clicked.connect(lambda on: (win.set_flag("home_tab", on), win.rebuild_tabs()))
-    v.addWidget(home_box)
-
-    v = card("Apps", lay)
-    v.addWidget(label("A tab with the programs installed on this computer as tiles, games first, to start them "
-                      "from here.", True))
-    apps_box = QCheckBox("Show the Apps tab")
-    apps_box.setStyleSheet("font-size: 13pt;")
-    apps_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    v = card("Tabs", right)
+    home_box = onoff(lambda on: (win.set_flag("home_tab", on), win.rebuild_tabs()))
+    setting(v, "Home tab", "A pixel art start screen in Debian colours, with soft keys on F1 to F5.", home_box)
 
     def apps_switched(on):
         win.set_flag("apps_tab", on)
@@ -104,24 +174,42 @@ def build_settings(win, Bridge_signals):
             win.set_flag("games_tab", False)
         win.rebuild_tabs()
 
-    apps_box.clicked.connect(apps_switched)
-    v.addWidget(apps_box)
+    apps_box = onoff(apps_switched)
+    setting(v, "Apps tab", "The programs installed on this computer as tiles, games first, to start them "
+                           "from here.", apps_box)
 
-    v = card("Refresh", lay)
-    v.addWidget(label("How often the Overview checks the hardware.", True))
-    combo = QComboBox()
-    combo.setStyleSheet("font-size: 13pt;")
-    for s in REFRESH_CHOICES:
-        combo.addItem(f"Every {s} seconds", s)
-    combo.currentIndexChanged.connect(lambda i: win.set_refresh_seconds(combo.itemData(i)))
-    v.addWidget(combo)
-    v = card("Tray icon", lay)
-    auto = QCheckBox("Start the tray icon when I log in")
-    auto.setStyleSheet("font-size: 13pt;")
-    auto.clicked.connect(lambda on: threading.Thread(
+    v = card("Start-up", right)
+    start_note = label("", True)
+    start_note.hide()
+
+    def start_switched(on):
+        try:
+            startup.set_enabled(on)
+            start_note.hide()
+        except OSError as e:
+            start_note.setText(f"Could not change that: {e.strerror or e}")
+            start_note.show()
+        start_box.setChecked(startup.enabled())
+
+    start_box = onoff(start_switched)
+    setting(v, "Open in full screen at login", "The app fills the screen when the desktop starts, like a console's "
+            "own menu. No rail is switched on. To leave full screen: F11, Y on the gamepad, or the button at the "
+            "top right. To get the taskbar back for a moment, rest the pointer on the bottom edge of the screen.",
+            start_box)
+    v.addWidget(start_note)
+    auto = onoff(lambda on: threading.Thread(
         target=lambda: subprocess.run(["aiov2_ctl", "--autostart" if on else "--no-autostart"],
                                       capture_output=True, timeout=30), daemon=True).start())
-    v.addWidget(auto)
+    setting(v, "Tray icon at login", "The rails and services menu beside the clock.", auto)
+
+    v = card("Refresh", right)
+    combo = QComboBox()
+    combo.setStyleSheet("font-size: 13pt;")
+    for s_ in REFRESH_CHOICES:
+        combo.addItem(f"Every {s_} seconds", s_)
+    combo.currentIndexChanged.connect(lambda i: win.set_refresh_seconds(combo.itemData(i)))
+    setting(v, "Check the hardware", "How often the Overview looks at the rails and radios.", combo)
+    right.addStretch(1)
     lay.addStretch(1)
     sub.addTab(scroll, "General")
     # ---- Notifications
@@ -665,6 +753,7 @@ def build_settings(win, Bridge_signals):
         combo.setCurrentIndex(idx)
         combo.blockSignals(False)
         auto.setChecked(os.path.exists(os.path.expanduser("~/.config/autostart/aiov2_ctl.desktop")))
+        start_box.setChecked(startup.enabled())
         log_box.setChecked(bool(win.flag("debug_log")))
         crash_box.setChecked(bool(win.flag("crash_reports")))
         from . import fieldlog

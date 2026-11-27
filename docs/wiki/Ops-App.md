@@ -195,7 +195,7 @@ The app only starts the program. It downloads nothing and sends nothing.
 
 ### General
 
-Appearance (follow the system, light or dark), the feature colour used for borders and highlights on every screen, whether to show the Home tab, whether to show the Apps tab, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
+The display (light, dark or following the system; high contrast; the background as a dotted gradient, one flat colour or solid black; a font from the uConsole in place of the app's own), the feature colour used for borders and highlights on every screen, whether to show the Home tab, whether to show the Apps tab, whether to open in full screen at login, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
 
 [![Settings, General](img/app/settings-01-general.webp)](img/app/settings-01-general.webp)
 
