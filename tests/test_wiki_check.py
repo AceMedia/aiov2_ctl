@@ -208,7 +208,9 @@ class RealWiki(unittest.TestCase):
 
     def test_only_pages_and_pictures(self):
         pages, files = wc.read_wiki(WIKI)
-        self.assertEqual([f for f in sorted(files) if not (f.startswith("img/") and f.endswith(".png"))], [])
+        self.assertEqual([f for f in sorted(files) if not (f.startswith("img/") and f.endswith(".webp"))], [])
+        self.assertFalse(os.path.isdir(os.path.join(WIKI, "img")), "the pictures are kept in the wiki, not here")
+        self.assertGreater(len(files), 40, "the list of pictures stands in for them")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ Settings, Debug:
 - "Keep a local log of what the app does"
 - "Save a local crash report if the app crashes" (switching to the beta channel turns this on)
 
-[![Settings, Debug in the ops app](img/app/settings-09-debug.png)](img/app/settings-09-debug.png)
+[![Settings, Debug in the ops app](img/app/settings-09-debug.webp)](img/app/settings-09-debug.webp)
 
 ## After a crash
 

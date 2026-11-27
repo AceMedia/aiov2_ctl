@@ -16,8 +16,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT = os.path.join(HERE, "fonts", "press-start-2p.ttf")
-OUT = os.path.join(os.path.dirname(HERE), "docs", "wiki", "img", "app")
-NAMES = {"logo": "aio-ops-logo.png", "full": "aio-ops-logo-full.png", "divider": "divider.png"}
+OUT = "logo"
+NAMES = {"logo": "aio-ops-logo.webp", "full": "aio-ops-logo-full.webp", "divider": "divider.webp"}
 NAVY, PALE = "#10294b", "#f4f8f5"
 ORANGE = ("#ffe25c", "#ffad00", "#f39510", "#cc760c")           # top to bottom
 BLUE = ("#b7e5fa", "#83c7ee", "#3b82f6", "#1d4fb8")
@@ -251,13 +251,13 @@ def preview(images):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Draw the AIO Ops logo and divider.")
-    ap.add_argument("folder", nargs="?", default=OUT, help="where to write the PNGs (default: docs/wiki/img/app/)")
+    ap.add_argument("folder", nargs="?", default=OUT, help="where to write the three WebP files (default: a folder called logo, here)")
     ap.add_argument("--preview", metavar="FILE.png", help="also write all three on a light and a dark page")
     args = ap.parse_args()
     os.makedirs(args.folder, exist_ok=True)
     plain, full, rule = logo(), logo(sub=True), divider()
     for label, im in (("logo", plain), ("full", full), ("divider", rule)):
-        im.save(os.path.join(args.folder, NAMES[label]), optimize=True)
+        im.save(os.path.join(args.folder, NAMES[label]), "WEBP", lossless=True, quality=100, method=6, exact=True)
     if args.preview:
         preview([plain, full, rule]).save(args.preview, optimize=True)
     for label, im in (("logo", plain), ("full", full), ("divider", rule)):

@@ -14,7 +14,7 @@ def every_tab():
     """Every name tab_names can return: all the optional tabs shown and all the antenna rails on."""
     rails = {rail: "on" for _, rail in data.ANTENNA_RAILS}
     return data.tab_names({"rails": rails}, True, marauder_shown=True, home=True, network=True, bluetooth=True,
-                          everything=True)
+                          everything=True, wiki=True)
 
 
 def png_size(path):

@@ -18,7 +18,7 @@ If an older install left the app in a folder of its own, `~/ops-agentic`, that f
 aiov2_ctl --uninstall --dry-run
 ```
 
-[![The uninstall plan](img/install/cli-02-uninstall-plan.png)](img/install/cli-02-uninstall-plan.png)
+[![The uninstall plan](img/install/cli-02-uninstall-plan.webp)](img/install/cli-02-uninstall-plan.webp)
 
 ## Remove everything
 
@@ -28,11 +28,11 @@ sudo aiov2_ctl --uninstall
 
 It shows the plan and asks first:
 
-[![Uninstall asking before it removes anything](img/install/cli-03-uninstall-question.png)](img/install/cli-03-uninstall-question.png)
+[![Uninstall asking before it removes anything](img/install/cli-03-uninstall-question.webp)](img/install/cli-03-uninstall-question.webp)
 
 A running tray and ops app are closed before their files are removed. The result lists each feature:
 
-[![The result of an uninstall](img/install/cli-04-uninstall-result.png)](img/install/cli-04-uninstall-result.png)
+[![The result of an uninstall](img/install/cli-04-uninstall-result.webp)](img/install/cli-04-uninstall-result.webp)
 
 ## Remove one feature
 
@@ -44,11 +44,11 @@ Whatever cannot work without the feature you name is removed with it (removing `
 
 In the installer window, untick the feature and press "See the plan". The plan lists what will be removed first, and the button reads "Remove and install".
 
-[![One feature unticked in the installer window](img/install/gui-03-one-feature-unticked.png)](img/install/gui-03-one-feature-unticked.png)
+[![One feature unticked in the installer window](img/install/gui-03-one-feature-unticked.webp)](img/install/gui-03-one-feature-unticked.webp)
 
-[![The plan when a feature is being removed](img/install/gui-04-plan-to-remove.png)](img/install/gui-04-plan-to-remove.png)
+[![The plan when a feature is being removed](img/install/gui-04-plan-to-remove.webp)](img/install/gui-04-plan-to-remove.webp)
 
-[![The installer window after removing a feature](img/install/gui-06-removed.png)](img/install/gui-06-removed.png)
+[![The installer window after removing a feature](img/install/gui-06-removed.webp)](img/install/gui-06-removed.webp)
 
 ## Putting it back
 

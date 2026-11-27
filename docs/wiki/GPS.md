@@ -31,7 +31,7 @@ The GPS tab is there while the GPS rail is on. It has two pages.
 
 The app only talks to `gpsd` while this tab is showing.
 
-[![GPS, Live, indoors before a fix](img/app/tab-gps-live.png)](img/app/tab-gps-live.png)
+[![GPS, Live, indoors before a fix](img/app/tab-gps-live.webp)](img/app/tab-gps-live.webp)
 
 The picture was taken indoors, a minute after the rail came on, so there is no fix yet.
 
@@ -42,7 +42,7 @@ The picture was taken indoors, a minute after the rail came on, so there is no f
 - Trip figures and a north-up trace of the track with a scale bar. There are no map tiles and nothing is fetched.
 - The waypoints saved on the Live page, newest first.
 
-[![GPS, Track](img/app/tab-gps-track.png)](img/app/tab-gps-track.png)
+[![GPS, Track](img/app/tab-gps-track.webp)](img/app/tab-gps-track.webp)
 
 Track and waypoint files are private to your account (mode 600) and never leave the uConsole.
 

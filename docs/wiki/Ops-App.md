@@ -1,4 +1,4 @@
-![AIO Ops: the uConsole AIO v2 ops app, with its four rails GPS, LoRa, SDR and USB](img/app/aio-ops-logo-full.png)
+![AIO Ops: the uConsole AIO v2 ops app, with its four rails GPS, LoRa, SDR and USB](img/app/aio-ops-logo-full.webp)
 
 The ops app is the full-screen window for the uConsole: the rails, vitals, radios and settings in one place. It is the `app` feature of the installer and opens from the start menu as "uConsole Ops", or from the tray's menu. Its code is `ops_gui/` in this repository.
 
@@ -8,7 +8,7 @@ Click a picture to see it full size.
 
 ## Which tabs you see
 
-In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, LoRa, SDR, Flipper, Settings, Help.
+In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, LoRa, SDR, Flipper, Settings, Help, Wiki.
 
 | Tab | When it is there |
 |---|---|
@@ -19,6 +19,7 @@ In order: Home, Overview, Everything, Wi-Fi, Bluetooth, Network, Marauder, GPS, 
 | GPS, LoRa, SDR | while that rail is on |
 | Flipper | while a Flipper Zero is plugged in |
 | Marauder | while an ESP32 Marauder board answers |
+| Wiki | when the Local wiki feature is installed |
 
 Most of the pictures below were taken with every rail off, so the hardware tabs are not in their tab bar.
 
@@ -71,7 +72,7 @@ A, B, X and Y work with the back switch in gamepad mode. In keyboard mode they s
 - **WINDOW** opens your system's own terminal beside the app.
 - **CONSOLE** swaps to the [Ops Console](Ops-Console).
 
-![](img/app/divider.png)
+![](img/app/divider.webp)
 
 ## Tabs
 
@@ -79,7 +80,7 @@ A, B, X and Y work with the back switch in gamepad mode. In keyboard mode they s
 
 A start screen: the clock, power and a ticker along the top; below, what is switched on and what it is doing, the machine's vitals, and the radios; then a row of soft keys on the function keys. Tap a rail to switch it. It is drawn to be cheap on the battery and stops updating while hidden.
 
-[![Home](img/app/app-01-home.png)](img/app/app-01-home.png)
+[![Home](img/app/app-01-home.webp)](img/app/app-01-home.webp)
 
 ### Overview
 
@@ -87,11 +88,11 @@ Cards for battery and power, the rails and their switches, companions, GPS, LoRa
 
 On battery, each rail has a **Measure** button: it switches the rail, compares the battery's draw before and after, and remembers the result. It asks first. See [Power & Telemetry](Power-&-Telemetry).
 
-[![Overview](img/app/app-02-overview.png)](img/app/app-02-overview.png)
+[![Overview](img/app/app-02-overview.webp)](img/app/app-02-overview.webp)
 
 With the rails on, the GPS, LoRa and SDR cards appear:
 
-[![Overview with every rail on](img/app/rails-on-overview.png)](img/app/rails-on-overview.png)
+[![Overview with every rail on](img/app/rails-on-overview.webp)](img/app/rails-on-overview.webp)
 
 ### Everything
 
@@ -106,7 +107,7 @@ One session that records what every source that is already on can hear, side by 
 
 After Stop, or for a saved session, there is a map of the uConsole's own track with a mark for each network or address from a log saved during the session. A mark is where the uConsole was when it heard that thing strongest, not where the thing is. There are no map tiles and nothing is fetched. The track and marks can be saved as GPX or GeoJSON beside the session, privately.
 
-[![Everything](img/app/app-03-everything.png)](img/app/app-03-everything.png)
+[![Everything](img/app/app-03-everything.webp)](img/app/app-03-everything.webp)
 
 ### Wi-Fi
 
@@ -120,7 +121,7 @@ Passive listening only. Five pages:
 
 Survey and Sense need the USB rail on and the `listening` feature. See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
 
-[![Wi-Fi](img/app/app-04-wi-fi.png)](img/app/app-04-wi-fi.png)
+[![Wi-Fi](img/app/app-04-wi-fi.webp)](img/app/app-04-wi-fi.webp)
 
 ### Bluetooth
 
@@ -134,7 +135,7 @@ The Bluetooth Low Energy devices advertising around you, heard passively on the 
 
 See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
 
-[![Bluetooth, before a scan](img/app/tab-bluetooth.png)](img/app/tab-bluetooth.png)
+[![Bluetooth, before a scan](img/app/tab-bluetooth.webp)](img/app/tab-bluetooth.webp)
 
 ### Network
 
@@ -143,7 +144,7 @@ The wired link (cable, speed, address) and the hosts the system already knows ab
 - **Listen 30s** is passive: it hears what hosts announce and sends nothing.
 - **Sweep my subnet** and **Check ports** send traffic, so they ask first and only work on your own private network. Only use them on a network you own or have permission to look at.
 
-[![Network, with no cable plugged in](img/app/tab-network.png)](img/app/tab-network.png)
+[![Network, with no cable plugged in](img/app/tab-network.webp)](img/app/tab-network.webp)
 
 The MAC addresses are covered in this picture.
 
@@ -159,15 +160,24 @@ The Flipper tab has the status, the live screen, the SD card (Files), the apps i
 
 Nine pages, described below.
 
-[![Settings](img/app/app-06-settings.png)](img/app/app-06-settings.png)
+[![Settings](img/app/app-06-settings.webp)](img/app/app-06-settings.webp)
 
 ### Help
 
 The tabs with their number keys, the keys, each rail's key with whether that rail is on now, the uConsole's buttons, and the companions: Flipper, gamepad, USB rail and the internal Wi-Fi and Bluetooth card.
 
-[![Help](img/app/app-07-help.png)](img/app/app-07-help.png)
+[![Help](img/app/app-07-help.webp)](img/app/app-07-help.webp)
 
-![](img/app/divider.png)
+### Wiki
+
+This wiki, inside the app, read from the copy that came with the install. It works with no network. The list of
+pages is on the left and the page on the right; a link to another site opens in your web browser.
+
+The pictures are a separate feature, "Wiki pictures": about 1.3 MB, downloaded once. Without them each picture
+is replaced by a line saying what it shows. Add either in Settings > Features or with
+`sudo aiov2_ctl --install --only wikipics`.
+
+![](img/app/divider.webp)
 
 ## Settings pages
 
@@ -175,49 +185,49 @@ The tabs with their number keys, the keys, each rail's key with whether that rai
 
 Appearance (follow the system, light or dark), the feature colour used for borders and highlights on every screen, whether to show the Home tab, how often the Overview checks the hardware, and whether the tray icon starts when you log in.
 
-[![Settings, General](img/app/settings-01-general.png)](img/app/settings-01-general.png)
+[![Settings, General](img/app/settings-01-general.webp)](img/app/settings-01-general.webp)
 
 ### Notifications
 
 What to tell you about, as pop-up notices inside the app and, if you want, desktop notifications too. **Send a test notice** shows what one looks like. Mesh notices need the LoRa rail on.
 
-[![Settings, Notifications](img/app/settings-02-notifications.png)](img/app/settings-02-notifications.png)
+[![Settings, Notifications](img/app/settings-02-notifications.webp)](img/app/settings-02-notifications.webp)
 
 ### Dashboard
 
 Which cards show on the Overview and in what order, which rails appear, and what shows along the bottom of the window. **Reset to the default layout** puts it back.
 
-[![Settings, Dashboard](img/app/settings-03-dashboard.png)](img/app/settings-03-dashboard.png)
+[![Settings, Dashboard](img/app/settings-03-dashboard.webp)](img/app/settings-03-dashboard.webp)
 
 ### Power
 
 Which rails come on at boot, and the measured power of each rail, with **Clear measurements**. Rails stay off at boot unless you choose otherwise with `sudo aiov2_ctl --boot-rail GPS on` (or `off`).
 
-[![Settings, Power](img/app/settings-04-power.png)](img/app/settings-04-power.png)
+[![Settings, Power](img/app/settings-04-power.webp)](img/app/settings-04-power.webp)
 
 ### LoRa
 
 How `meshtasticd` starts: with the LoRa rail by default, or also at boot with `aiov2_ctl --mesh-on-boot`.
 
-[![Settings, LoRa](img/app/settings-05-lora.png)](img/app/settings-05-lora.png)
+[![Settings, LoRa](img/app/settings-05-lora.webp)](img/app/settings-05-lora.webp)
 
 ### Wi-Fi
 
 Saved scans. They are kept private to your account.
 
-[![Settings, Wi-Fi](img/app/settings-06-wi-fi.png)](img/app/settings-06-wi-fi.png)
+[![Settings, Wi-Fi](img/app/settings-06-wi-fi.webp)](img/app/settings-06-wi-fi.webp)
 
 ### Flipper
 
 Everything Flipper related is optional and only appears when one is plugged in.
 
-[![Settings, Flipper](img/app/settings-07-flipper.png)](img/app/settings-07-flipper.png)
+[![Settings, Flipper](img/app/settings-07-flipper.webp)](img/app/settings-07-flipper.webp)
 
 ### Features
 
 What the installer has set up, with a button to add or remove each feature. Adding or removing one runs the same installer as the command line and asks first. Removing never uninstalls a package, switches a rail or deletes your saved settings. **Open the installer window** does several at once and repairs what is missing. The update channel is here too: **Switch channel** moves between stable and beta, and switching to beta turns on crash saving. See [Installation](Installation) and [Updates and Channels](Updates-and-Channels).
 
-[![Settings, Features](img/app/settings-08-features.png)](img/app/settings-08-features.png)
+[![Settings, Features](img/app/settings-08-features.webp)](img/app/settings-08-features.webp)
 
 ### Debug
 
@@ -231,4 +241,4 @@ The log and field log are in `~/.local/state/ops_gui`.
 
 See [Reporting Problems](Reporting-Problems).
 
-[![Settings, Debug](img/app/settings-09-debug.png)](img/app/settings-09-debug.png)
+[![Settings, Debug](img/app/settings-09-debug.webp)](img/app/settings-09-debug.webp)

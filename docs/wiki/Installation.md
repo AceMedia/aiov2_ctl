@@ -28,15 +28,15 @@ To see the plan without changing anything (no root needed):
 sh install.sh --dry-run
 ```
 
-[![The plan from install.sh --dry-run](img/install/cli-05-install-plan.png)](img/install/cli-05-install-plan.png)
+[![The plan from install.sh --dry-run](img/install/cli-05-install-plan.webp)](img/install/cli-05-install-plan.webp)
 
 The installer prints every step and asks once:
 
-[![The installer asking before it changes anything](img/install/cli-06-install-question.png)](img/install/cli-06-install-question.png)
+[![The installer asking before it changes anything](img/install/cli-06-install-question.webp)](img/install/cli-06-install-question.webp)
 
 When it finishes it lists what happened to each feature:
 
-[![The result of an install](img/install/cli-07-install-result.png)](img/install/cli-07-install-result.png)
+[![The result of an install](img/install/cli-07-install-result.webp)](img/install/cli-07-install-result.webp)
 
 ## Features
 
@@ -46,6 +46,8 @@ When it finishes it lists what happened to each feature:
 | `tray` | The system tray | yes |
 | `app` | The ops app (the full-screen window) | yes |
 | `console` | The ops console (terminal) | yes |
+| `wiki` | This wiki as a tab in the ops app, read offline | yes |
+| `wikipics` | The wiki's pictures, downloaded once (about 1.3 MB) | no |
 | `gps` | GPS (`gpsd`) | yes |
 | `mesh` | LoRa mesh (`meshtasticd`) | yes |
 | `sdr` | Software radio (`rtl-sdr`, and a check that recovers `readsb`) | yes |
@@ -60,7 +62,7 @@ See what is installed at any time:
 aiov2_ctl --features
 ```
 
-[![aiov2_ctl --features](img/install/cli-01-features.png)](img/install/cli-01-features.png)
+[![aiov2_ctl --features](img/install/cli-01-features.webp)](img/install/cli-01-features.webp)
 
 ## Choosing features
 
@@ -72,7 +74,7 @@ sudo aiov2_ctl --install --all          # everything
 sudo aiov2_ctl --install --pick         # a picker in the terminal
 ```
 
-[![The terminal picker](img/install/cli-08-install-picker.png)](img/install/cli-08-install-picker.png)
+[![The terminal picker](img/install/cli-08-install-picker.webp)](img/install/cli-08-install-picker.webp)
 
 In a window, from the start menu ("AIO v2 installer") or:
 
@@ -82,15 +84,15 @@ aiov2_ctl --installer
 
 Tick what you want. "The usual set", "Everything" and "Only what is needed" set the ticks for you.
 
-[![The installer window: choose what to install](img/install/gui-01-choose.png)](img/install/gui-01-choose.png)
+[![The installer window: choose what to install](img/install/gui-01-choose.webp)](img/install/gui-01-choose.webp)
 
 "See the plan" shows exactly what will happen. Nothing has changed yet at this point.
 
-[![The installer window: the plan](img/install/gui-09-plan-to-install.png)](img/install/gui-09-plan-to-install.png)
+[![The installer window: the plan](img/install/gui-09-plan-to-install.webp)](img/install/gui-09-plan-to-install.webp)
 
 The window shows the installer's output while it works, and the result at the end.
 
-[![The installer window: finished](img/install/gui-10-installed.png)](img/install/gui-10-installed.png)
+[![The installer window: finished](img/install/gui-10-installed.webp)](img/install/gui-10-installed.webp)
 
 ## Repair
 
@@ -102,7 +104,7 @@ sudo aiov2_ctl --repair
 
 The installer window has the same thing as "Repair what is installed".
 
-[![The installer window: the repair plan](img/install/gui-12-repair-plan.png)](img/install/gui-12-repair-plan.png)
+[![The installer window: the repair plan](img/install/gui-12-repair-plan.webp)](img/install/gui-12-repair-plan.webp)
 
 ## Things to know
 

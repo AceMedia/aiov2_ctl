@@ -6800,6 +6800,13 @@ FEATURES = (
      "summary": "The same tools in a terminal (ops.py).",
      "required": False, "default": True, "apt": ("git", "python3-textual", "python3-numpy"), "hardware": None,
      "needs": ("core",)},
+    {"key": "wiki", "title": "Local wiki",
+     "summary": "The project's wiki as a tab in the ops app, read offline. The pages come with the checkout.",
+     "required": False, "default": True, "apt": (), "hardware": None, "needs": ("app",)},
+    {"key": "wikipics", "title": "Wiki pictures",
+     "summary": "The wiki's pictures, downloaded once (about 1.3 MB), and the package that lets the app show them.",
+     "required": False, "default": False, "apt": ("qt6-image-formats-plugins",), "hardware": None,
+     "needs": ("wiki",)},
     {"key": "gps", "title": "GPS",
      "summary": "gpsd, which reads the GPS receiver for the app and the console.",
      "required": False, "default": True, "apt": ("gpsd",), "hardware": "aio_board", "needs": ("core",)},
@@ -7209,6 +7216,12 @@ def install_state(environ=None, euid=None, run=_run_text):
             present.add("autostart")
     if source:
         present.add("app-files")
+    pictures = load_wiki_pictures(source) if source else {}
+    if who:
+        if os.path.isfile(os.path.join(wiki_home(who.pw_dir), "enabled")):
+            present.add("wiki-on")
+        if pictures and not wiki_pictures_missing(pictures, wiki_home(who.pw_dir)):
+            present.add("wiki-pictures")
     # The rules file can only be read by root; anyone else asks sudo what they may run, which needs no password
     # once the rules are there.
     listening = None
@@ -7229,6 +7242,8 @@ def install_state(environ=None, euid=None, run=_run_text):
         "home": who.pw_dir if who else None,
         "app_source": source,
         "old_checkout": old_checkout,
+        "wiki_pictures": {"count": len(pictures), "bytes": sum(p["bytes"] for p in pictures.values())},
+        "remote": (load_install_meta() or {}).get("remote"),
         "installed": installed,
         "unavailable": unavailable,
         "no_package_lists": not lists,
@@ -7242,6 +7257,8 @@ FEATURE_MARKERS = {
     "tray": ("desktop-entry",),
     "app": ("app-files", "gui-shortcut"),
     "console": ("app-files", "console-shortcut"),
+    "wiki": ("wiki-on",),
+    "wikipics": ("wiki-pictures",),
     "sdr": ("sdr-recovery",),
     "listening": ("sudoers-listening",),
     "flipper": ("udev",),
@@ -7309,6 +7326,158 @@ def _hold_step(key):
                   f"If this install is what adds {pkg}, stop it and keep it from starting at boot "
                   f"({', '.join(units)}). One that was already here is left exactly as it is. "
                   f"Start it yourself with: {start}", True, "", package=pkg, disables=tuple(units), start=start)]
+
+
+# ---- the local wiki ----------------------------------------------------------------------------------------------
+# The wiki's pages come with the checkout (docs/wiki) and the ops app shows them in a Wiki tab. Its pictures do
+# not come with it: they are lossless WebP files kept in the project's GitHub wiki, listed in
+# docs/wiki/pictures.json with their size and SHA-256, and downloaded only for someone who picks 'wikipics'.
+WIKI_DIR = os.path.join("docs", "wiki")
+PROJECT_REPO = "AceMedia/aiov2_ctl"
+WIKI_PICTURE_LIMIT = 4 << 20          # no single picture is anywhere near this
+_WIKI_PICTURE_PATH = re.compile(r"img/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.webp")
+
+
+def wiki_home(home):
+    """Where a user's wiki switch and downloaded pictures are kept."""
+    return os.path.join(home, ".local", "share", "aiov2_ctl", "wiki")
+
+
+def repo_slug(url):
+    """'OWNER/NAME' from a GitHub address, however it is spelled, or None."""
+    m = re.search(r"github\.com[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\s*$", url or "")
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def wiki_pictures_url(remote=None):
+    """Where the wiki's pictures are served from: the wiki of the repository this was installed from."""
+    return f"https://raw.githubusercontent.com/wiki/{repo_slug(remote) or PROJECT_REPO}/"
+
+
+def good_wiki_pictures(data):
+    """The entries of a pictures list that are what they should be: a WebP under img/, a sane size, a SHA-256.
+    Anything else is dropped, so a path can never lead out of the pictures folder."""
+    good = {}
+    for path, info in (data.items() if isinstance(data, dict) else ()):
+        if (isinstance(path, str) and _WIKI_PICTURE_PATH.fullmatch(path) and ".." not in path
+                and isinstance(info, dict) and isinstance(info.get("bytes"), int)
+                and not isinstance(info.get("bytes"), bool) and 0 < info["bytes"] <= WIKI_PICTURE_LIMIT
+                and isinstance(info.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", info["sha256"])):
+            good[path] = {"bytes": info["bytes"], "sha256": info["sha256"]}
+    return good
+
+
+def load_wiki_pictures(source):
+    """The list of the wiki's pictures kept in the checkout, or {} when there is none."""
+    try:
+        with open(os.path.join(source, WIKI_DIR, "pictures.json"), encoding="utf-8") as f:
+            return good_wiki_pictures(json.load(f))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def wiki_pictures_missing(pictures, folder, size=os.path.getsize):
+    """The listed pictures that are not in `folder` at their right size."""
+    gone = []
+    for path, info in sorted(pictures.items()):
+        try:
+            if size(os.path.join(folder, path)) != info["bytes"]:
+                gone.append(path)
+        except OSError:
+            gone.append(path)
+    return gone
+
+
+def fetch_wiki_pictures(pictures, folder, base_url, get=None):
+    """Download the listed pictures that are not already here. Each is checked against its size and SHA-256
+    before it is put in place, so a wrong or cut-off file is never kept. Returns (fetched, already, failed);
+    failed is [(path, why)]."""
+    import hashlib
+
+    def over_the_network(url):
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=30) as r:
+            return r.read(WIKI_PICTURE_LIMIT + 1)
+    get = get or over_the_network
+    fetched, already, failed = [], [], []
+    for path, info in sorted(pictures.items()):
+        target = os.path.join(folder, path)
+        try:
+            with open(target, "rb") as f:
+                if hashlib.sha256(f.read()).hexdigest() == info["sha256"]:
+                    already.append(path)
+                    continue
+        except OSError:
+            pass
+        try:
+            data = get(base_url + path)
+        except Exception as exc:
+            failed.append((path, str(exc) or type(exc).__name__))
+            continue
+        if len(data) != info["bytes"] or hashlib.sha256(data).hexdigest() != info["sha256"]:
+            failed.append((path, "what came back is not the listed picture"))
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        part = target + ".part"
+        with open(part, "wb") as f:
+            f.write(data)
+        os.replace(part, target)
+        fetched.append(path)
+    return fetched, already, failed
+
+
+def wiki_pictures_command(args):
+    """aiov2_ctl --wiki-pictures fetch CHECKOUT FOLDER URL: the download step, run as the user by the
+    installer. Returns the exit code."""
+    args = list(args or ())
+    if len(args) != 4 or args[0] != "fetch":
+        print("Usage: aiov2_ctl --wiki-pictures fetch CHECKOUT FOLDER URL")
+        return 2
+    if os.geteuid() == 0:
+        print("Run this as yourself, not as root: the pictures go in your own folder.")
+        return 1
+    if not args[3].startswith(("https://", "file://")):
+        print("The address must start with https:// (or file:// for a copy on this machine).")
+        return 2
+    pictures = load_wiki_pictures(args[1])
+    if not pictures:
+        print(f"No list of pictures in {os.path.join(args[1], WIKI_DIR)}.")
+        return 1
+    fetched, already, failed = fetch_wiki_pictures(pictures, args[2], args[3])
+    print(f"{len(fetched)} downloaded, {len(already)} already here, {len(failed)} failed.")
+    for path, why in failed[:5]:
+        print(f"  {path}: {why}")
+    return 1 if failed else 0
+
+
+def _wiki_steps(key, state):
+    """The steps for the local wiki (the Wiki tab's switch) and for its pictures (the download)."""
+    user, home, source = state.get("user"), state.get("home"), state.get("app_source")
+    if not user or not home:
+        return [_step(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the wiki"), False, "",
+                      blocks=True)]
+    if not source:
+        return [_step(key, "no-files", "note",
+                      "The wiki's pages come with this tool's git checkout, and this install is not running "
+                      "from one. Install git and run install.sh, and they go in with it.", False, "",
+                      skips=True)]
+    folder = wiki_home(home)
+    if key == "wiki":
+        return [_step(key, "on", "wiki-on",
+                      f"Switch on the Wiki tab in the ops app for {user}: an empty file, {folder}/enabled. The "
+                      f"pages are already here, in {os.path.join(source, WIKI_DIR)}, and are read offline.",
+                      False, f"Remove {folder}/enabled", path=folder)]
+    info = state.get("wiki_pictures") or {}
+    if not info.get("count"):
+        return [_step(key, "no-list", "note",
+                      "This version has no list of the wiki's pictures, so there is nothing to download.",
+                      False, "", skips=True)]
+    url = wiki_pictures_url(state.get("remote"))
+    return [_step(key, "fetch", "wiki-pictures",
+                  f"Download the wiki's {info['count']} pictures ({info['bytes'] / 1e6:.1f} MB) from {url} "
+                  f"into {folder}, as {user}. Each is checked against the list in docs/wiki/pictures.json "
+                  f"before it is kept. Nothing about you or this machine is sent.", False,
+                  f"Remove {folder}/img", path=folder, source=source, url=url)]
 
 
 def _ops_steps(key, selected, state):
@@ -7403,6 +7572,8 @@ def install_plan(selected_keys, facts, state):
                                   "The console's meshtastic library is not an apt package. The console installs "
                                   "what it lacks itself the first time you run it, as you; this installer "
                                   "never runs pip as root.", False, ""))
+        elif key in ("wiki", "wikipics"):
+            plan += _wiki_steps(key, state)
         elif key == "sdr":
             plan.append(_step(key, "recovery", "systemd",
                               f"Write the readsb recovery ({SDR_RECOVERY_DROPIN_PATH}) and the once-a-minute "
@@ -7928,6 +8099,35 @@ def _act_old_folder(step, ctx, run=_run_text, closer=None, asking=None):
     return _remove_ops_folder(step["path"], ctx, run, closer, keep_if_asked=True, asking=asking)
 
 
+def _act_wiki_on(step, ctx, run=_run_text):
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    if os.path.isfile(os.path.join(step["path"], "enabled")):
+        return "already", ""
+    rc, _, err = run(as_user(user, ["sh", "-c", 'mkdir -p "$1" && : > "$1/enabled"', "sh", step["path"]]),
+                     cwd="/", timeout=30)
+    if rc != 0:
+        return "failed", (err.strip().splitlines() or ["the switch could not be written"])[-1]
+    return "done", "restart the ops app to see the Wiki tab"
+
+
+def _act_wiki_pictures(step, ctx, run=_run_text):
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    pictures = load_wiki_pictures(step["source"])
+    if pictures and not wiki_pictures_missing(pictures, step["path"]):
+        return "already", ""
+    # The download runs as the user, never as root: the pictures go in the user's own folder.
+    rc, out, err = run(as_user(user, ["/usr/bin/python3", os.path.realpath(__file__), "--wiki-pictures", "fetch",
+                                      step["source"], step["path"], step["url"]]), cwd="/", timeout=1800)
+    said = [line.strip() for line in (out + "\n" + err).splitlines() if line.strip()]
+    if rc != 0:
+        return "failed", "; ".join(said[-3:]) or "the pictures could not be downloaded"
+    return "done", (said[0] if said else "")
+
+
 def _shortcut_texts(home):
     texts = []
     for _, name, _ in OPS_SHORTCUTS:
@@ -7992,6 +8192,8 @@ INSTALL_ACTIONS_BY_KIND = {
     "service-off": _act_service_off,
     "old-folder": _act_old_folder,
     "launchers": _act_launchers,
+    "wiki-on": _act_wiki_on,
+    "wiki-pictures": _act_wiki_pictures,
     "note": _act_note,
 }
 
@@ -8150,6 +8352,8 @@ MARKER_WORDS = {
     "app-files": "the ops app's own files, which come with this tool's checkout",
     "gui-shortcut": "the uConsole Ops shortcut",
     "console-shortcut": "the uConsole Ops Console shortcut",
+    "wiki-on": "the Wiki tab's switch",
+    "wiki-pictures": "the wiki's pictures",
     "sdr-recovery": "the readsb recovery",
     "sudoers-listening": "the rules for listening without a password",
     "udev": "the Flipper rule",
@@ -8642,6 +8846,20 @@ def uninstall_plan(selected, state):
             else:
                 plan.append(_unstep(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the tray"),
                                     False, blocks=True))
+        elif key in ("wiki", "wikipics"):
+            if not home:
+                plan.append(_unstep(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the wiki"),
+                                    False, blocks=True))
+            elif key == "wiki":
+                plan.append(_unstep(key, "off", "user-file",
+                                    f"Switch off the Wiki tab in the ops app, as {user}. The pages stay in "
+                                    f"the checkout.", False,
+                                    paths=(os.path.join(wiki_home(home), "enabled"),)))
+            else:
+                gone = os.path.join(wiki_home(home), "img")
+                plan.append(_unstep(key, "pictures", "wiki-pictures-gone",
+                                    f"Remove the downloaded wiki pictures in {gone}, as {user}. The package "
+                                    f"that shows them stays installed.", False, path=gone))
         elif key == "flipper":
             plan.append(_unstep(key, "udev", "udev",
                                 f"Remove {COMPANION_UDEV_PATH}. After that only root can open a Flipper or ESP32 "
@@ -8878,6 +9096,20 @@ def _un_user_file(step, ctx, run=_run_text):
     return "done", ""
 
 
+def _un_wiki_pictures(step, ctx, run=_run_text):
+    user, home = ctx.get("user"), ctx.get("home")
+    if not user or not home:
+        return "failed", NO_USER_MESSAGE
+    if step["path"] != os.path.join(wiki_home(home), "img"):
+        return "failed", f"{step['path']} is not where the wiki's pictures go; nothing was removed"
+    if not os.path.lexists(step["path"]):
+        return "already", ""
+    rc, _, err = run(as_user(user, ["rm", "-rf", "--", step["path"]]), cwd="/", timeout=60)
+    if rc != 0:
+        return "failed", (err.strip().splitlines() or ["could not be removed"])[-1]
+    return "done", ""
+
+
 def _un_units(step, ctx):
     there = [p for p in step["paths"] if os.path.lexists(p)]
     if not there:
@@ -9020,6 +9252,7 @@ UNINSTALL_ACTIONS = {
     "exe": _un_exe,
     "close-tray": _un_close_tray,
     "close-ops": _un_close_ops,
+    "wiki-pictures-gone": _un_wiki_pictures,
     "checkout": _un_checkout,
     "note": _un_note,
 }
@@ -9816,6 +10049,9 @@ def main():
 
     elif arg == "--features":
         sys.exit(features_command(sys.argv[2:]))
+
+    elif arg == "--wiki-pictures":
+        sys.exit(wiki_pictures_command(sys.argv[2:]))
 
     elif arg == "--installer":
         sys.exit(run_installer())
