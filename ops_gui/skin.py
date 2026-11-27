@@ -138,10 +138,10 @@ def pixel_map(name, tokens):
     return out
 
 
-def build(mode, tokens, directory):
+def build(mode, tokens, directory, alpha=None, variant=""):
     """Write every skin image for a theme and return {name: path}. Needs Qt (QImage)."""
     from PyQt6.QtGui import QColor, QImage
-    folder = os.path.join(directory, mode + "-" + tokens["accent"].lstrip("#"))      # a folder per colour: Qt caches by path
+    folder = os.path.join(directory, mode + variant + "-" + tokens["accent"].lstrip("#"))      # a folder per colour: Qt caches by path
     os.makedirs(folder, exist_ok=True)
     try:                                                                            # keep only a few old colours around
         olds = sorted((os.path.join(directory, d) for d in os.listdir(directory)), key=os.path.getmtime)
@@ -159,7 +159,7 @@ def build(mode, tokens, directory):
         for (x, y), colour in pixel_map(name, tokens).items():
             img.setPixelColor(x, y, QColor(colour))
         if spec[5].get("glass"):
-            apply_glass(img, GLASS_ALPHA)
+            apply_glass(img, GLASS_ALPHA if alpha is None else alpha)
         path = os.path.join(folder, f"{name}.png")
         img.save(path)
         paths[name] = path

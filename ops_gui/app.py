@@ -14,6 +14,7 @@ import threading
 from ops_agent import handoff
 
 from . import fieldlog
+from . import startup
 from . import runtime
 from . import focusnav, navring
 from . import (dither, helpview, controls, dashboard, data, drawer, flipper_panel, gps_panel, home_panel, lora_panel, marauder_panel, registry,
@@ -267,7 +268,9 @@ def build_window():
     def pixel_skin(mode):
         """The pixel corner images for this theme, written once per run. None if they cannot be made."""
         try:
-            skin_paths[mode] = skin.build(mode, style.TOKENS[mode], skin.cache_dir())
+            solid = style.HIGH_CONTRAST                      # high contrast: nothing see-through
+            skin_paths[mode] = skin.build(mode, style.TOKENS[mode], skin.cache_dir(),
+                                          alpha=255 if solid else None, variant="-hc" if solid else "")
         except Exception:
             skin_paths[mode] = None
         return skin_paths[mode]
@@ -276,7 +279,7 @@ def build_window():
         app = QApplication.instance()
         app.setStyle("Fusion")
         font = QFont()
-        font.setFamilies(style.FONT_FAMILIES)
+        font.setFamilies(style.families())
         font.setPointSize(style.BASE_POINT_SIZE)
         app.setFont(font)
         app.setStyleSheet(style.stylesheet(mode, pixel_skin(mode)))
@@ -301,6 +304,8 @@ def build_window():
             self.bridge = Bridge()
             self.settings = data.load_settings()
             self.apply_feature(self.settings.get("accent"))
+            style.set_contrast(self.settings.get("high_contrast"))
+            style.set_font(self.settings.get("font"))
             self.refresh_seconds = int(self.settings.get("refresh_s", REFRESH_MS // 1000))
             reports.install_crash_hook(lambda: bool(self.settings.get("crash_reports")))
             self.bridge.got.connect(self.show_snapshot)
@@ -400,10 +405,10 @@ def build_window():
             bl.setContentsMargins(6, 0, 6, 0)
             bar.setFixedHeight(24)
             self.foot = QLabel("")
-            self.foot.setStyleSheet('color: #9e9e9e; font-family: "Spleen 8x16"; font-size: 16px;')
+            self.foot.setStyleSheet(style.with_font('color: #9e9e9e; font-family: "Spleen 8x16"; font-size: 16px;'))
             self.stats_label = QLabel("")
             self.stats_label.setTextFormat(Qt.TextFormat.RichText)
-            self.stats_label.setStyleSheet('font-family: "Spleen 8x16"; font-size: 16px;')
+            self.stats_label.setStyleSheet(style.with_font('font-family: "Spleen 8x16"; font-size: 16px;'))
             self.stats_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             # Neither label may force the window wider than the screen: they share the bar and clip if they must.
             for lab in (self.foot, self.stats_label):
@@ -754,7 +759,42 @@ def build_window():
 
         # ---- keys
         # ---- the uConsole's own buttons (see controls.py)
+        def set_contrast(self, on):
+            """High contrast on or off, now and for next time."""
+            self.set_flag("high_contrast", on)
+            style.set_contrast(on)
+            self.set_theme()
+            self.update()
+
+        def set_background(self, choice):
+            """The window's background: the dotted gradient, one flat colour or solid black."""
+            self.settings["background"] = style.background(choice)
+            data.save_settings(dict(data.load_settings(), background=self.settings["background"]))
+            self.update()
+
+        def set_font_family(self, family):
+            """A font from this computer in place of the app's own; an empty name goes back to the app's own."""
+            self.settings["font"] = style.set_font(family) or ""
+            data.save_settings(dict(data.load_settings(), font=self.settings["font"]))
+            self.set_theme()
+            style.crisp_fonts(self)
+
+        def peek_tick(self):
+            """In full screen the taskbar is covered: resting the pointer on the bottom edge steps out of full
+            screen so it shows, and moving back up into the app steps back in (startup.peek_step)."""
+            from PyQt6.QtGui import QCursor
+            if not self.isVisible() or not (self.isFullScreen() or self.peek["peeking"]):
+                self.peek["count"] = 0
+                return
+            pos = self.mapFromGlobal(QCursor.pos())
+            self.peek, action = startup.peek_step(self.peek, pos.y(), self.height(), self.rect().contains(pos))
+            if action == "peek":
+                self.showMaximized()
+            elif action == "return":
+                self.showFullScreen()
+
         def toggle_fullscreen(self):
+            self.peek = {"peeking": False, "count": 0}          # asked for by hand: no stepping back in
             if self.isFullScreen():
                 self.showMaximized()
             else:
@@ -1144,6 +1184,16 @@ def build_window():
             self.pad_text = "Gamepad: none found." if self.pad_fd is None else "Gamepad: waiting for a button."
             self.pad_label.setText(self.pad_text)
             self.nav_on, self.nav_sending, self.nav_last, self.nav_promoted = False, False, {}, {}
+            # The window is the size the desktop gives it and no bigger. Left to itself it grows to fit whatever
+            # its pages ask for, and with a taller font that was 30 pixels more than the screen: the status row
+            # went under the taskbar.
+            from PyQt6.QtWidgets import QLayout
+            if self.layout() is not None:
+                self.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+            self.peek = {"peeking": False, "count": 0}
+            self.peek_timer = QTimer(self)
+            self.peek_timer.timeout.connect(self.peek_tick)
+            self.peek_timer.start(250)
             self.tabs.currentChanged.connect(lambda *_: QTimer.singleShot(0, self.nav_tab_changed))
             self.ring = navring.make(self, self.nav_ring_rect,
                                      lambda: style.TOKENS["dark" if self.theme == "dark" else "light"]["accent2"])
@@ -1512,7 +1562,11 @@ def build_window():
             p = QPainter(self)
             dark = self.theme == "dark"
             tok = style.TOKENS["dark" if dark else "light"]
-            p.drawTiledPixmap(self.rect(), dither.gradient_tile(self.height(), tok["bg"], skin.mix(tok["bg"], tok["accent"], 0.65 if dark else 0.7)))
+            flat = style.background_fill(self.settings.get("background"), self.theme)
+            if flat:
+                p.fillRect(self.rect(), QColor(flat))
+            else:
+                p.drawTiledPixmap(self.rect(), dither.gradient_tile(self.height(), tok["bg"], skin.mix(tok["bg"], tok["accent"], 0.65 if dark else 0.7)))
             p.end()
 
         def resizeEvent(self, event):
@@ -1740,7 +1794,11 @@ def main():
     win.resize(720, 640)
     if "--tab" in sys.argv:
         win.pending_tab = sys.argv[sys.argv.index("--tab") + 1] if len(sys.argv) > sys.argv.index("--tab") + 1 else ""
-    win.showMaximized()
+    from . import startup
+    if startup.wants_fullscreen(sys.argv):              # opened at login in full screen (Settings > General)
+        win.showFullScreen()
+    else:
+        win.showMaximized()
     finish(app.exec())
 
 

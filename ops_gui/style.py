@@ -21,6 +21,64 @@ TOKENS = {
     },
 }
 
+# ---- what a person can change about the look, besides the theme and the feature colour
+# High contrast: pure black and white, solid edges, nothing see-through. Only the surfaces and the text change;
+# the feature colour stays the person's own.
+CONTRAST_TOKENS = {
+    "dark": {"bg": "#000000", "panel": "#000000", "card": "#000000", "row": "#000000", "border": "#ffffff",
+             "text": "#ffffff", "muted": "#d6d6d6", "tab_off": "#000000", "tab_hover": "#2a2a2a",
+             "btn": "#000000", "field": "#000000"},
+    "light": {"bg": "#ffffff", "panel": "#ffffff", "card": "#ffffff", "row": "#ffffff", "border": "#000000",
+              "text": "#000000", "muted": "#2b2b2b", "tab_off": "#ffffff", "tab_hover": "#dcdcdc",
+              "btn": "#ffffff", "field": "#ffffff"},
+}
+BASE_TOKENS = {mode: dict(values) for mode, values in TOKENS.items()}
+HIGH_CONTRAST = False
+BACKGROUNDS = ("gradient", "plain", "black")        # the dotted gradient, the theme's one flat colour, solid black
+FONT_OVERRIDE = None                                # a font family chosen in Settings, in place of the app's own
+_SPLEEN = re.compile(r'"Spleen \d+x\d+"')
+
+
+def set_contrast(on):
+    """Switch high contrast on or off in the tokens of both themes. Returns whether it is now on."""
+    global HIGH_CONTRAST
+    HIGH_CONTRAST = bool(on)
+    for mode, values in CONTRAST_TOKENS.items():
+        for key, value in values.items():
+            TOKENS[mode][key] = value if HIGH_CONTRAST else BASE_TOKENS[mode][key]
+    return HIGH_CONTRAST
+
+
+def background(choice):
+    return choice if choice in BACKGROUNDS else BACKGROUNDS[0]
+
+
+def background_fill(choice, mode):
+    """The one colour the window is filled with, or None for the dotted gradient."""
+    choice = background(choice)
+    if choice == "black":
+        return "#000000"
+    if choice == "plain" or HIGH_CONTRAST:             # high contrast has no gradient: it is flat by definition
+        return TOKENS["dark" if mode == "dark" else "light"]["bg"]
+    return None
+
+
+def set_font(family):
+    """Use this font family everywhere the app would use its own; an empty one goes back to the app's own."""
+    global FONT_OVERRIDE
+    family = (family or "").replace('"', "").replace(";", "").strip()
+    FONT_OVERRIDE = family or None
+    return FONT_OVERRIDE
+
+
+def families():
+    return ([FONT_OVERRIDE] if FONT_OVERRIDE else []) + FONT_FAMILIES
+
+
+def with_font(sheet):
+    """A style sheet with the app's pixel font swapped for the chosen one, when one is chosen."""
+    return _SPLEEN.sub(f'"{FONT_OVERRIDE}"', sheet) if FONT_OVERRIDE and sheet else sheet
+
 
 PIXEL_FAMILY = {16: "Spleen 8x16", 24: "Spleen 12x24", 32: "Spleen 16x32", 64: "Spleen 32x64"}
 _PT = re.compile(r"font-size:\s*(\d+(?:\.\d+)?)pt")
@@ -34,6 +92,10 @@ def pixel_size_for_pt(pt):
 def pixel_font(px):
     """A Spleen font drawn with no smoothing and no hinting, exactly as the Home screen draws it."""
     from PyQt6.QtGui import QFont
+    if FONT_OVERRIDE:                                   # a chosen font is an ordinary one: smoothed as usual
+        f = QFont(FONT_OVERRIDE)
+        f.setPixelSize(px)
+        return f
     f = QFont(PIXEL_FAMILY.get(px, "Spleen 12x24"))
     f.setPixelSize(px)
     f.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
@@ -46,7 +108,14 @@ def crisp_fonts(root):
     and the tab bars theirs. Qt smooths text by default, which makes the pixel font look soft."""
     from PyQt6.QtWidgets import QTabBar, QWidget
     for w in root.findChildren(QWidget):
-        sheet = w.styleSheet()
+        own = w.property("pixelSheet")                  # its sheet as written, before any chosen font went in
+        sheet = own if own else w.styleSheet()
+        if "Spleen" in sheet:
+            if not own:
+                w.setProperty("pixelSheet", sheet)
+            shown = with_font(sheet)
+            if shown != w.styleSheet():
+                w.setStyleSheet(shown)
         m = re.search(r"font-size:\s*(\d+)px", sheet) if "Spleen" in sheet else None
         if m and int(m.group(1)) in PIXEL_FAMILY:
             w.setFont(pixel_font(int(m.group(1))))
@@ -84,7 +153,7 @@ def pixelise_sheet(sheet, force=False):
         return sheet
     px = pixel_size_for_pt(pt)
     out = _PT.sub(f'font-family: "{PIXEL_FAMILY[px]}"; font-size: {px}px', sheet, count=1)
-    return out.replace("font-weight: bold;", "").replace("font-weight: bold", "")
+    return with_font(out.replace("font-weight: bold;", "").replace("font-weight: bold", ""))
 
 
 # The grey of helper text, written into dozens of style sheets as the dark theme's value. On the light theme's
@@ -167,7 +236,7 @@ def stylesheet(mode, skin=None):
     no_img = "border-image: none;" if skin else ""
     pixel_tab = 'font-family: "Spleen 12x24"; font-size: 24px;'
     pixel_sub = 'font-family: "Spleen 8x16"; font-size: 16px;'
-    return f"""
+    return with_font(f"""
 * {{ outline: none; }}
 #window {{ background: transparent; }}
 QLabel {{ background: transparent; color: {t['text']}; }}
@@ -186,8 +255,8 @@ QTabBar::tab:hover {{ {tab_hover} color: {t['text']}; }}
 QTabBar::tab:selected {{ {tab_on} color: {t['text']}; {tab_on_pad} }}
 QTabBar::tab:last {{ margin-right: 0px; }}
 QTabBar::scroller {{ width: 72px; }}
-#subtabs QTabBar::tab {{ {pixel_sub} padding: 0px 8px 0px 2px; margin: 4px -6px 0px 0px; }}
-#subtabs QTabBar::tab:selected {{ padding: 3px 8px 1px 2px; margin: 0px -6px -2px 0px; }}
+#subtabs QTabBar::tab {{ {pixel_sub} padding: 0px 16px 0px 10px; margin: 4px -6px 0px 0px; }}
+#subtabs QTabBar::tab:selected {{ padding: 3px 16px 1px 10px; margin: 0px -6px -2px 0px; }}
 
 #statusbar {{ border: none; background: transparent; }}
 QTableWidget::item {{ border-bottom: 1px dotted {t['border']}; padding: 0px 4px; }}
@@ -231,7 +300,8 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 QToolTip {{ background: {t['card']}; color: {t['text']}; border: 1px solid {t['border']}; padding: 4px; }}
 QMessageBox {{ background: {t['card']}; }}
-"""
+#setting {{ background: transparent; border: none; {no_img} border-bottom: 1px dotted {t['border']}; }}
+""")
 
 
 def check(sheet):
