@@ -1405,6 +1405,7 @@ class UninstallTests(unittest.TestCase):
                    "/etc/bash_completion.d/aiov2_ctl", "/usr/local/share/aiov2_ctl/", "/usr/share/applications/aiov2_ctl.desktop",
                    "/usr/share/applications/aiov2_ctl-installer.desktop", a.INSTALL_META_PATH,
                    "/home/shane/.config/autostart/aiov2_ctl.desktop", "/home/shane/.local/share/applications/uconsole-ops",
+                   "/home/shane/.config/autostart/uconsole-ops-fullscreen.desktop",
                    "/home/shane/.local/share/aiov2_ctl/wiki/enabled")
         for p in paths:
             self.assertTrue(p.startswith(allowed), p)
@@ -1575,6 +1576,7 @@ class UninstallTests(unittest.TestCase):
         sel = ["flipper", "gps", "app", "tray"]
         plan = a.uninstall_plan(sel, self.st())
         by = {"un.flipper.udev": ("done", ""), "un.gps.kept": ("note", ""), "un.app.shortcut": ("already", ""),
+              "un.app.startup": ("already", ""),
               "un.app.close": ("already", ""), "un.app.files-kept": ("note", ""), "un.tray.close": ("already", ""),
               "un.tray.desktop-entry": ("failed", "busy")}
         rows = dict((k, s) for k, s, _ in a.uninstall_results(sel, [(s, *by[s["id"]]) for s in plan]))
@@ -1890,6 +1892,52 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(a.file_stamp(a.__file__), a.file_stamp(a.__file__))
         self.assertEqual(len(a.file_stamp(a.__file__)), 64)
         self.assertIsNone(a.file_stamp("/nonexistent/aiov2_ctl"))
+
+    def test_a_program_pulled_but_not_put_in_place_is_an_update_left_to_finish(self):
+        meta = {"installed_by": "old", "repo_path": "/home/u/aiov2_ctl"}
+        self.assertEqual(a.update_state(meta, "old", "new"), "program")
+        self.assertTrue(a.update_unfinished(meta, "old", "new"))
+        self.assertEqual(a.update_state(meta, "old", "old"), "")
+        self.assertFalse(a.update_unfinished(meta, "old", "old"))
+
+    def test_with_no_checkout_to_compare_only_the_installer_is_looked_at(self):
+        self.assertEqual(a.update_state({"installed_by": "old"}, "old", None), "")
+        self.assertEqual(a.update_state({"installed_by": "old"}, "new", None), "installer")
+
+    def test_a_pulled_program_comes_first_because_copying_it_is_the_first_thing_to_do(self):
+        self.assertEqual(a.update_state({"installed_by": "older"}, "old", "new"), "program")
+
+    def test_nothing_installed_is_not_an_update_half_done_whatever_the_checkout_holds(self):
+        self.assertEqual(a.update_state(None, "x", "y"), "")
+        self.assertEqual(a.update_state({"installed_by": "x"}, None, "y"), "")
+
+    def test_the_checkouts_fingerprint_is_read_from_where_this_was_installed_from(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as repo:
+            self.assertIsNone(a.source_stamp({"repo_path": repo}))
+            with open(os.path.join(repo, "aiov2_ctl.py"), "w") as f:
+                f.write("print('hello')\n")
+            self.assertEqual(a.source_stamp({"repo_path": repo}), a.file_stamp(os.path.join(repo, "aiov2_ctl.py")))
+        self.assertIsNone(a.source_stamp({}))
+        self.assertIsNone(a.source_stamp(None))
+
+    def test_the_notice_for_a_pulled_program_points_at_the_updater(self):
+        pulled = a.unfinished_notice_for("--status", [], True, lambda: "program")
+        self.assertIn("aiov2_ctl --update", pulled)
+        self.assertNotIn("sudo aiov2_ctl --install", pulled)
+        self.assertIn("sudo aiov2_ctl --install", a.unfinished_notice_for("--status", [], True, lambda: "installer"))
+        self.assertEqual(a.unfinished_notice_for("--status", [], True, lambda: ""), "")
+
+    def test_removing_the_app_removes_the_file_that_opens_it_at_login(self):
+        from ops_gui import startup
+        self.assertEqual(a.OPS_STARTUP_FILE, startup.FILE)
+        plan = a.uninstall_plan(["app"], state(present={"exe", "app-files", "gui-shortcut"}))
+        step = next(s for s in plan if s["id"] == "un.app.startup")
+        self.assertEqual(step["kind"], "user-file")
+        self.assertFalse(step["root"])
+        self.assertTrue(step["paths"][0].endswith("/.config/autostart/uconsole-ops-fullscreen.desktop"))
+        console = a.uninstall_plan(["console"], state(present={"exe", "app-files", "console-shortcut"}))
+        self.assertNotIn("un.console.startup", [s["id"] for s in console])
 
     def test_an_update_is_unfinished_when_another_versions_installer_ran_last(self):
         self.assertTrue(a.update_unfinished({"installed_by": "old"}, "new"))
