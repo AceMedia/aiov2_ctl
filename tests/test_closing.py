@@ -59,27 +59,19 @@ class LeavingTests(unittest.TestCase):
 
             def flush(self):
                 did.append("flush " + self.name)
-        self.app.finish(3, streams=[Stream("out"), Stream("err")], leave=lambda code: did.append(("leave", code)),
-                        last_jobs=lambda: did.append("last jobs"))
-        self.assertEqual(did, ["last jobs", "flush out", "flush err", ("leave", 3)])
+        self.app.finish(3, streams=[Stream("out"), Stream("err")], leave=lambda code: did.append(("leave", code)))
+        self.assertEqual(did, ["flush out", "flush err", ("leave", 3)])
 
-    def test_a_last_job_that_fails_does_not_stop_it_leaving(self):
-        left = []
-
-        def fails():
-            raise RuntimeError("radio helper would not stop")
-        self.app.finish(0, streams=[], leave=left.append, last_jobs=fails)
-        self.assertEqual(left, [0])
-
-    def test_the_jobs_registered_for_the_end_of_python_are_the_ones_run(self):
+    def test_the_jobs_registered_for_the_end_of_python_are_not_run(self):
+        # PyQt registers one, and running it is what crashed; see finish().
         import atexit
         ran = []
         atexit.register(ran.append, "registered job")
         try:
-            self.app.finish(0, streams=[], leave=lambda code: None, last_jobs=None)
+            self.app.finish(0, streams=[], leave=lambda code: None)
         finally:
             atexit.unregister(ran.append)
-        self.assertEqual(ran, ["registered job"])
+        self.assertEqual(ran, [])
 
     def test_a_broken_stream_does_not_stop_it_leaving(self):
         left = []
@@ -87,7 +79,7 @@ class LeavingTests(unittest.TestCase):
         class Broken:
             def flush(self):
                 raise BrokenPipeError()
-        self.app.finish(None, streams=[Broken()], leave=left.append, last_jobs=lambda: None)
+        self.app.finish(None, streams=[Broken()], leave=left.append)
         self.assertEqual(left, [0])
 
     def test_main_ends_through_finish_and_never_returns_into_teardown(self):
