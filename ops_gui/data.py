@@ -500,7 +500,7 @@ def has_ethernet(base="/sys/class/net"):
 
 
 def tab_names(snapshot, flipper_shown, marauder_shown=False, home=False, network=False, bluetooth=False,
-              everything=False, wiki=False, games=False):
+              everything=False, wiki=False, apps=False):
     """Tabs in order: Home, Overview, Everything, Wi-Fi, Bluetooth, one per powered antenna, Flipper, Settings,
     Help. Bluetooth, like every hardware tab, only while its radio is there (the internal card, on the USB rail).
     Everything is always there in the app: it has no radio of its own and uses whichever are on."""
@@ -515,8 +515,8 @@ def tab_names(snapshot, flipper_shown, marauder_shown=False, home=False, network
     names += [tab for tab, rail in ANTENNA_RAILS if rails.get(rail) == "on"]
     if flipper_shown:
         names.append("Flipper")
-    if games:                                   # the installed games, when switched on in Settings
-        names.append("Games")
+    if apps:                                    # the installed programs, when switched on in Settings
+        names.append("Apps")
     names += ["Settings", "Help"]
     if wiki:                                    # the local wiki, when the installer's feature is on: after Help
         names.append("Wiki")
@@ -592,7 +592,7 @@ def save_settings(values, path=None):
 # ---- pixel icons
 
 TAB_ICONS = {"Overview": "blocks", "Wi-Fi": "globe", "GPS": "compass", "LoRa": "email",
-             "SDR": "search", "Flipper": "code", "Settings": "cog", "Help": "notes", "Wiki": "domain", "Games": "games", "Marauder": "shield", "Home": "heartbeat", "Network": "server",
+             "SDR": "search", "Flipper": "code", "Settings": "cog", "Help": "notes", "Wiki": "domain", "Apps": "rocket", "Marauder": "shield", "Home": "heartbeat", "Network": "server",
              "Bluetooth": "bluetooth", "Everything": "growth"}
 
 SUN = [
