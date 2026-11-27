@@ -350,8 +350,8 @@ def build_window():
             self.home = home_panel.build_panel(self)
             self.pages = {"Home": self.home, "Network": net_panel.build_panel(self), "Overview": self.overview, "Wi-Fi": self.wifi, "Flipper": self.flip,
                           "Help": self.help}
-            from . import games
-            self.pages["Games"] = games.build(self)
+            from . import apps
+            self.pages["Apps"] = apps.build(self)
             from . import wiki
             self.wiki_on = wiki.enabled()
             if self.wiki_on:
@@ -688,7 +688,7 @@ def build_window():
                                   self.settings.get("home_tab") is not False, data.has_ethernet(),
                                   self.bt_available(), everything=True,
                                   wiki=getattr(self, "wiki_on", False),
-                                  games=bool(self.settings.get("games_tab")))
+                                  apps=bool(self.settings.get("apps_tab") or self.settings.get("games_tab")))
             if getattr(self, "names", None) == names:
                 self.refresh_help()
                 return
@@ -834,8 +834,8 @@ def build_window():
                 self.toggle_live()
             elif name == "Wiki":
                 self.pages["Wiki"].main_action()        # to the page to read it, or back to the list
-            elif name == "Games":
-                self.pages["Games"].main_action()       # play the chosen game
+            elif name == "Apps":
+                self.pages["Apps"].main_action()        # open the chosen program
             elif name == "GPS":
                 live = self.pages["GPS"].live
                 if live.save_b.isEnabled():
@@ -896,6 +896,8 @@ def build_window():
         def nav_kind(self, w):
             """(what sort of control this is to an arrow key, whether it is at its first row, at its last)."""
             from PyQt6.QtWidgets import QAbstractSlider, QAbstractSpinBox, QTabBar, QTreeWidget
+            if hasattr(w, "nav_move"):                         # it moves its own highlight; at its edge, on we go
+                return "other", True, True
             if isinstance(w, QTreeWidget):
                 def more(step):
                     item = step(w.currentItem()) if w.currentItem() is not None else None
@@ -1278,8 +1280,8 @@ def build_window():
             self.refresh()
 
         def refresh(self):
-            if getattr(self, "names", None) and self.current_name() == "Games":
-                self.pages["Games"].refresh()                  # a game installed or removed since
+            if getattr(self, "names", None) and self.current_name() == "Apps":
+                self.pages["Apps"].refresh()                   # a program installed or removed since
             if self.busy:
                 return
             self.busy = True
