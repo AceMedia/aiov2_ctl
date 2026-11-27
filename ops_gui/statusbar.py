@@ -153,8 +153,39 @@ def chips(stats, hidden=(), dark=True):
     return [(text, lv) for key, text, lv in chip_items(stats, dark) if key not in hidden]
 
 
-def chips_html(chip_list, extra=()):
-    """Rich text for the bar. `extra` chips (like the battery) come first."""
-    parts = [f'<span style="color:{lv if lv.startswith("#") else COLOURS.get(lv, COLOURS["ok"])}">{html.escape(text)}</span>'
+def luminance(colour):
+    """How bright a #rrggbb colour is, 0 (black) to 1 (white), as contrast is worked out from."""
+    parts = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    parts = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in parts]
+    return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+
+def contrast(a, b):
+    hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def legible(colour, background, want=4.5):
+    """`colour`, made darker (on a light background) or lighter (on a dark one) only as far as it takes to be
+    read on `background`. The bar's colours were picked for the dark theme: its grey and its green are too pale
+    on a light one. A colour that can already be read is returned as it is."""
+    try:
+        if not background or contrast(colour, background) >= want:
+            return colour
+        towards = 0 if luminance(background) > 0.5 else 255
+        rgb = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
+        for step in range(1, 21):
+            mixed = "#" + "".join(f"{round(c + (towards - c) * step / 20):02x}" for c in rgb)
+            if contrast(mixed, background) >= want:
+                return mixed
+        return "#000000" if towards == 0 else "#ffffff"
+    except (ValueError, IndexError, TypeError):
+        return colour
+
+
+def chips_html(chip_list, extra=(), background=None):
+    """Rich text for the bar. `extra` chips (like the battery) come first. With `background`, the colour the
+    bar is drawn on, each colour is kept readable on it (see legible)."""
+    parts = [f'<span style="color:{legible(lv if lv.startswith("#") else COLOURS.get(lv, COLOURS["ok"]), background)}">{html.escape(text)}</span>'
              for text, lv in list(extra) + list(chip_list)]
     return '&nbsp;<span style="color:#e95420">/</span>&nbsp;'.join(parts)

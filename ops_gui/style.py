@@ -16,7 +16,7 @@ TOKENS = {
     },
     "light": {
         "bg": "#e4e8ee", "panel": "#f5f6f8", "card": "#ffffff", "row": "#f8f9fb", "border": "#d5d9e0",
-        "text": "#1b1f24", "muted": "#6b7280", "tab_off": "#d3d8e0", "tab_hover": "#eceff3",
+        "text": "#1b1f24", "muted": "#4f5663", "tab_off": "#d3d8e0", "tab_hover": "#eceff3",
         "btn": "#ffffff", "accent": "#d70a53", "accent2": "#e95420", "field": "#ffffff",
     },
 }

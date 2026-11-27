@@ -292,6 +292,9 @@ def build_window():
                                  (QPalette.ColorRole.HighlightedText, "#ffffff"), (QPalette.ColorRole.ToolTipBase, "#333333"),
                                  (QPalette.ColorRole.ToolTipText, "#e0e0e0")):
                 pal.setColor(role, QColor(colour))
+        # The hint inside an empty box ("Filter by name or address"). Qt takes its colour from the palette, not
+        # the style sheet, and the stock one could not be seen on the dark themes.
+        pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(style.TOKENS[mode]["muted"]))
         app.setPalette(pal)
         return pal
 
@@ -305,6 +308,7 @@ def build_window():
             self.settings = data.load_settings()
             self.apply_feature(self.settings.get("accent"))
             style.set_contrast(self.settings.get("high_contrast"))
+            pixel.set_contrast(self.settings.get("high_contrast"))
             style.set_font(self.settings.get("font"))
             self.refresh_seconds = int(self.settings.get("refresh_s", REFRESH_MS // 1000))
             reports.install_crash_hook(lambda: bool(self.settings.get("crash_reports")))
@@ -763,7 +767,13 @@ def build_window():
             """High contrast on or off, now and for next time."""
             self.set_flag("high_contrast", on)
             style.set_contrast(on)
+            pixel.set_contrast(on)                                  # the hand-drawn screens have their own colours
             self.set_theme()
+            front = self.pages.get("Home")
+            if front is not None and hasattr(front, "refresh_palette"):
+                front.refresh_palette()
+            for page in self.pages.values():
+                page.update()
             self.update()
 
         def set_background(self, choice):
@@ -1277,7 +1287,9 @@ def build_window():
                               "good" if power["capacity"] >= 30 else "warn" if power["capacity"] >= 15 else "hot"))
             hidden = self.dash["status_hidden"]
             extra = [] if "battery" in hidden else extra
-            self.stats_label.setText(statusbar.chips_html(statusbar.chips(stats, hidden, self.theme == "dark"), extra))
+            ground = style.TOKENS["dark" if self.theme == "dark" else "light"]["bg"]
+            self.stats_label.setText(statusbar.chips_html(statusbar.chips(stats, hidden, self.theme == "dark"), extra,
+                                                          ground))
             if hasattr(self, "warn_watch"):
                 state = str(power.get("status", "")).lower()
                 for event in self.warn_watch.update(power.get("capacity"), "charg" in state and "disch" not in state,
