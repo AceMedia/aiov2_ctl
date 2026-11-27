@@ -220,6 +220,86 @@ def icon_file(name, dirs, exists):
     return None
 
 
+# ---- the desktop's icon theme
+# Many entries name a picture from the desktop's icon theme rather than their own (this project's launchers ask
+# for "utilities-system-monitor"). Qt only knows that theme when the desktop tells it, which it does not for an
+# app started outside the session's own launcher, so the theme is found and searched here.
+
+THEME_KEYS = ("gtk-icon-theme-name", "icon_theme", "icon-theme")
+THEME_SETTINGS = (".config/gtk-3.0/settings.ini", ".config/gtk-4.0/settings.ini", ".config/qt6ct/qt6ct.conf",
+                  ".config/qt5ct/qt5ct.conf", ".config/lxqt/lxqt.conf")
+WANTED_SIZE = 64
+
+
+def theme_from_settings(text):
+    """The icon theme a desktop settings file names, or None."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        for key in THEME_KEYS:
+            if line.startswith(key) and "=" in line and line.split("=", 1)[0].strip() == key:
+                value = line.split("=", 1)[1].strip().strip("\"'")
+                if value:
+                    return value
+    return None
+
+
+def theme_parents(index_text):
+    """The themes an icon theme falls back on: the Inherits line of its index.theme."""
+    for line in (index_text or "").splitlines():
+        line = line.strip()
+        if line.startswith("Inherits") and "=" in line:
+            return [t.strip() for t in line.split("=", 1)[1].split(",") if t.strip()]
+    return []
+
+
+def theme_chain(name, read_index, limit=8):
+    """The themes to look in, in order: the desktop's, the ones it falls back on, and hicolor last.
+    `read_index(theme)` gives that theme's index.theme text, or None."""
+    chain, queue = [], [name] if name else []
+    while queue and len(chain) < limit:
+        theme = queue.pop(0)
+        if theme in chain or theme == "hicolor":
+            continue
+        chain.append(theme)
+        queue.extend(theme_parents(read_index(theme)))
+    return chain + ["hicolor"]
+
+
+def icon_size(path):
+    """The size of the pictures in a theme folder, read from the path: .../48x48/apps/x.png and .../apps/48/x.svg
+    are both 48. A folder of drawings that scale counts as large; an unknown one as 0."""
+    for part in reversed(path.split("/")[:-1]):
+        if part == "scalable":
+            return 512
+        digits = ""
+        for ch in part:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if digits:
+            return int(digits)
+    return 0
+
+
+def _rank(path):
+    size = icon_size(path)
+    return (size >= WANTED_SIZE, -size if size >= WANTED_SIZE else size, path.endswith(".png"))
+
+
+def theme_index(paths):
+    """{icon name: the best file for a tile} from every file of a theme. Best is the smallest that is at least
+    the tile's size, else the largest there is. Outline-only ("symbolic") pictures are left out."""
+    best = {}
+    for path in paths:
+        file = path.rsplit("/", 1)[-1]
+        name, dot, kind = file.rpartition(".")
+        if not dot or "." + kind not in ICON_TYPES or name.endswith("-symbolic"):
+            continue
+        if name not in best or _rank(path) > _rank(best[name]):
+            best[name] = path
+    return best
+
+
 def initial(name):
     """The letter drawn on the tile of a program that has no picture: its name's first letter or digit."""
     for ch in name or "":
@@ -255,7 +335,7 @@ def build(win):
                                  QVBoxLayout, QWidget)
     from .foldertabs import FolderTabWidget
 
-    state = {"apps": None, "dirs": [], "titles": []}
+    state = {"apps": None, "dirs": [], "titles": [], "themes": {}, "theme": False}
 
     def read(path):
         try:
@@ -282,12 +362,48 @@ def build(win):
         p.end()
         return QIcon(pm)
 
+    def desktop_theme():
+        """The desktop's icon theme: what Qt was told, else what the desktop's settings files say."""
+        if state["theme"] is False:
+            found = QIcon.themeName() if QIcon.themeName() not in ("", "hicolor") else None
+            for file in THEME_SETTINGS:
+                if found:
+                    break
+                found = theme_from_settings(read(os.path.join(os.path.expanduser("~"), file)))
+            state["theme"] = found
+        return state["theme"]
+
+    def theme_files(theme):
+        """Every file of one icon theme, across the folders it may be spread over. Read once."""
+        if theme not in state["themes"]:
+            paths = []
+            for d in state["dirs"]:
+                for folder, _dirs, files in os.walk(os.path.join(d, "icons", theme)):
+                    paths.extend(folder + "/" + f for f in files)
+            state["themes"][theme] = theme_index(paths)
+        return state["themes"][theme]
+
+    def themed(name):
+        def index_of(theme):
+            for d in state["dirs"]:
+                text = read(os.path.join(d, "icons", theme, "index.theme"))
+                if text is not None:
+                    return text
+            return None
+        for theme in theme_chain(desktop_theme(), index_of):
+            path = theme_files(theme).get(name)
+            if path:
+                return path
+        return None
+
     def icon_of(app):
         name = app["icon"]
         if name and not os.path.isabs(name) and QIcon.hasThemeIcon(name):
             icon = QIcon.fromTheme(name)
         else:
             path = icon_file(name, state["dirs"], os.path.isfile)
+            if path is None and name and not os.path.isabs(name):
+                path = themed(name)
             icon = QIcon(path) if path else QIcon()
         return lettered(app) if icon.isNull() or icon.pixmap(64, 64).isNull() else icon
 
@@ -450,5 +566,9 @@ def build(win):
     open_b.clicked.connect(play)
     again_b.clicked.connect(lambda: refresh())
     box.main_action, box.refresh, box.subs, box.grid, box.open_button = play, refresh, subs, grid, open_b
+    box.icon_source = lambda app: ("theme" if app["icon"] and not os.path.isabs(app["icon"])
+                                   and QIcon.hasThemeIcon(app["icon"]) else
+                                   icon_file(app["icon"], state["dirs"], os.path.isfile)
+                                   or (themed(app["icon"]) if app["icon"] and not os.path.isabs(app["icon"]) else None))
     box.apps, box.note, box.titles = (lambda: list(state["apps"] or [])), about, (lambda: list(state["titles"]))
     return box
