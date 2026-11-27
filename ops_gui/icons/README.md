@@ -4,7 +4,8 @@ button are not part of the set; they are drawn in code in ops_gui/data.py on the
 pixel grid.
 
 bluetooth-bare.png is not part of the set either: it was drawn for this app on the same 16 by 16 grid
-(a blue badge with the Bluetooth mark) and scaled by whole numbers to 32 and 64 px.
+(a blue badge with the Bluetooth mark) and scaled by whole numbers to 32 and 64 px. games-bare.png was drawn
+for this app in the same way (a gamepad).
 
 ## Where each icon is used
 
@@ -28,6 +29,7 @@ A tab has its icon in two places, and tests/test_icon_parity.py fails if either 
 | LoRa | email | envelope |
 | SDR | search | magnifying glass |
 | Flipper | code | the Flipper's outline |
+| Games | games (drawn for this app) | gamepad |
 | Settings | cog | cog |
 | Help | notes | question mark |
 
