@@ -29,14 +29,38 @@ TICKER_TICKS = 8                     # half second ticks per message, so 4 secon
 RACK_NAMES = ("GPS", "LORA", "SDR", "USB", "FLIPPER", "WIFI")
 
 
+# High contrast (Settings > General): pure black and white, solid lines, no dotted background. The colours that
+# carry meaning stay colours, each strong enough to read on its black or white.
+CONTRAST_PALETTES = {
+    "dark": {"bg": "#000000", "dots": "#000000", "panel": "#000000", "raised": "#000000", "line": "#ffffff",
+             "text": "#ffffff", "dim": "#d6d6d6", "accent": DEBIAN_RED, "accent2": UBUNTU_ORANGE,
+             "label": "#ff9a6b", "data": "#5ff0e2", "good": "#6dff78", "warn": "#ffe066", "hot": "#ff7b7b",
+             "off": "#5c5c5c", "screen": "#000000"},
+    "light": {"bg": "#ffffff", "dots": "#ffffff", "panel": "#ffffff", "raised": "#ffffff", "line": "#000000",
+              "text": "#000000", "dim": "#2b2b2b", "accent": DEBIAN_RED, "accent2": UBUNTU_ORANGE,
+              "label": "#8a2c00", "data": "#005a53", "good": "#0e5c1a", "warn": "#6f4600", "hot": "#9e1212",
+              "off": "#a8a8a8", "screen": "#000000"},
+}
+HIGH_CONTRAST = False
+
+
 def set_accent(accent, accent2):
     """Use the feature colour on the Home screen too."""
-    for pal in PALETTES.values():
-        pal["accent"], pal["accent2"] = accent, accent2
+    for table in (PALETTES, CONTRAST_PALETTES):
+        for pal in table.values():
+            pal["accent"], pal["accent2"] = accent, accent2
+
+
+def set_contrast(on):
+    """Switch the hand-drawn screens to their high contrast colours, or back. Returns whether it is on."""
+    global HIGH_CONTRAST
+    HIGH_CONTRAST = bool(on)
+    return HIGH_CONTRAST
 
 
 def palette(mode):
-    return PALETTES["light" if mode == "light" else "dark"]
+    table = CONTRAST_PALETTES if HIGH_CONTRAST else PALETTES
+    return table["light" if mode == "light" else "dark"]
 
 
 def nearest_size(px):

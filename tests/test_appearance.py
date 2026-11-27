@@ -2,7 +2,7 @@
 import re
 import unittest
 
-from ops_gui import style
+from ops_gui import pixel, statusbar, style
 
 
 def luminance(hex_colour):
@@ -19,6 +19,7 @@ def contrast(a, b):
 class Base(unittest.TestCase):
     def tearDown(self):
         style.set_contrast(False)
+        pixel.set_contrast(False)
         style.set_font("")
 
 
@@ -55,6 +56,98 @@ class ContrastTests(Base):
             sheet = style.stylesheet(mode)
             self.assertEqual(style.check(sheet), [])
             self.assertIn("#setting", sheet)
+
+
+class HandDrawnTests(Base):
+    """The Home screen and the other hand-drawn parts have their own colours (pixel.py)."""
+
+    def test_they_follow_high_contrast_too(self):
+        usual = pixel.palette("light")
+        self.assertTrue(pixel.set_contrast(True))
+        dark, light = pixel.palette("dark"), pixel.palette("light")
+        self.assertIsNot(light, usual)
+        self.assertEqual((dark["bg"], dark["panel"], dark["text"], dark["line"]), ("#000000", "#000000", "#ffffff", "#ffffff"))
+        self.assertEqual((light["bg"], light["panel"], light["text"], light["line"]), ("#ffffff", "#ffffff", "#000000", "#000000"))
+        self.assertFalse(pixel.set_contrast(False))
+        self.assertIs(pixel.palette("light"), usual)
+
+    def test_the_high_contrast_colours_name_everything_the_usual_ones_do(self):
+        for mode in ("dark", "light"):
+            self.assertEqual(set(pixel.CONTRAST_PALETTES[mode]), set(pixel.PALETTES[mode]), mode)
+
+    def test_every_colour_that_carries_meaning_reads_on_its_black_or_white(self):
+        for mode, table in pixel.CONTRAST_PALETTES.items():
+            for key in ("text", "dim", "label", "data", "good", "warn", "hot", "line"):
+                for ground in ("bg", "panel", "raised"):
+                    self.assertGreaterEqual(contrast(table[key], table[ground]), 7, (mode, key, ground))
+
+    def test_the_feature_colour_reaches_both_sets(self):
+        before = pixel.PALETTES["dark"]["accent"], pixel.PALETTES["dark"]["accent2"]
+        try:
+            pixel.set_accent("#123456", "#654321")
+            for table in (pixel.PALETTES, pixel.CONTRAST_PALETTES):
+                for pal in table.values():
+                    self.assertEqual((pal["accent"], pal["accent2"]), ("#123456", "#654321"))
+        finally:
+            pixel.set_accent(*before)
+
+
+class StatusRowTests(Base):
+    """The row at the foot of the window: its colours were picked for the dark theme."""
+
+    def test_a_colour_that_already_reads_is_left_alone(self):
+        self.assertEqual(statusbar.legible("#9e9e9e", "#0f1114"), "#9e9e9e")
+        self.assertEqual(statusbar.legible("#9e9e9e", None), "#9e9e9e")
+
+    def test_the_pale_grey_and_the_green_are_darkened_on_a_light_background(self):
+        for colour in (statusbar.COLOURS["ok"], statusbar.COLOURS["good"], statusbar.COLOURS["warn"]):
+            for ground in (style.BASE_TOKENS["light"]["bg"], "#ffffff"):
+                self.assertLess(contrast(colour, ground), 4.5, "this is the problem being fixed")
+                fixed = statusbar.legible(colour, ground)
+                self.assertGreaterEqual(contrast(fixed, ground), 4.5, (colour, ground, fixed))
+
+    def test_a_colour_too_dark_for_a_dark_background_is_lightened(self):
+        fixed = statusbar.legible("#303030", "#000000")
+        self.assertGreaterEqual(contrast(fixed, "#000000"), 4.5)
+
+    def test_it_stays_the_same_sort_of_colour(self):
+        r, g, b = (int(statusbar.legible("#43a047", "#ffffff")[i:i + 2], 16) for i in (1, 3, 5))
+        self.assertTrue(g > r and g > b, "the green is still green")
+
+    def test_a_colour_that_is_not_one_is_passed_through(self):
+        self.assertEqual(statusbar.legible("green", "#ffffff"), "green")
+
+    def test_the_row_uses_readable_colours_on_the_background_it_is_given(self):
+        row = statusbar.chips_html([("load 0.30", "ok"), ("CPU 5%", "good")], [("Battery 100%", "good")], "#ffffff")
+        self.assertNotIn(statusbar.COLOURS["ok"], row)
+        self.assertNotIn(statusbar.COLOURS["good"], row)
+        for colour in re.findall(r"color:(#[0-9a-f]{6})", row):
+            if colour != "#e95420":                                 # the dividers between the readings
+                self.assertGreaterEqual(contrast(colour, "#ffffff"), 4.5, colour)
+        self.assertIn(statusbar.COLOURS["ok"], statusbar.chips_html([("load 0.30", "ok")]), "unchanged when not told")
+
+
+class FieldTests(Base):
+    def test_the_colour_given_to_the_hint_inside_an_empty_box_can_be_read(self):
+        # app.make_palette gives the hint the theme's muted colour; this is that colour on the box it sits in.
+        for contrast_on in (False, True):
+            style.set_contrast(contrast_on)
+            for mode in ("dark", "light"):
+                t = style.TOKENS[mode]
+                self.assertGreaterEqual(contrast(t["muted"], t["field"]), 4.5, (mode, contrast_on))
+
+
+class LightThemeTests(Base):
+    def test_secondary_text_reads_on_every_light_surface_it_sits_on(self):
+        # Unselected tabs are secondary text on the tab colour, the palest pairing in the light theme.
+        t = style.BASE_TOKENS["light"]
+        for surface in ("tab_off", "bg", "panel", "card", "row", "field"):
+            self.assertGreaterEqual(contrast(t["muted"], t[surface]), 4.5, surface)
+
+    def test_and_on_every_dark_one(self):
+        t = style.BASE_TOKENS["dark"]
+        for surface in ("tab_off", "bg", "panel", "card", "row", "field"):
+            self.assertGreaterEqual(contrast(t["muted"], t[surface]), 4.5, surface)
 
 
 class BackgroundTests(Base):
