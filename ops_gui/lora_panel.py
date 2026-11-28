@@ -631,18 +631,24 @@ def activity_line(a, self_id=None, node_info=None):
     return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {who}: {summary}{sig}"
 
 
-DEFAULT_KEY_WARNING = ("This channel uses Meshtastic's public default key: anyone with a Meshtastic radio nearby "
-                       "can read what is sent on it.")
+KEY_WARNINGS = {
+    "none": "This channel is not encrypted: anyone with a Meshtastic radio nearby can read what is sent on it.",
+    "default": "This channel uses Meshtastic's public default key: anyone with a Meshtastic radio nearby can read "
+               "what is sent on it.",
+    "public_variant": "This channel uses a simple variant of Meshtastic's public default key, which is just as easy "
+                      "to read as the default.",
+}
 
 
-def default_key_line(snapshot):
-    """The standing warning by the message box when the channel being sent on uses the public default key, else "".
-    Nothing is said when the radio's channel list is not available or the key cannot be told: no guessing."""
+def key_line(snapshot):
+    """The standing warning by the message box when anyone nearby can read the channel being sent on (not
+    encrypted, the public default key, or a simple variant of it), else "". Nothing is said for a private key, nor
+    when the radio's channel list is not available or the key cannot be told: no guessing."""
     snap = snapshot or {}
     sel = snap.get("selected_channel") or 0
     for c in snap.get("configured_channels") or []:
         if isinstance(c, dict) and c.get("index", 0) == sel:
-            return DEFAULT_KEY_WARNING if c.get("default_key") is True else ""
+            return KEY_WARNINGS.get(c.get("key"), "")
     return ""
 
 
@@ -1025,7 +1031,7 @@ def build_panel(win, Switch):
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
             self.where.setText(composer_line(snap))
-            warning = default_key_line(snap)
+            warning = key_line(snap)
             self.keywarn.setText(warning)
             self.keywarn.setVisible(bool(warning))
             if own:
