@@ -1,3 +1,4 @@
+import collections
 import copy
 import os
 import subprocess
@@ -7,6 +8,17 @@ from datetime import datetime
 
 from . import bootstrap, companions
 from .power import debug, log
+from . import nodeid
+
+
+def _pubsub():
+    """The publish and subscribe bus the Meshtastic library announces packets and connection changes on, or
+    None when it is not installed. A function of its own so a test can put a stand-in in its place."""
+    try:
+        from pubsub import pub
+        return pub
+    except Exception:
+        return None
 
 
 def explain_tcp_failure(exc, host, port):
@@ -55,6 +67,8 @@ class LoRa:
         self.last_tx_status = None
         self.last_tx_ok = None
         self.conflict_processes = []
+        self._bus = None                    # the bus this is subscribed on, while it is
+        self._seen_packets = collections.deque(maxlen=200)
 
         if not bootstrap.MESHTASTIC_AVAILABLE:
             debug("LoRa: meshtastic library not available")
@@ -71,14 +85,7 @@ class LoRa:
 
     def snapshot(self):
         with self.lock:
-            self_id = None
-            iface = self.interface
-            for attr in ("myNode", "localNode"):
-                node_obj = getattr(iface, attr, None) if iface else None
-                node_num = getattr(node_obj, "nodeNum", None) if node_obj else None
-                if node_num is not None:
-                    self_id = str(node_num)
-                    break
+            self_id = self._own_id_locked()
             selected_channel, best_channel, active_channels = self._effective_selected_channel_locked()
             return {
                 "active": self.active,
@@ -105,6 +112,91 @@ class LoRa:
                 "conflict_processes": copy.deepcopy(self.conflict_processes),
                 "self_id": self_id,
             }
+
+    def _own_id_locked(self):
+        """This radio's own node, written the way the node list writes its nodes ("!xxxxxxxx"), or None. The
+        library gives it as a number; left as a number it never matched a name in the list, so the app did
+        not know which node was its own."""
+        iface = self.interface
+        if not iface:
+            return None
+        number = getattr(getattr(iface, "myInfo", None), "my_node_num", None)
+        for attr in ("localNode", "myNode"):
+            if number is None:
+                number = getattr(getattr(iface, attr, None), "nodeNum", None)
+        return nodeid.canonical(number)
+
+    # ---- hearing from the radio
+    # The library publishes every packet, and the loss of the connection, on a bus (pubsub). It used to offer a
+    # hook on the connection object as well, and this code set that; the library on a uConsole today has no such
+    # hook, so nothing was ever received: connected, a node list, and no messages.
+    def _listen(self):
+        """Start receiving packets and connection news for this connection. True when subscribed on the bus."""
+        bus = _pubsub()
+        if bus is None:
+            if hasattr(self.interface, "messageReceived"):          # a library old enough to have the hook
+                self.interface.messageReceived = self._on_receive
+                debug("LoRa: message hook set (no pubsub)")
+            else:
+                debug("LoRa: no way to receive packets from this library")
+            return False
+        bus.subscribe(self._on_receive, "meshtastic.receive")
+        bus.subscribe(self._on_lost, "meshtastic.connection.lost")
+        self._bus = bus
+        debug("LoRa: subscribed for packets and connection changes")
+        return True
+
+    def _stop_listening(self):
+        bus, self._bus = self._bus, None
+        if bus is not None:
+            for listener, topic in ((self._on_receive, "meshtastic.receive"), (self._on_lost, "meshtastic.connection.lost")):
+                try:
+                    bus.unsubscribe(listener, topic)
+                except Exception as e:
+                    debug(f"LoRa: unsubscribe failed: {e}")
+
+    def _on_receive(self, packet, interface=None):
+        """A packet from the bus. Only this connection's packets count, and each counts once: the bus is shared
+        by every connection in the program, and a reconnect must not deliver a packet a second time."""
+        try:
+            if interface is not None and self.interface is not None and interface is not self.interface:
+                return
+            if not isinstance(packet, dict):
+                return
+            mark = (packet.get("from"), packet.get("id"))
+            if mark[1] is not None:
+                with self.lock:
+                    if mark in self._seen_packets:
+                        return
+                    self._seen_packets.append(mark)
+            self._handle_packet(packet)
+        except Exception as e:
+            debug(f"LoRa: packet handler error: {e}")
+
+    def _on_lost(self, interface=None):
+        """The library says the connection has gone. Say so, so nothing goes on showing it as connected."""
+        if interface is not None and self.interface is not None and interface is not self.interface:
+            return
+        with self.lock:
+            if not self.active:
+                return
+            self.active = False
+            self.connection_status = "Connection lost"
+        log("LoRa: mesh connection lost")
+
+    def close(self):
+        """Stop listening and close the connection. Safe to call twice, and when it never connected."""
+        self._stop_listening()
+        with self.lock:
+            iface, self.interface = self.interface, None
+            self.active = False
+            if self.connection_status.startswith("Connected"):
+                self.connection_status = "Closed"
+        if iface is not None:
+            try:
+                iface.close()
+            except Exception as e:
+                debug(f"LoRa: close failed: {e}")
 
     def _append_bounded(self, bucket, item, max_items):
         bucket.append(item)
@@ -228,10 +320,11 @@ class LoRa:
         best_channel = active_channels[0]["channel"] if active_channels else None
         active_channel_ids = [item["channel"] for item in active_channels]
         selected_channel = self.selected_channel
+        # The channel the person chose stays chosen. It used to be swapped for the busiest one whenever it had
+        # been quiet for a while, locked or not, so a message could go out on a channel nobody picked. Only
+        # Follow, when the channel is not locked, moves it.
         if self.auto_follow_channel and not self.channel_locked and best_channel is not None:
             selected_channel = best_channel
-        elif active_channel_ids and selected_channel not in active_channel_ids:
-            selected_channel = best_channel if best_channel is not None else active_channel_ids[0]
         self.selected_channel = selected_channel
         return selected_channel, best_channel, active_channels
 
@@ -727,16 +820,7 @@ class LoRa:
                     self.connection_status = "Connected (TCP)"
                 debug("LoRa: Meshtastic TCP connected successfully")
                 log("LoRa: Meshtastic mesh connected (TCP)")
-
-                def on_receive(packet, interface):
-                    try:
-                        self._handle_packet(packet)
-                    except Exception as e:
-                        debug(f"LoRa: packet handler error: {e}")
-
-                if hasattr(self.interface, "messageReceived"):
-                    self.interface.messageReceived = on_receive
-                    debug("LoRa: Message callback registered (TCP)")
+                self._listen()
             except Exception as e:
                 debug(f"LoRa: TCP connection failed: {e}")
                 log(f"LoRa: TCP connection failed - {str(e)[:40]}")
@@ -803,16 +887,7 @@ class LoRa:
                 self.connection_status = "Connected"
             debug("LoRa: Meshtastic connected successfully")
             log("LoRa: Meshtastic mesh connected")
-
-            def on_receive(packet, interface):
-                try:
-                    self._handle_packet(packet)
-                except Exception as e:
-                    debug(f"LoRa: packet handler error: {e}")
-
-            if hasattr(self.interface, "messageReceived"):
-                self.interface.messageReceived = on_receive
-                debug("LoRa: Message callback registered")
+            self._listen()
 
         except Exception as e:
             debug(f"LoRa: connection failed: {e}")

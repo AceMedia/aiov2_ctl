@@ -12,6 +12,8 @@ import html
 import math
 import time
 
+from ops_agent import nodeid
+
 TICK_MS = 1000
 
 
@@ -134,9 +136,8 @@ def own_position(node_info, self_id):
     miss, same as it would for every other node here (see radar_points, which compares as strings)."""
     if self_id is None or not node_info:
         return None
-    self_id = str(self_id)
     for node_id, info in node_info.items():
-        if str(node_id) == self_id:
+        if nodeid.same(node_id, self_id):
             return node_latlon(info)
     return None
 
@@ -157,7 +158,7 @@ def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
     found = []
     if own:
         for node_id, info in (node_info or {}).items():
-            if str(node_id) == str(self_id):
+            if nodeid.same(node_id, self_id):
                 continue
             where = node_latlon(info)
             if not where:
@@ -201,7 +202,7 @@ def alert_lines(recent_alerts, stale, node_info=None):
 
 def _row_distance(info, node_id, self_id, own):
     where = node_latlon(info)
-    if not own or not where or str(node_id) == str(self_id):
+    if not own or not where or nodeid.same(node_id, self_id):
         return "-"
     return distance_text(haversine_km(own[0], own[1], where[0], where[1]))
 
@@ -223,7 +224,7 @@ def node_rows(node_info, self_id=None, now=None, own=None):
             "battery": "-" if battery is None else ("plugged in" if battery > 100 else f"{battery}%"),
             "hops": "-" if hops is None else str(hops),
             "distance": _row_distance(info, node_id, self_id, own),
-            "self": str(node_id) == str(self_id),
+            "self": nodeid.same(node_id, self_id),
             "_heard": info.get("lastHeard") or 0,
         })
     rows.sort(key=lambda r: (not r["self"], -r["_heard"]))
@@ -430,6 +431,12 @@ def build_panel(win, Switch):
             self.note.setText(result["hint"])
             engine = result["lora"]
             if engine is None:
+                # no connection, or one that has just been dropped: nothing here may go on using the old one
+                self.timer.stop()
+                self.lora = None
+                self.allow_on = False
+                self.allow.show_state(False)
+                self.update_send()
                 self.show_note(result["hint"])
                 self.status.setText("Mesh not reachable")
                 return

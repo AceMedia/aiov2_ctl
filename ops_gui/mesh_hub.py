@@ -22,6 +22,18 @@ RETRY_SECONDS = 60
 POLL_FAILURES_BEFORE_DROP = 3        # a few bad polls in a row means the connection is really dead, not a blip
 
 
+def engine_result(engine):
+    """What to hand the tabs once connecting has been tried: the engine when it really connected, otherwise no
+    engine and the reason. It used to be handed over whether or not it had connected, so the tab said it was
+    connected, and offered to send, on a connection that never opened."""
+    if engine is not None and getattr(engine, "active", False):
+        return {"hint": "", "lora": engine}
+    reason = str(getattr(engine, "connection_status", "") or "").strip()
+    if not reason or reason in ("Not started", "Connected", "Connected (TCP)"):
+        reason = "The mesh did not answer."
+    return {"hint": f"Mesh not connected: {reason}", "lora": None}
+
+
 def start_engine(rail):
     """Open the connection. Runs in a thread. Returns {'hint': text, 'lora': engine or None}."""
     result = {"hint": "", "lora": None}
@@ -36,7 +48,9 @@ def start_engine(rail):
             from ops_agent.lora import LoRa
             engine = LoRa()
             engine.connect()
-            result["lora"] = engine
+            result = engine_result(engine)
+            if result["lora"] is None:
+                engine.close()
     except Exception as e:
         result["hint"] = f"LoRa engine unavailable: {e}"
     return result
@@ -122,15 +136,24 @@ def build_hub(win):
             self.seen = None
             if engine:
                 try:
-                    engine.active = False
-                    if engine.interface:
-                        engine.interface.close()
+                    if hasattr(engine, "close"):
+                        engine.close()                  # stops it listening as well as closing the connection
+                    else:
+                        engine.active = False
+                        if engine.interface:
+                            engine.interface.close()
                 except Exception:
                     pass
 
         def poll(self):
             e = self.engine
             if e is None:
+                return
+            if not getattr(e, "active", True):
+                # the library has said the connection is gone: drop it now and let sync() open a new one
+                self.poll_failures = 0
+                self.next_try = 0.0
+                self.stop(hint="The mesh connection was lost. Reconnecting...")
                 return
             try:
                 if not self.users and time.time() - self.last_nodes > 30:
