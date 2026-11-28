@@ -790,7 +790,7 @@ ENGINE_SETTINGS = (
     ("ScreenCaptureEnabled", False),
     ("WebRTCPublicInterfacesOnly", True),
     ("PlaybackRequiresUserGesture", True),
-    ("FullScreenSupportEnabled", False),
+    ("FullScreenSupportEnabled", True),     # a page (a video) may ask for full screen: IGA's state 2
     ("ErrorPageEnabled", False),            # IGA shows its own page, in the app's colours, when a page fails
     ("JavascriptCanAccessClipboard", False),
 )
@@ -839,15 +839,16 @@ def load_engine():
 
 def build(win):
     """The IGA tab. It holds a light placeholder until it is first shown; only then is Qt WebEngine loaded. Every
-    control is an ordinary widget of the app, so it takes the app's style sheet, theme, contrast, feature colour
-    and fonts; only the web page itself is styled by the site."""
+    control is an ordinary widget of the app (icon buttons like the window's own top-bar buttons, the app's
+    buttons, line edits, list and card frames), so it takes the app's style sheet, theme, contrast, feature colour
+    and fonts; only the web page itself is styled by the site. Every decision is a plain function above."""
+    import shutil
     import time
-    from PyQt6.QtCore import Qt, QTimer, QUrl
-    from PyQt6.QtGui import QKeySequence, QShortcut
-    from PyQt6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
-                                 QMessageBox, QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+    from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
+    from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPalette, QPixmap, QShortcut
+    from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+                                 QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
     from . import data, style
-    from .foldertabs import FolderTabBar
 
     folder = user_folder()
 
@@ -857,15 +858,16 @@ def build(win):
     def prefs():
         return settings_from(getattr(win, "settings", None) or data.load_settings())
 
-    def button(text, slot, tip=""):
-        b = QPushButton(text)
-        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)        # as on the other tabs: the D-pad highlight reaches it
-        b.setToolTip(tip)
-        b.clicked.connect(lambda *_: slot())
-        return b
-
-    def tell(text):
-        QMessageBox.information(page, "IGA", text)
+    def pixel_icon(name):
+        """One of IGA's 16 by 16 pixel icons in the button text colour, as the window's top-bar icons are drawn."""
+        colour = page.palette().color(QPalette.ColorRole.ButtonText)
+        img = QImage(16, 16, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        for y, row in enumerate(ICONS[name]):
+            for x, cell in enumerate(row):
+                if cell == "#":
+                    img.setPixelColor(x, y, colour)
+        return QIcon(QPixmap.fromImage(img))
 
     class Page(QWidget):
         def keyPressEvent(self, event):
@@ -891,22 +893,29 @@ def build(win):
                 st["started"] = True
                 QTimer.singleShot(0, start)
 
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            if st["ready"]:
+                QTimer.singleShot(0, st["relayout"])
+
     page = Page()
     outer = QVBoxLayout(page)
-    outer.setContentsMargins(6, 6, 6, 6)
-    outer.setSpacing(4)
+    outer.setContentsMargins(4, 2, 4, 2)                # slim: less than the other tabs' toolbars
+    outer.setSpacing(2)
     waiting = QLabel("IGA starts when this tab is first opened.")
     waiting.setWordWrap(True)
     waiting.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     waiting.setStyleSheet("font-size: 13pt;")
     outer.addWidget(waiting, 1, Qt.AlignmentFlag.AlignTop)
     st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False,
-          "actions": {}}
+          "actions": {}, "panel": None, "editing": False, "row_hidden": False, "favicons": {}, "asks": [],
+          "relayout": lambda: None, "peek": (False, 0)}
     page.key_act = lambda what: st["actions"].get(what, lambda: None)()
     page.escape_plan = lambda: None            # until the engine is there, Escape is the app's as on any tab
     page.escape_do = lambda _step: None
     page.recolour = lambda: None
     page.stop = lambda: None
+    page.set_row_hidden = lambda hidden: None
 
     def start():
         try:
@@ -928,26 +937,24 @@ def build(win):
 
         _private_folder(folder)
         _private_folder(profile_folder())
+        _private_folder(pending_folder())
         profile = QWebEngineProfile("aiov2-iga", page)          # one profile with a storage name of its own
         profile.setPersistentStoragePath(profile_folder())
         profile.setCachePath(os.path.join(profile_folder(), "cache"))
         profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
         profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
-        try:
-            profile.setSpellCheckEnabled(False)
-        except Exception:
-            pass
-        try:
-            profile.setDownloadPath(downloads_folder())
-        except Exception:
-            pass
+        for call, value in (("setSpellCheckEnabled", False), ("setDownloadPath", pending_folder())):
+            try:
+                getattr(profile, call)(value)
+            except Exception:
+                pass
         es = profile.settings()
         for name, value in ENGINE_SETTINGS:
             attr = getattr(QWebEngineSettings.WebAttribute, name, None)
             if attr is not None:
                 es.setAttribute(attr, value)
         st["profile"] = profile
-        pages = Pages(open_first=False)         # open_page() below makes the first, with its view and strip entry
+        pages = Pages(open_first=False)         # open_page() below makes the first, with its view and its tab
         st["pages"] = pages
 
         class WebPage(QWebEnginePage):
@@ -955,64 +962,67 @@ def build(win):
                 pid = open_page(blank=True)
                 return st["views"][pid].page() if pid is not None else None
 
-        # ---- the row of controls
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        back_b = button("Back", lambda: act("back"), "Back (Alt+Left)")
-        fwd_b = button("Forward", lambda: act("forward"), "Forward (Alt+Right)")
-        reload_b = button("Reload", lambda: act("reload_or_stop"), "Reload (Ctrl+R), or Stop while loading")
-        address = QLineEdit()
-        address.setPlaceholderText("Address (Ctrl+L)")
-        address.setStyleSheet("font-size: 13pt; padding: 6px;")          # as the mesh message box
-        mark = QLabel("")
-        mark.setStyleSheet("font-size: 10pt; color: #9e9e9e;")           # the app's helper-text grey
-        mark_b = button("Bookmark", lambda: bookmark_this(), "Keep this page on the start page")
-        menu_b = QPushButton("Menu")
-        menu_b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        menu = QMenu(menu_b)
-        menu_b.setMenu(menu)
-        for w in (back_b, fwd_b, reload_b):
-            row.addWidget(w)
-        row.addWidget(address, 1)
-        row.addWidget(mark)
-        row.addWidget(mark_b)
-        row.addWidget(menu_b)
-        outer.addLayout(row)
+        # ---- the one slim row
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(ROW_GAP)
+        buttons = {}
 
-        strip = FolderTabBar()
-        strip.setObjectName("subtabs")
-        strip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        strip.setMovable(True)
-        strip.setExpanding(False)
-        holder = QWidget()
-        holder.setObjectName("subtabs")                  # so the strip takes the sub-tab look from the style sheet
-        hl = QVBoxLayout(holder)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.addWidget(strip)
-        outer.addWidget(holder)
+        def icon_button(name, slot):
+            b = QPushButton("")
+            b.setObjectName("iconbtn")                   # styled as the window's own top-bar icon buttons
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)     # as on the other tabs: the D-pad highlight reaches it
+            b.setFixedSize(BUTTON_WIDTH, ROW_HEIGHT)
+            b.setIconSize(QSize(16, 16))
+            b.setToolTip(ICON_WORDS[name])
+            b.setAccessibleName(ICON_WORDS[name])
+            b.clicked.connect(lambda *_: slot())
+            buttons[name] = b
+            return b
+
+        class AddressField(QLineEdit):
+            def focusOutEvent(self, event):
+                super().focusOutEvent(event)
+                if st["editing"]:
+                    QTimer.singleShot(0, collapse)
+
+        field = AddressField()
+        field.setPlaceholderText("Type an address, then Enter")
+        field.setAccessibleName("Address of the current page")
+        field.setFixedHeight(ROW_HEIGHT)
+        field.hide()
+        tabs_box = QWidget()
+        tl = QHBoxLayout(tabs_box)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(ROW_GAP)
+        rl.addWidget(icon_button("back", lambda: act("back")))
+        rl.addWidget(icon_button("forward", lambda: act("forward")))
+        rl.addWidget(icon_button("reload", lambda: act("reload_or_stop")))
+        rl.addWidget(tabs_box, 1)
+        rl.addWidget(field, 1)
+        rl.addWidget(icon_button("new", lambda: (open_page(), focus_current())))
+        rl.addWidget(icon_button("bookmark", lambda: bookmark_this()))
+        rl.addWidget(icon_button("menu", lambda: toggle_menu()))
+        outer.addWidget(row)
+
+        panel = QFrame()
+        panel.setObjectName("card")                     # the app's own card look
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(6, 4, 6, 4)
+        pl.setSpacing(4)
+        panel.hide()
+        outer.addWidget(panel)
 
         progress = QProgressBar()
         progress.setTextVisible(False)
-        progress.setMaximumHeight(6)
+        progress.setMaximumHeight(4)
         progress.setRange(0, 100)
         progress.hide()
         outer.addWidget(progress)
 
         stack = QStackedWidget()
         outer.addWidget(stack, 1)
-
-        findrow = QWidget()
-        fr = QHBoxLayout(findrow)
-        fr.setContentsMargins(0, 0, 0, 0)
-        find_box = QLineEdit()
-        find_box.setPlaceholderText("Find in page")
-        find_box.setStyleSheet("font-size: 13pt; padding: 6px;")
-        fr.addWidget(find_box, 1)
-        fr.addWidget(button("Next", lambda: find(True), "Next match (Enter)"))
-        fr.addWidget(button("Previous", lambda: find(False), "Previous match"))
-        fr.addWidget(button("Close", lambda: close_find(), "Close (Escape)"))
-        findrow.hide()
-        outer.addWidget(findrow)
 
         def current():
             return st["views"].get(pages.current)
@@ -1027,144 +1037,129 @@ def build(win):
             view = st["views"].get(pid)
             return view.url().toString() if view is not None else ""
 
-        def refresh_row():
+        def favicon(pid):
+            i = st["info"].get(pid, {})
+            if i.get("own"):
+                return pixel_icon("app")
+            icon = i.get("icon")
+            return icon if icon is not None and not icon.isNull() else pixel_icon("page")
+
+        # ---- the pages in the row: the current one is the address
+        def relayout():
+            had_focus = st.get("current_tab") is not None and st["current_tab"].hasFocus()
+            while tl.count():
+                w = tl.takeAt(0).widget()
+                if w is not None:
+                    w.hide()
+                    w.deleteLater()
+            st["current_tab"] = None
+            width = row.width() if row.width() > 0 else page.width() - 8
+            plan = row_layout(width, len(pages.order), pages.index(pages.current) if pages.order else 0)
+            for pid, place in zip(pages.order, plan):
+                view = st["views"].get(pid)
+                if view is None:
+                    continue
+                url = shown_url(pid)
+                own = st["info"].get(pid, {}).get("own")
+                title = "" if own else view.title()
+                b = QPushButton("")
+                b.setFixedSize(max(0, place["width"]), ROW_HEIGHT)
+                if place["mode"] == "address":
+                    b.setCheckable(True)
+                    b.setChecked(True)
+                    b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)     # Escape from a page lands here
+                    inner = QHBoxLayout(b)
+                    inner.setContentsMargins(6, 0, 6, 0)
+                    inner.setSpacing(4)
+                    marks = mark_icon(url, own=bool(own))
+                    words = security_mark(START if own else url)
+                    for icon in ([pixel_icon(marks)] if marks else []) + [favicon(pid)]:
+                        lab = QLabel()
+                        lab.setPixmap(icon.pixmap(16, 16))
+                        lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                        inner.addWidget(lab)
+                    text = QLabel()
+                    text.setTextFormat(Qt.TextFormat.RichText)
+                    most = chars_for(place["width"], 2)
+                    text.setText(html.escape(page_label(title, url, most)) if own or not _web(url)
+                                 else address_html(url, most))
+                    text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                    inner.addWidget(text, 1)
+                    tip = (words + ". " if words else "") + (url if url != "about:blank" else "New page") + \
+                        ". Click, or Ctrl+L, to type an address."
+                    b.setToolTip(tip)
+                    b.setAccessibleName("Current page: " + (title or url or "new page") +
+                                        (f", {words}" if words else "") + ". Press to type an address (Ctrl+L)")
+                    b.clicked.connect(lambda *_: expand())
+                    st["current_tab"] = b
+                else:
+                    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                    b.setIcon(favicon(pid))
+                    b.setIconSize(QSize(16, 16))
+                    if place["mode"] == "title":
+                        b.setText(page_label(title, url, max(1, chars_for(place["width"]))))
+                    b.setToolTip((title or page_label(title, url)) + "\n" + url)
+                    b.setAccessibleName("Page: " + (title or page_label(title, url)))
+                    b.clicked.connect(lambda *_, p=pid: choose(p))
+                tl.addWidget(b)
+            tl.addStretch(1)
+            if had_focus and st["current_tab"] is not None:
+                st["current_tab"].setFocus()
+            refresh_buttons()
+
+        st["relayout"] = relayout
+
+        def refresh_buttons():
             view = current()
             if view is None:
                 return
-            url = shown_url(pages.current)
-            if not address.hasFocus():
-                address.setText("" if url == "about:blank" else url)
-            mark.setText(security_mark(START if info().get("own") == "start" else url))
-            if info().get("own") == "notice":
-                mark.setText(security_mark(START))
             h = view.history()
-            back_b.setEnabled(h.canGoBack())
-            fwd_b.setEnabled(h.canGoForward())
-            reload_b.setText("Stop" if info().get("loading") else "Reload")
-            mark_b.setEnabled(url.startswith(("http://", "https://")) and not info().get("own"))
+            buttons["back"].setEnabled(h.canGoBack())
+            buttons["forward"].setEnabled(h.canGoForward())
+            loading_now = bool(info().get("loading"))
+            buttons["reload"].setIcon(pixel_icon("stop" if loading_now else "reload"))
+            words = ICON_WORDS["stop" if loading_now else "reload"]
+            buttons["reload"].setToolTip(words)
+            buttons["reload"].setAccessibleName(words)
+            for name in ("back", "forward", "new", "bookmark", "menu"):
+                buttons[name].setIcon(pixel_icon(name))
+            url = shown_url(pages.current)
+            buttons["bookmark"].setEnabled(_web(url) and not info().get("own"))
 
-        def relabel(pid):
-            view = st["views"].get(pid)
-            if view is None or pid not in pages.order or pages.index(pid) >= strip.count():
+        def focus_current():
+            if st.get("current_tab") is not None:
+                st["current_tab"].setFocus()
+
+        def expand():
+            """The current page's tab opens into a field across the whole row, its address selected."""
+            st["editing"] = True
+            if st["row_hidden"]:
+                row.show()                      # page full screen: the row comes back just to type
+            for w in list(buttons.values()) + [tabs_box]:
+                w.hide()
+            url = shown_url(pages.current)
+            field.setText("" if url in ("about:blank", START) else url)
+            field.show()
+            field.setFocus()
+            field.selectAll()
+
+        def collapse(to_view=False):
+            if not st["editing"]:
                 return
-            i = st["info"].get(pid, {})
-            title = "" if i.get("own") else view.title()
-            text = page_label(title, START if i.get("own") == "start" else shown_url(pid))
-            at = pages.index(pid)
-            if strip.tabText(at) != text:
-                strip.setTabText(at, text)
-            strip.setTabToolTip(at, shown_url(pid))
+            st["editing"] = False
+            field.hide()
+            for w in list(buttons.values()) + [tabs_box]:
+                w.show()
+            if st["row_hidden"]:
+                row.hide()
+            relayout()
+            view = current()
+            if to_view and view is not None:
+                view.setFocus()
+            elif not st["row_hidden"]:
+                focus_current()
 
-        def show_own(pid, kind, title="", text="", shown=START):
-            view = st["views"][pid]
-            st["info"][pid] = dict(st["info"].get(pid, {}), own=kind, shown=shown, title=title, text=text)
-            if kind == "start":
-                body = start_page(load_bookmarks(folder), colours())
-            else:
-                body = notice_page(title, text, colours(), address=shown if shown != START else "")
-            view.setHtml(body, QUrl("about:blank"))
-            relabel(pid)
-            refresh_row()
-
-        def make_view(pid):
-            view = QWebEngineView()
-            view.setProperty("typing_zone", True)        # the app's letter shortcuts leave a web page alone
-            wp = WebPage(profile, view)
-            view.setPage(wp)
-            deny_permissions(wp, QWebEnginePage)
-            view.titleChanged.connect(lambda *_: (relabel(pid), refresh_row() if pid == pages.current else None))
-            view.urlChanged.connect(lambda u: url_changed(pid, u))
-            view.loadStarted.connect(lambda: loading(pid, True))
-            view.loadProgress.connect(lambda n: progress.setValue(n) if pid == pages.current else None)
-            view.loadFinished.connect(lambda ok: finished(pid, ok))
-            if hasattr(wp, "loadingChanged"):
-                wp.loadingChanged.connect(lambda li: failed(pid, li))
-            st["views"][pid] = view
-            st["info"][pid] = {}
-            stack.addWidget(view)
-            return view
-
-        def url_changed(pid, url):
-            i = st["info"].setdefault(pid, {})
-            if url.scheme() in ("http", "https"):
-                i["was_own"], i["own"] = i.get("own") or i.get("was_own"), None
-            elif not i.get("own") and i.get("was_own"):        # Back to one of the app's own pages
-                i["own"] = i["was_own"]
-            relabel(pid)
-            if pid == pages.current:
-                refresh_row()
-
-        def loading(pid, on):
-            st["info"].setdefault(pid, {})["loading"] = on
-            if pid == pages.current:
-                progress.setVisible(on)
-                if on:
-                    progress.setValue(0)
-                refresh_row()
-
-        def finished(pid, ok):
-            loading(pid, False)
-            view = st["views"].get(pid)
-            if ok and view is not None and not st["info"][pid].get("own"):
-                add_visit(folder, view.url().toString(), view.title(), time.time(), prefs()["iga_history"])
-
-        def failed(pid, li):
-            try:
-                if li.status() != li.LoadStatus.LoadFailedStatus:
-                    return
-                kind = error_kind(li.errorCode())
-                url = li.url().toString()
-            except Exception:
-                return
-            if kind is not None:
-                show_own(pid, "notice", "Not loaded", load_error_text(kind), shown=url)
-
-        def open_page(blank=False, url=None):
-            pid, why = pages.open()
-            if pid is None:
-                tell(why)
-                return None
-            make_view(pid)
-            strip.blockSignals(True)
-            strip.insertTab(pages.index(pid), "New page")
-            strip.blockSignals(False)
-            choose(pid)
-            if url:
-                go(url)
-            elif not blank:
-                show_own(pid, "start")
-            return pid
-
-        def choose(pid):
-            pages.select(pid)
-            view = st["views"][pid]
-            stack.setCurrentWidget(view)
-            strip.blockSignals(True)
-            strip.setCurrentIndex(pages.index(pid))
-            strip.blockSignals(False)
-            progress.setVisible(bool(info().get("loading")))
-            refresh_row()
-
-        def close_page(pid=None):
-            pid = pages.current if pid is None else pid
-            at = pages.index(pid)
-            fresh = pages.close(pid)
-            view = st["views"].pop(pid)
-            st["info"].pop(pid, None)
-            strip.blockSignals(True)
-            strip.removeTab(at)
-            strip.blockSignals(False)
-            stack.removeWidget(view)
-            view.page().deleteLater()            # the page goes first: Qt WebEngine warns if a profile outlives it
-            view.deleteLater()
-            if fresh is not None:
-                make_view(fresh)
-                strip.insertTab(0, "New page")
-                show_own(fresh, "start")
-            choose(pages.current)
-
-        def go(text=None):
-            text = address.text() if text is None else text
+        def go(text):
             p = prefs()
             meaning = to_url(text, search_template(p["iga_search"], p["iga_search_custom"]))
             if meaning is None:
@@ -1180,6 +1175,227 @@ def build(win):
                 view.setUrl(QUrl(where))
             view.setFocus()
 
+        field.returnPressed.connect(lambda: (go(field.text()), collapse(to_view=True)))
+
+        # ---- panels: IGA's own, non-modal, under the row
+        def close_panel():
+            kind = st["panel"]
+            st["panel"] = None
+            if kind == "find":
+                st["finding"] = False
+                view = current()
+                if view is not None:
+                    view.findText("")
+                    view.setFocus()
+            panel.hide()
+            while pl.count():
+                item_ = pl.takeAt(0)
+                w = item_.widget()
+                if w is not None:
+                    w.hide()
+                    w.deleteLater()
+                elif item_.layout() is not None:
+                    lay = item_.layout()
+                    while lay.count():
+                        sub = lay.takeAt(0).widget()
+                        if sub is not None:
+                            sub.hide()
+                            sub.deleteLater()
+            if st["asks"]:
+                QTimer.singleShot(0, lambda: ask_download(st["asks"].pop(0)))
+
+        def show_panel(spec, handler):
+            """Show a panel from panel_spec(); handler(button id, field text, chosen row) is called on a press."""
+            if st["panel"] is not None:
+                close_panel()
+            st["panel"] = spec["kind"]
+            if spec["text"]:
+                lab = QLabel(spec["text"])
+                lab.setTextFormat(Qt.TextFormat.PlainText)
+                lab.setWordWrap(True)
+                pl.addWidget(lab)
+            box = None
+            if spec["field"] is not None:
+                box = QLineEdit(spec["field"])
+                box.setFixedHeight(ROW_HEIGHT)
+                pl.addWidget(box)
+            lst = None
+            if spec["list"]:
+                lst = QListWidget()
+                lst.addItems(spec["list"])
+                lst.setCurrentRow(0)
+                lst.setMaximumHeight(170)
+                pl.addWidget(lst)
+            line = QHBoxLayout()
+            line.setSpacing(4)
+
+            def press(bid):
+                handler(bid, box.text() if box is not None else "", lst.currentRow() if lst is not None else -1)
+            for bid, words in spec["buttons"]:
+                b = QPushButton(words)
+                b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                b.clicked.connect(lambda *_, i=bid: press(i))
+                line.addWidget(b)
+            line.addStretch(1)
+            pl.addLayout(line)
+            first = spec["buttons"][0][0]
+            if box is not None:
+                box.returnPressed.connect(lambda: press(first))
+                if spec["kind"] == "find":
+                    box.textChanged.connect(lambda t: find(t, True))
+            if lst is not None:
+                lst.itemActivated.connect(lambda *_: press(first))
+            panel.show()
+            if box is not None:
+                box.setFocus()
+                box.selectAll()
+            elif lst is not None:
+                lst.setFocus()
+
+        def message(text):
+            show_panel(panel_spec("message", text=text), lambda *_: close_panel())
+
+        def toggle_menu():
+            if st["panel"] == "menu":
+                close_panel()
+                return
+
+            def chosen(bid, *_):
+                close_panel()
+                {"new": lambda: (open_page(), focus_current()), "close_page": lambda: close_page(),
+                 "start": lambda: show_own(pages.current, "start"), "bookmarks": manage_bookmarks,
+                 "downloads": downloads_list, "find": open_find, "zoom_in": lambda: zoom(1),
+                 "zoom_out": lambda: zoom(-1), "zoom_reset": lambda: zoom(0), "clear": clear_now,
+                 "close": lambda: None}.get(bid, lambda: None)()
+            show_panel(panel_spec("menu"), chosen)
+
+        # ---- the views
+        def show_own(pid, kind, title="", text="", shown=START):
+            view = st["views"][pid]
+            st["info"][pid] = dict(st["info"].get(pid, {}), own=kind, shown=shown, title=title, text=text)
+            if kind == "start":
+                body = start_page(load_bookmarks(folder), colours(), st["favicons"])
+            else:
+                body = notice_page(title, text, colours(), address=shown if shown != START else "")
+            view.setHtml(body, QUrl("about:blank"))
+            relayout()
+
+        def make_view(pid):
+            view = QWebEngineView()
+            view.setProperty("typing_zone", True)        # the app's letter shortcuts leave a web page alone
+            wp = WebPage(profile, view)
+            view.setPage(wp)
+            deny_permissions(wp, QWebEnginePage)
+            view.titleChanged.connect(lambda *_: relayout())
+            view.urlChanged.connect(lambda u: url_changed(pid, u))
+            view.loadStarted.connect(lambda: loading(pid, True))
+            view.loadProgress.connect(lambda n: progress.setValue(n) if pid == pages.current else None)
+            view.loadFinished.connect(lambda ok: finished(pid, ok))
+            if hasattr(view, "iconChanged"):
+                view.iconChanged.connect(lambda icon: got_icon(pid, icon))
+            if hasattr(wp, "loadingChanged"):
+                wp.loadingChanged.connect(lambda li: failed(pid, li))
+            if hasattr(wp, "fullScreenRequested"):
+                wp.fullScreenRequested.connect(page_fullscreen)
+            st["views"][pid] = view
+            st["info"][pid] = {}
+            stack.addWidget(view)
+            return view
+
+        def got_icon(pid, icon):
+            if pid not in st["info"]:
+                return
+            st["info"][pid]["icon"] = icon
+            try:
+                from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+                raw = QByteArray()
+                buf = QBuffer(raw)
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                icon.pixmap(16, 16).save(buf, "PNG")
+                uri = "data:image/png;base64," + bytes(raw.toBase64()).decode("ascii")
+                key = site_key(shown_url(pid))
+                if key and favicon_ok(uri):
+                    st["favicons"][key] = uri           # this session only, from the page itself
+            except Exception:
+                pass
+            relayout()
+
+        def page_fullscreen(req):
+            try:
+                req.accept()
+                on = req.toggleOn()
+            except Exception:
+                return
+            hook = getattr(win, "iga_fullscreen", None)
+            if hook is not None:
+                hook("page_on" if on else "page_off")
+
+        def url_changed(pid, url):
+            i = st["info"].setdefault(pid, {})
+            if url.scheme() in ("http", "https"):
+                i["was_own"], i["own"] = i.get("own") or i.get("was_own"), None
+            elif not i.get("own") and i.get("was_own"):        # Back to one of the app's own pages
+                i["own"] = i["was_own"]
+            relayout()
+
+        def loading(pid, on):
+            st["info"].setdefault(pid, {})["loading"] = on
+            if pid == pages.current:
+                progress.setVisible(on)
+                if on:
+                    progress.setValue(0)
+                refresh_buttons()
+
+        def finished(pid, ok):
+            loading(pid, False)
+            view = st["views"].get(pid)
+            if ok and view is not None and not st["info"][pid].get("own"):
+                add_visit(folder, view.url().toString(), view.title(), time.time(), prefs()["iga_history"])
+            relayout()
+
+        def failed(pid, li):
+            try:
+                if li.status() != li.LoadStatus.LoadFailedStatus:
+                    return
+                kind = error_kind(li.errorCode())
+                url = li.url().toString()
+            except Exception:
+                return
+            if kind is not None:
+                show_own(pid, "notice", "Not loaded", load_error_text(kind), shown=url)
+
+        def open_page(blank=False, url=None):
+            pid, why = pages.open()
+            if pid is None:
+                message(why)
+                return None
+            make_view(pid)
+            choose(pid)
+            if url:
+                go(url)
+            elif not blank:
+                show_own(pid, "start")
+            return pid
+
+        def choose(pid):
+            pages.select(pid)
+            stack.setCurrentWidget(st["views"][pid])
+            progress.setVisible(bool(info().get("loading")))
+            relayout()
+
+        def close_page(pid=None):
+            pid = pages.current if pid is None else pid
+            fresh = pages.close(pid)
+            view = st["views"].pop(pid)
+            st["info"].pop(pid, None)
+            stack.removeWidget(view)
+            view.page().deleteLater()            # the page goes first: Qt WebEngine warns if a profile outlives it
+            view.deleteLater()
+            if fresh is not None:
+                make_view(fresh)
+                show_own(fresh, "start")
+            choose(pages.current)
+
         def act(what):
             view = current()
             if view is None:
@@ -1193,10 +1409,11 @@ def build(win):
                     view.stop()
                 elif info().get("own") == "start":
                     show_own(pages.current, "start")
-                else:
+                elif not info().get("own"):
                     view.reload()
             elif what == "reload":
-                view.reload() if not info().get("own") else None
+                if not info().get("own"):
+                    view.reload()
             elif what == "stop":
                 view.stop()
 
@@ -1205,10 +1422,9 @@ def build(win):
             if view is not None:
                 view.setZoomFactor(zoom_step(view.zoomFactor(), direction))
 
-        def find(forward=True):
+        def find(text, forward=True):
             view = current()
-            text = find_box.text()
-            if view is None or not text:
+            if view is None:
                 return
             if forward:
                 view.findText(text)
@@ -1216,54 +1432,54 @@ def build(win):
                 view.findText(text, QWebEnginePage.FindFlag.FindBackward)
 
         def open_find():
+            def pressed(bid, text, _row):
+                if bid == "close":
+                    close_panel()
+                elif text:
+                    find(text, bid == "next")
+            show_panel(panel_spec("find"), pressed)
             st["finding"] = True
-            findrow.show()
-            find_box.setFocus()
-            find_box.selectAll()
-
-        def close_find():
-            st["finding"] = False
-            view = current()
-            if view is not None:
-                view.findText("")
-                view.setFocus()
-            findrow.hide()
 
         def bookmark_this():
             view = current()
             if view is None or info().get("own"):
                 return
             url = view.url().toString()
-            title, ok = QInputDialog.getText(page, "Bookmark", "Name for this page:", QLineEdit.EchoMode.Normal,
-                                             view.title() or url)
-            if ok and not add_bookmark(folder, title, url):
-                tell("Only web addresses (http and https) can be kept as bookmarks.")
-            refresh_start_pages()
+
+            def pressed(bid, text, _row):
+                close_panel()
+                if bid == "save":
+                    if add_bookmark(folder, text, url):
+                        refresh_start_pages()
+                    else:
+                        message("Only web addresses (http and https) can be kept as bookmarks.")
+            show_panel(panel_spec("bookmark", title=view.title() or url), pressed)
 
         def manage_bookmarks():
             marks = load_bookmarks(folder)
-            if not marks:
-                tell("No bookmarks yet. Open a page and press Bookmark to keep it.")
-                return
-            names = [f"{b['title']}  ({b['url']})" for b in marks]
-            pick, ok = QInputDialog.getItem(page, "Bookmarks", "Choose a bookmark:", names, 0, False)
-            if not ok:
-                return
-            chosen = marks[names.index(pick)]
-            what, ok = QInputDialog.getItem(page, "Bookmarks", chosen["title"], ["Open", "Rename", "Remove"], 0,
-                                            False)
-            if not ok:
-                return
-            if what == "Open":
-                go(chosen["url"])
-            elif what == "Rename":
-                title, ok = QInputDialog.getText(page, "Rename bookmark", "New name:", QLineEdit.EchoMode.Normal,
-                                                 chosen["title"])
-                if ok:
-                    rename_bookmark(folder, chosen["url"], title)
-            elif win.ask(f"Remove the bookmark '{chosen['title']}'?"):
-                remove_bookmark(folder, chosen["url"])
-            refresh_start_pages()
+
+            def pressed(bid, _text, row_):
+                close_panel()
+                if not marks or bid in ("ok", "close") or not 0 <= row_ < len(marks):
+                    return
+                chosen = marks[row_]
+                if bid == "open":
+                    go(chosen["url"])
+                elif bid == "rename":
+                    def renamed(b2, text, _r):
+                        close_panel()
+                        if b2 == "save":
+                            rename_bookmark(folder, chosen["url"], text)
+                            refresh_start_pages()
+                    show_panel(panel_spec("rename", title=chosen["title"]), renamed)
+                elif bid == "remove":
+                    def removed(b2, *_):
+                        close_panel()
+                        if b2 == "remove":
+                            remove_bookmark(folder, chosen["url"])
+                            refresh_start_pages()
+                    show_panel(panel_spec("remove", title=chosen["title"]), removed)
+            show_panel(panel_spec("bookmarks", bookmarks=marks), pressed)
 
         def refresh_start_pages():
             for pid in list(pages.order):
@@ -1271,88 +1487,180 @@ def build(win):
                 if own:
                     i = st["info"][pid]
                     show_own(pid, own, i.get("title", ""), i.get("text", ""), i.get("shown", START))
-            choose(pages.current)
+            relayout()
 
         def downloads_list():
-            lines = [download_line(d["name"], d["got"], d["total"], d["state"]) for d in st["downloads"]]
-            tell("\n".join(lines) if lines else "Nothing downloaded since the app started.")
+            lines = [download_line(d["name"], d["got"], d["total"],
+                                   "going" if d["state"] == "done" and not d.get("moved") else d["state"])
+                     for d in st["downloads"]]
+            show_panel(panel_spec("downloads", lines=lines), lambda *_: close_panel())
 
-        def clear_now(ask=True):
-            if ask and not win.ask("Clear IGA's cookies, site storage, cache and history now? You will be signed out of sites. Bookmarks are kept."):
-                return
-            clear_data()
-            if ask:
-                tell("Cookies, cache and history are cleared.")
+        def clear_now():
+            def pressed(bid, *_):
+                close_panel()
+                if bid == "clear":
+                    clear_data()
+                    message("Cookies, site storage, cache and history are cleared.")
+            show_panel(panel_spec("clear"), pressed)
 
         def clear_data():
-            try:
-                profile.clearHttpCache()
-                profile.cookieStore().deleteAllCookies()
-                profile.clearAllVisitedLinks()
-            except Exception:
-                pass
+            for call in (lambda: profile.clearHttpCache(), lambda: profile.cookieStore().deleteAllCookies(),
+                         lambda: profile.clearAllVisitedLinks()):
+                try:
+                    call()
+                except Exception:
+                    pass
             clear_history(folder)
+
+        # ---- downloads: written to IGA's private folder while you choose where they go
+        def settle(entry):
+            what = download_next(entry["state"], entry.get("target"), entry.get("moved"))
+            src = os.path.join(pending_folder(), entry["file"])
+            try:
+                if what == "move" and os.path.exists(src):
+                    shutil.move(src, entry["target"])
+                    entry["moved"] = True
+                    win.say(f"Saved {entry['target']}")
+                elif what == "delete" and os.path.exists(src):
+                    os.remove(src)
+                    entry["moved"] = True
+            except OSError as exc:
+                entry["state"] = "failed"
+                message(f"{entry['name']} could not be saved: {exc}")
+
+        def choose_target(entry, where):
+            name = safe_name(entry["name"], where)
+            entry["target"] = os.path.join(where, name)
+            entry["name"] = name
+            settle(entry)
+
+        def ask_download(entry):
+            if st["panel"] is not None:
+                st["asks"].append(entry)
+                return
+            if entry["state"] in ("cancelled", "failed"):
+                return
+            home_dl = downloads_folder()
+
+            def pressed(bid, *_):
+                close_panel()
+                if bid == "save":
+                    os.makedirs(home_dl, exist_ok=True)
+                    choose_target(entry, home_dl)
+                elif bid == "choose":
+                    browse(entry, home_dl if os.path.isdir(home_dl) else os.path.expanduser("~"))
+                else:
+                    try:
+                        entry["req"].cancel()
+                    except Exception:
+                        pass
+                    entry["state"] = "cancelled"
+                    settle(entry)
+            show_panel(panel_spec("download", name=entry["name"], folder=home_dl), pressed)
+
+        def browse(entry, where):
+            try:
+                names = os.listdir(where)
+            except OSError:
+                names = []
+            rows = folder_entries(where, names, os.path.isdir)
+
+            def pressed(bid, _text, row_):
+                close_panel()
+                if bid == "open" and 0 <= row_ < len(rows):
+                    browse(entry, rows[row_][1])
+                elif bid == "here":
+                    choose_target(entry, where)
+                else:
+                    ask_download(entry)
+            show_panel(panel_spec("folders", name=entry["name"], folder=where, entries=rows), pressed)
 
         def download(req):
             try:
                 suggested = req.downloadFileName()
             except Exception:
                 suggested = ""
-            start_in = downloads_folder()
-            name = safe_name(suggested, start_in)
-            path, _ = QFileDialog.getSaveFileName(page, "Save download", os.path.join(start_in, name))
-            if not path:
-                req.cancel()
+            name = safe_name(suggested, pending_folder())
+            entry = {"name": name, "file": name, "got": 0, "total": 0, "state": "going", "req": req}
+            try:
+                req.setDownloadDirectory(pending_folder())
+                req.setDownloadFileName(name)
+                req.accept()
+            except Exception as exc:
+                message(f"The download could not start: {exc}")
                 return
-            req.setDownloadDirectory(os.path.dirname(path))
-            req.setDownloadFileName(os.path.basename(path))
-            entry = {"name": os.path.basename(path), "got": 0, "total": 0, "state": "going"}
             st["downloads"].append(entry)
 
             def update(*_):
                 try:
                     entry["got"], entry["total"] = req.receivedBytes(), req.totalBytes()
                     s = req.state()
-                    D = type(s)
-                    entry["state"] = {D.DownloadCompleted: "done", D.DownloadCancelled: "cancelled",
-                                      D.DownloadInterrupted: "failed"}.get(s, "going")
+                    kinds = type(s)
+                    entry["state"] = {kinds.DownloadCompleted: "done", kinds.DownloadCancelled: "cancelled",
+                                      kinds.DownloadInterrupted: "failed"}.get(s, "going")
                 except Exception:
                     pass
-                if entry["state"] in ("done", "failed"):
-                    win.say(download_line(entry["name"], entry["got"], entry["total"], entry["state"]))
+                if entry["state"] != "going":
+                    settle(entry)
             for sig in ("receivedBytesChanged", "stateChanged", "isFinishedChanged"):
                 if hasattr(req, sig):
                     getattr(req, sig).connect(update)
-            req.accept()
+            ask_download(entry)
         profile.downloadRequested.connect(download)
 
-        # ---- the menu
-        def item(text, slot, keys=""):
-            a = menu.addAction(text + (f"\t{keys}" if keys else ""))
-            a.triggered.connect(lambda *_: slot())
-        item("New page", lambda: open_page(), "Ctrl+T")
-        item("Close page", lambda: close_page(), "Ctrl+W")
-        menu.addSeparator()
-        item("Start page", lambda: show_own(pages.current, "start"))
-        item("Bookmarks", manage_bookmarks)
-        item("Downloads", downloads_list)
-        item("Find in page", open_find, "Ctrl+F")
-        menu.addSeparator()
-        item("Zoom in", lambda: zoom(1), "Ctrl++")
-        item("Zoom out", lambda: zoom(-1), "Ctrl+-")
-        item("Zoom reset", lambda: zoom(0), "Ctrl+0")
-        menu.addSeparator()
-        item("Clear data now", clear_now)
+        # ---- the strip that slides in at the top right in full screen
+        strip = QFrame(win)
+        strip.setObjectName("card")
+        sl = QHBoxLayout(strip)
+        sl.setContentsMargins(6, 2, 6, 2)
+        strip_addr = QLabel("")
+        strip_addr.setTextFormat(Qt.TextFormat.PlainText)
+        sl.addWidget(strip_addr)
+        for words, action in (("Back one step", "back"), ("Leave full screen", "leave")):
+            b = QPushButton(words)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda *_, a=action: (strip.hide(), getattr(win, "iga_fullscreen", lambda _a: None)(a)))
+            sl.addWidget(b)
+        strip.hide()
 
-        # ---- signals and keys
-        address.returnPressed.connect(lambda: go())
-        find_box.returnPressed.connect(lambda: find(True))
-        strip.currentChanged.connect(lambda i: choose(pages.order[i]) if 0 <= i < len(pages.order) else None)
-        strip.tabMoved.connect(lambda frm, to: pages.move(pages.order[frm], to))
+        def peek_tick():
+            from PyQt6.QtGui import QCursor
+            state = getattr(win, "iga_fs", 0)
+            if not state or not page.isVisible():
+                if strip.isVisible():
+                    strip.hide()
+                st["peek"] = (False, 0)
+                return
+            pos = win.mapFromGlobal(QCursor.pos())
+            shown, count, what = top_peek_step(st["peek"][0], st["peek"][1], pos.y(), win.rect().contains(pos))
+            st["peek"] = (shown, count)
+            if what == "show":
+                strip_addr.setText(shown_url(pages.current) if state == 2 else "")
+                strip_addr.setVisible(state == 2)
+                strip.adjustSize()
+                strip.move(max(0, win.width() - strip.width() - 8), 0)
+                strip.raise_()
+                strip.show()
+                try:
+                    from PyQt6.QtCore import QPoint, QPropertyAnimation
+                    anim = QPropertyAnimation(strip, b"pos", strip)
+                    anim.setDuration(150)
+                    anim.setStartValue(QPoint(strip.x(), -strip.height()))
+                    anim.setEndValue(QPoint(strip.x(), 0))
+                    anim.start()
+                    st["anim"] = anim
+                except Exception:
+                    pass
+            elif what == "hide":
+                strip.hide()
+        peek_timer = QTimer(page)
+        peek_timer.timeout.connect(peek_tick)
+        peek_timer.start(250)
 
+        # ---- keys
         st["actions"].update({
-            "address": lambda: (address.setFocus(), address.selectAll()),
-            "new": lambda: (open_page(), address.setFocus()),
+            "address": expand,
+            "new": lambda: (open_page(), focus_current()),
             "close": lambda: close_page(),
             "next": lambda: choose(pages.step(1)),
             "previous": lambda: choose(pages.step(-1)),
@@ -1364,8 +1672,8 @@ def build(win):
             "back": lambda: act("back"),
             "forward": lambda: act("forward"),
         })
-        # Parented to the tab's top widget and live wherever the keyboard is inside it (the address bar, a
-        # button, the strip, or Chromium's own widget inside a view), and nowhere else: not on another tab.
+        # Parented to the tab's top widget and live wherever the keyboard is inside it (the address field, a
+        # button, a panel, or Chromium's own widget inside a view), and nowhere else: not on another tab.
         for seq, what in SHORTCUTS:
             sc = QShortcut(QKeySequence(seq), page)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1377,30 +1685,52 @@ def build(win):
             view = current()
             in_page = focus is not None and view is not None and (focus is view or view.isAncestorOf(focus))
             where = "page" if in_page else ("address" if focus is not None and page.isAncestorOf(focus) else None)
-            return escape_step(st["finding"], bool(info().get("loading")), where)
+            return escape_step(st["finding"], bool(info().get("loading")), where, panel=st["panel"] is not None,
+                               editing=st["editing"], fullscreen=getattr(win, "iga_fs", 0))
 
         def escape_do(step_):
-            if step_ == "find":
-                close_find()
+            if step_ in ("panel", "find"):
+                close_panel()
+            elif step_ == "collapse":
+                collapse()
             elif step_ == "stop":
                 act("stop")
+            elif step_ == "fullscreen":
+                hook = getattr(win, "iga_fullscreen", None)
+                if hook is not None:
+                    hook("back")
             elif step_ == "address":
-                address.setFocus()
-                address.selectAll()
+                focus_current()
+
+        def set_row_hidden(hidden):
+            st["row_hidden"] = bool(hidden)
+            if not st["editing"]:
+                row.setVisible(not hidden)
+            if hidden:
+                strip.hide()
+            elif not getattr(win, "iga_fs", 0):
+                strip.hide()
 
         def stop():
             if prefs()["iga_clear_on_close"]:
                 clear_data()
 
+        def recolour():
+            refresh_start_pages()               # the app's own pages, never a site's
+            relayout()
+
         page.escape_plan = escape_plan
         page.escape_do = escape_do
-        page.recolour = refresh_start_pages
+        page.recolour = recolour
         page.stop = stop
+        page.set_row_hidden = set_row_hidden
         st["ready"] = True
         open_page()
-        address.setFocus()
+        set_row_hidden(getattr(win, "iga_fs", 0) == 2)
+        focus_current()
 
     return page
+
 
 
 def deny_permissions(web_page, QWebEnginePage):

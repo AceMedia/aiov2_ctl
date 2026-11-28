@@ -104,6 +104,28 @@ class KeyTests(unittest.TestCase):
         self.assertIn("sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", text)
 
 
+class FullScreenWiringTests(unittest.TestCase):
+    def test_the_apps_full_screen_control_cycles_igas_states_only_on_its_tab(self):
+        app = source("ops_gui", "app.py")
+        body = app[app.index("        def toggle_fullscreen(self):"):]
+        body = body[:body.index("\n        def ", 10)]
+        self.assertIn('if self.iga_showing():', body)
+        self.assertIn('self.iga_fullscreen("toggle")', body)
+        self.assertIn("self.showFullScreen()", body)               # every other tab: as it always was
+        self.assertIn("iga.f11_action(", app)
+        self.assertIn("self.iga_tab_left()", app)
+        self.assertIn("iga.fullscreen_view(state)", app)
+
+    def test_the_new_row_is_built_from_the_pure_layout_and_panels_not_stock_dialogs(self):
+        text = source("ops_gui", "iga.py")
+        build = text[text.index("def build(win):"):]
+        self.assertIn("row_layout(", build)
+        self.assertIn("panel_spec(", build)
+        for stock in ("QInputDialog", "QFileDialog", "QMessageBox", "QMenu", "QToolBar", "standardIcon"):
+            self.assertNotIn(stock, build, stock)
+        self.assertNotIn("setStyleSheet(\"color", build)
+
+
 class EngineSettingsTests(unittest.TestCase):
     def test_what_is_switched_off(self):
         asked = dict(iga.ENGINE_SETTINGS)

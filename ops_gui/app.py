@@ -439,6 +439,7 @@ def build_window():
             bl.addWidget(self.foot, 1)
             bl.addWidget(self.stats_label, 4)
             root.addWidget(bar)
+            self.status_frame = bar
             self.cpu_sample, self.throttled, self.stat_ticks = None, 0, 0
             self.stat_timer = QTimer(self)
             self.stat_timer.timeout.connect(self.update_stats)
@@ -462,7 +463,8 @@ def build_window():
                 QShortcut(QKeySequence(f"F{n + 1}"), self, activated=lambda n=n: self.home_key(n))
             QShortcut(QKeySequence("e"), self, activated=self.guard(lambda: self.home_key(5)))
             for key in ("f", "F11"):
-                QShortcut(QKeySequence(key), self, activated=self.toggle_fullscreen)
+                QShortcut(QKeySequence(key), self, activated=lambda k=key: self.fullscreen_key(k))
+            self.tabs.currentChanged.connect(lambda _=0: self.iga_tab_left())
             QShortcut(QKeySequence("Escape"), self, activated=self.back)
             QShortcut(QKeySequence("Tab"), self, activated=lambda: self.step(1))
             QShortcut(QKeySequence("Shift+Tab"), self, activated=lambda: self.step(-1))
@@ -829,7 +831,59 @@ def build_window():
             elif action == "return":
                 self.showFullScreen()
 
+        def fullscreen_key(self, key):
+            """f and F11. On the IGA tab F11 steps back out of IGA's full-screen states (iga.f11_action)."""
+            if key == "F11" and self.iga_showing():
+                from . import iga
+                self.iga_fullscreen(iga.f11_action(getattr(self, "iga_fs", 0)))
+            else:
+                self.toggle_fullscreen()
+
+        def iga_showing(self):
+            return bool(getattr(self, "iga_on", False) and self.tabs.count() and self.current_name() == "IGA")
+
+        def iga_fullscreen(self, action):
+            """The IGA tab's three full-screen states (iga.next_fullscreen): normal, the browser full screen with
+            the app's tabs and status bar hidden, and the page alone."""
+            from . import iga
+            old = getattr(self, "iga_fs", 0)
+            if action == "page_on" and old != 2:
+                self.iga_fs_before = old
+            self.apply_iga_fs(iga.next_fullscreen(old, action, getattr(self, "iga_fs_before", 0)))
+
+        def apply_iga_fs(self, state, keep_window=False):
+            from . import iga
+            view = iga.fullscreen_view(state)
+            old = getattr(self, "iga_fs", 0)
+            if old == 0 and state > 0:
+                self.iga_was_full = self.isFullScreen()
+            self.iga_fs = state
+            self.tabs.tabBar().setVisible(view["app_bars"])
+            corner = self.tabs.cornerWidget(Qt.Corner.TopRightCorner)
+            if corner is not None:
+                corner.setVisible(view["app_bars"])
+            if getattr(self, "status_frame", None) is not None:
+                self.status_frame.setVisible(view["app_bars"])
+            page = self.pages.get("IGA")
+            if page is not None and hasattr(page, "set_row_hidden"):
+                page.set_row_hidden(not view["iga_row"])
+            self.peek = {"peeking": False, "count": 0}
+            if view["window_full"] and not self.isFullScreen():
+                self.showFullScreen()
+            elif not view["window_full"] and not keep_window and old > 0 and self.isFullScreen() and \
+                    not getattr(self, "iga_was_full", False):
+                self.showMaximized()
+
+        def iga_tab_left(self):
+            """Another tab was chosen while IGA was in one of its full-screen states: the app's tabs and status bar
+            come back; the window stays as it is."""
+            if getattr(self, "iga_fs", 0) and not self.iga_showing():
+                self.apply_iga_fs(0, keep_window=True)
+
         def toggle_fullscreen(self):
+            if self.iga_showing():                              # on the IGA tab the control cycles its states
+                self.iga_fullscreen("toggle")
+                return
             self.peek = {"peeking": False, "count": 0}          # asked for by hand: no stepping back in
             if self.isFullScreen():
                 self.showMaximized()
