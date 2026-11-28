@@ -86,16 +86,29 @@ def link_reading(info):
     return snr, None, info.get("lastHeard") if snr is not None else None
 
 
+SIGNAL_HEADER = "SNR / RSSI"
+
+
 def signal_cell(snr, rssi, when=None, now=None):
-    """The figures as figures, saying what each is, and how old the reading is: "SNR +6.2 dB  RSSI -91 dBm  2m ago".
-    Never bars, and never a distance: signal strength does not say how far away a node is."""
+    """The figures alone, compact enough for the table: "+6.2 dB  -91 dBm", with "-" in place of a figure that is
+    not known and "-" for the whole cell when neither is. The header ("SNR / RSSI") says which is which, and the
+    age of the reading is left to the Heard column; signal_tooltip() has the full wording. Never bars, and never a
+    distance: signal strength does not say how far away a node is. `when` and `now` are accepted and unused, so
+    the call can pass a whole link_reading()."""
+    if snr is None and rssi is None:
+        return "-"
+    return f"{'-' if snr is None else f'{snr:+.1f} dB'}  {'-' if rssi is None else f'{rssi:.0f} dBm'}"
+
+
+def signal_tooltip(snr, rssi, when=None, now=None):
+    """The same reading in full, saying what each figure is and how old it is: "SNR +6.2 dB  RSSI -91 dBm  2m ago"."""
     bits = []
     if snr is not None:
         bits.append(f"SNR {snr:+.1f} dB")
     if rssi is not None:
         bits.append(f"RSSI {rssi:.0f} dBm")
     if not bits:
-        return "-"
+        return "No signal reading yet."
     if when:
         bits.append(age_text(when, now))
     return "  ".join(bits)
@@ -290,10 +303,12 @@ def node_rows(node_info, self_id=None, now=None, own=None):
         metrics = info.get("deviceMetrics") or {}
         battery = metrics.get("batteryLevel")
         hops = info.get("hopsAway")
+        reading = link_reading(info)
         rows.append({
             "id": str(node_id),
             "name": node_name(info, node_id),
-            "signal": signal_cell(*link_reading(info), now=now),
+            "signal": signal_cell(*reading, now=now),
+            "signal_tip": signal_tooltip(*reading, now=now),
             "heard": age_text(info.get("lastHeard"), now),
             "battery": "-" if battery is None else ("plugged in" if battery > 100 else f"{battery}%"),
             "hops": "-" if hops is None else str(hops),
@@ -310,7 +325,8 @@ NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
 
 def rows_signature(rows):
     """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
-    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (bool(r.get("self")),) for r in rows or [])
+    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (r.get("signal_tip"), bool(r.get("self")))
+                 for r in rows or [])
 
 
 def activity_line(a):
@@ -472,7 +488,7 @@ def build_panel(win, Switch):
             cap = QLabel("Nodes heard")
             cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
             self.table = NodeTable(0, 6)
-            self.table.setHorizontalHeaderLabels(["Name", "Last signal", "Distance", "Heard", "Battery", "Hops"])
+            self.table.setHorizontalHeaderLabels(["Name", SIGNAL_HEADER, "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -577,7 +593,10 @@ def build_panel(win, Switch):
                 for r, row in enumerate(rows):
                     for c, key in enumerate(NODE_COLUMNS):
                         text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
-                        self.table.setItem(r, c, QTableWidgetItem(text))
+                        item = QTableWidgetItem(text)
+                        if key == "signal":
+                            item.setToolTip(row["signal_tip"])
+                        self.table.setItem(r, c, item)
                 self.table.fit_columns()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
