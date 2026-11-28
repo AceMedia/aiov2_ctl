@@ -8,6 +8,7 @@ import io
 import os
 import struct
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
@@ -99,6 +100,23 @@ class FrameTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def setUp(self):
+        # Claiming the radio takes a real lock file. A shared one made two copies of the suite running at once
+        # fail each other, so each test has a lock folder of its own, and no claim survives the test.
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.lock_dir = folder.name
+        patcher = mock.patch.object(a, "_lock_dir", return_value=self.lock_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        a._RADIO_OWNED.clear()
+        self.addCleanup(self.release_radio)
+
+    def release_radio(self):
+        for fd in a._RADIO_OWNED.values():
+            a.release_device_lock(fd)
+        a._RADIO_OWNED.clear()
+
     def run_cmd(self, args):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -143,6 +161,8 @@ class CommandTests(unittest.TestCase):
             code, text = self.run_cmd(["--channel", "6"])
         self.assertEqual(code, 1)
         self.assertIn("not supported", text)
+        self.assertIn("wlan1", a._RADIO_OWNED)                          # the radio was claimed, in our own folder
+        self.assertEqual(os.listdir(self.lock_dir), ["aiov2_ctl-radio-wlan1.lock"])
         self.assertTrue(any("managed" in c for c in calls))
         self.assertTrue(any(c[:5] == ("nmcli", "device", "set", "wlan1", "managed") and c[-1] == "yes" for c in calls))
 
