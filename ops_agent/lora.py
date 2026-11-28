@@ -691,6 +691,21 @@ class LoRa:
             if isinstance(stored, dict) and not position.get("time"):
                 stored.pop("time", None)
 
+    def _remember_telemetry_received(self, node_id, packet):
+        """Note when this app received a node's own report of its battery and channel use: the library keeps the
+        figures but not when they came, and the node details say how old they are."""
+        if node_id is None:
+            return
+        received = packet.get("rxTime") if isinstance(packet, dict) else None
+        try:
+            received = float(received) if received else time.time()
+        except (TypeError, ValueError):
+            received = time.time()
+        with self.lock:
+            entry = self.node_info.get(str(node_id))
+            if isinstance(entry, dict):
+                entry["telemetryReceived"] = received
+
     def _remember_link_metrics(self, node_id, packet):
         if node_id is None or not isinstance(packet, dict):
             return
@@ -728,6 +743,9 @@ class LoRa:
         if isinstance(decoded, dict):
             candidates.append(decoded)
             candidates.extend(value for value in decoded.values() if isinstance(value, dict))
+            # the library gives a telemetry packet as decoded["telemetry"]["deviceMetrics"], one level further down
+            for value in list(candidates[1:]):
+                candidates.extend(inner for inner in value.values() if isinstance(inner, dict))
 
         metrics = {}
         for candidate in candidates:
@@ -925,6 +943,7 @@ class LoRa:
                     metrics = self._extract_metrics(packet)
                     if metrics:
                         self._remember_node_info(from_id, deviceMetrics=metrics)
+                        self._remember_telemetry_received(from_id, packet)
                         parts = []
                         battery = metrics.get("batteryLevel")
                         voltage = metrics.get("voltage")

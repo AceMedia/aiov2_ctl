@@ -400,6 +400,103 @@ def node_rows(node_info, self_id=None, now=None, own=None):
 
 NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
 
+DETAILS_PROMPT = "Move to a node in the list with the arrow keys or the D-pad to see its details here."
+
+
+def _when(value):
+    """A time in seconds since the epoch from a number the library or the engine gave, or None."""
+    value = _number(value)
+    if not value or value <= 0:
+        return None
+    return value / 1000.0 if value > 1_000_000_000_000 else value
+
+
+def precision_text(bits):
+    """What the precision a node sent its position with means, or None when it did not say. Meshtastic rounds a
+    shared position to `bits` bits; 32 is the exact position. The distances follow Meshtastic's own table (10 bits is
+    about 23.3 km, and each further bit halves it): an assumption from its documentation, not checked on a radio."""
+    bits = _number(bits)
+    if bits is None or bits <= 0:
+        return None
+    bits = int(bits)
+    if bits >= 32:
+        return "sent at full precision"
+    return f"sent rounded to {bits} bits, so only to within about {distance_text(23.3 / 2 ** (bits - 10))}"
+
+
+def _pct(value):
+    return f"{value:.0f}%" if value >= 10 else f"{value:.1f}%"
+
+
+def node_details(info, node_id, now=None, self_id=None):
+    """The lines of the details block for one node, from its record as the engine keeps it. Only what the node
+    reported is shown: anything missing is left out, never shown as zero. A position is shown only when the node sent
+    one, with its own age and the precision it was sent with; nothing here is worked out from signal strength."""
+    info = info if isinstance(info, dict) else {}
+    now = now or time.time()
+    user = info.get("user") if isinstance(info.get("user"), dict) else {}
+    lines = []
+    if user.get("longName"):
+        lines.append(f"Name: {user['longName']}")
+    if user.get("shortName"):
+        lines.append(f"Short name: {user['shortName']}")
+    ident = nodeid.canonical(user.get("id") or node_id)
+    if ident:
+        lines.append(f"Identity: {ident}" + (" (this radio)" if nodeid.same(node_id, self_id) else ""))
+    if user.get("hwModel") and str(user["hwModel"]) != "UNSET":
+        lines.append(f"Hardware: {user['hwModel']}")
+    if user.get("role"):
+        lines.append(f"Role: {user['role']}")
+    heard = _when(info.get("lastHeard"))
+    if heard:
+        lines.append(f"Last heard: {age_text(heard, now)}")
+    snr, rssi, when = link_reading(info)
+    if snr is not None or rssi is not None:
+        bits = ([f"SNR {snr:+.1f} dB"] if snr is not None else []) + ([f"RSSI {rssi:.0f} dBm"] if rssi is not None else [])
+        when = _when(when)
+        lines.append("Signal heard here: " + "  ".join(bits) + f" ({age_text(when, now) if when else 'age not known'})")
+    hops = _number(info.get("hopsAway"))
+    if hops is not None:
+        lines.append(f"Hops away: {hops:.0f}" + (" (heard directly)" if hops == 0 else ""))
+    metrics = info.get("deviceMetrics") if isinstance(info.get("deviceMetrics"), dict) else {}
+    battery, voltage = _number(metrics.get("batteryLevel")), _number(metrics.get("voltage"))
+    if battery is not None:
+        lines.append("Power: on external power" if battery > 100 else f"Battery: {battery:.0f}%")
+    if voltage is not None and voltage > 0:
+        lines.append(f"Voltage: {voltage:.2f} V")
+    use, air = _number(metrics.get("channelUtilization")), _number(metrics.get("airUtilTx"))
+    if use is not None or air is not None:
+        got = _when(info.get("telemetryReceived"))
+        bits = ([f"channel {_pct(use)} busy"] if use is not None else []) + \
+               ([f"transmitting {_pct(air)} of the time"] if air is not None else [])
+        lines.append("Its own report: " + ", ".join(bits) +
+                     f" ({age_text(got, now) if got else 'time of the report not known'})")
+    where = node_latlon(info)
+    if where:
+        position = info.get("position") if isinstance(info.get("position"), dict) else {}
+        alt = _number(position.get("altitude"))
+        text = f"Position it sent: {where[0]:.5f}, {where[1]:.5f}" + (f", {alt:.0f} m up" if alt is not None else "")
+        lines.append(f"{text} ({position_age_text(position_time(info), now)})")
+        precision = precision_text(position.get("precisionBits"))
+        if precision:
+            lines.append(f"Position precision: {precision}")
+    return lines
+
+
+def picked_node(row_ids, current_row):
+    """The node chosen in the table: the id on the current row, or None when no row is current."""
+    if isinstance(current_row, int) and 0 <= current_row < len(row_ids or []):
+        return row_ids[current_row]
+    return None
+
+
+def row_of(row_ids, node_id):
+    """The row a chosen node is on after the table is rebuilt, or -1 when it is no longer listed."""
+    try:
+        return list(row_ids or []).index(node_id)
+    except ValueError:
+        return -1
+
 
 def rows_signature(rows):
     """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
@@ -572,12 +669,21 @@ def build_panel(win, Switch):
             self.table.setHorizontalHeaderLabels(["Name", SIGNAL_HEADER, "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            # a row can be chosen, as in the other tables of the app: the arrow keys and the D-pad move the current row
+            self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.table.itemSelectionChanged.connect(self.pick_node)
+            self.table.cellActivated.connect(lambda *_: self.pick_node())
             self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
             self.table.horizontalHeader().setStretchLastSection(False)
             self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+            self.picked, self.row_ids, self.last_snap = None, [], {}
+            self.details = QLabel(DETAILS_PROMPT)
+            self.details.setWordWrap(True)
+            self.details.setStyleSheet("font-size: 11pt;")
             nl.addWidget(cap)
-            nl.addWidget(self.table)
+            nl.addWidget(self.table, 1)
+            nl.addWidget(self.details)
             mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
@@ -678,7 +784,15 @@ def build_panel(win, Switch):
                         if key == "signal":
                             item.setToolTip(row["signal_tip"])
                         self.table.setItem(r, c, item)
+                self.row_ids = [row["id"] for row in rows]
+                keep = row_of(self.row_ids, self.picked)
+                if keep >= 0:                            # the chosen node stays chosen when the table is rebuilt
+                    self.table.blockSignals(True)
+                    self.table.selectRow(keep)
+                    self.table.blockSignals(False)
                 self.table.fit_columns()
+            self.last_snap = snap
+            self.show_details()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
@@ -687,6 +801,18 @@ def build_panel(win, Switch):
             if self.on_snap:
                 self.on_snap(e, snap, own)
             self.update_send()
+
+        # ---- the chosen node
+        def pick_node(self):
+            self.picked = picked_node(self.row_ids, self.table.currentRow()) or self.picked
+            self.show_details()
+
+        def show_details(self):
+            snap = self.last_snap or {}
+            info = (snap.get("node_info") or {}).get(self.picked) if self.picked else None
+            text = "\n".join(node_details(info, self.picked, self_id=snap.get("self_id"))) if info else DETAILS_PROMPT
+            if text != self.details.text():
+                self.details.setText(text)
 
         # ---- channels and export
         def sync_channels(self, snap):
