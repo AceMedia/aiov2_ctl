@@ -13,6 +13,7 @@ Each one is drawn dark, in the app's pixel style and the feature colour, whateve
   stars       a starfield
   rain        falling code
   clock       the time and date, drifting so nothing stays in one place
+  signals     what the radios the app is already listening to can hear, as a row of bars per radio
 
 Everything above build() is plain Python and is tested without a screen."""
 import math
@@ -22,7 +23,7 @@ import threading
 import time
 
 KINDS = (("mandelbrot", "Mandelbrot"), ("system", "System"), ("stars", "Starfield"), ("rain", "Falling code"),
-         ("clock", "Clock"))
+         ("clock", "Clock"), ("signals", "Signals"))
 MINUTES = (1, 2, 5, 10, 30)
 DEFAULT_KIND, DEFAULT_MINUTES = "mandelbrot", 5
 WAKE_GRACE = 0.7            # seconds after it appears in which pointer movement does not count: showing it moves things
@@ -280,6 +281,80 @@ def drift(t, width, height, box_w, box_h):
     return (int(free_w * (0.5 + 0.5 * math.sin(t / 37.0))), int(free_h * (0.5 + 0.5 * math.sin(t / 23.0 + 1.3))))
 
 
+# ---- signals
+# What the app's radios are already hearing, drawn as bars: Wi-Fi networks, Bluetooth devices, mesh nodes and
+# GPS satellites. It only reads what the pages already hold; it never starts a scan, switches a rail or asks a
+# radio anything, and the software radio is left out altogether. A bar's height is signal strength and nothing
+# more: no distance, direction, position or movement is worked out from it.
+# signal_bands() and signal_layout() are kept apart from the widget so that a later, optional "ghost hunt"
+# add-on can reuse them with the same data.
+SIGNAL_SOURCES = (  # key, title, the word for one and for many, the field holding the strength, its range
+    ("wifi", "WI-FI", "NETWORK", "NETWORKS", "rssi", -100.0, -30.0),
+    ("bt", "BLUETOOTH", "DEVICE", "DEVICES", "rssi", -100.0, -30.0),
+    ("mesh", "MESH", "NODE", "NODES", "snr", -20.0, 12.0),
+    ("gps", "GPS", "SATELLITE", "SATELLITES", "ss", 0.0, 50.0))
+SIGNAL_BAR, SIGNAL_GAP = 8, 6       # pixels: a bar's width, and the space between two bars
+SIGNAL_DRIFT = 0.4                  # bar places moved along per second, so no pixel stays lit for long
+
+
+def dbm_of(text):
+    """The number in a table's signal text such as '-50 dBm', or None when there is none."""
+    try:
+        return float(str(text).split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def strength(value, lo, hi):
+    """A reading from lo to hi as 0 to 1, clamped at both ends; None when it is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or hi <= lo:
+        return None
+    return max(0.0, min(1.0, (float(value) - lo) / (hi - lo)))
+
+
+def signal_bands(sources):
+    """The bands to draw from plain data: `sources` maps 'wifi', 'bt', 'mesh' and 'gps' to lists of dicts, each
+    with its strength under 'rssi' (dBm), 'snr' (dB) or 'ss' (dB-Hz), and optionally an 'id'. Anything else,
+    including the SDR, is ignored. Returns [{"key", "title", "caption", "bars"}] in a fixed order, one for each
+    source with at least one usable reading, the bars strongest first (ties by id) as 0 to 1."""
+    out = []
+    for key, title, one, many, field, lo, hi in SIGNAL_SOURCES:
+        found = []
+        for item in (sources or {}).get(key) or ():
+            if isinstance(item, dict):
+                k = strength(item.get(field), lo, hi)
+                if k is not None:
+                    found.append((-k, str(item.get("id", "")), k))
+        if found:
+            found.sort()
+            out.append({"key": key, "title": title, "caption": f"{title}  {len(found)} {one if len(found) == 1 else many}",
+                        "bars": [k for _, _, k in found]})
+    return out
+
+
+def signal_layout(bands, width, height, t, bar=SIGNAL_BAR, gap=SIGNAL_GAP, margin=36, caption=28):
+    """Where everything goes on a width x height screen at time t: [{"caption": (x, y, text), "bars": [(x, y,
+    w, h, strength)]}], one per band, stacked down the screen. Only as many bars as fit across are drawn; they
+    slide along a place at a time and wrap round, so nothing stays lit in one spot."""
+    if not bands or width <= 2 * margin or height <= 2 * margin:
+        return []
+    pitch = bar + gap
+    slots = max(1, (width - 2 * margin) // pitch)
+    tall = (height - 2 * margin) // len(bands)
+    out = []
+    for i, band in enumerate(bands):
+        top = margin + i * tall
+        room = max(4, tall - caption - 12)
+        base = top + caption + room
+        shift = int(t * SIGNAL_DRIFT + i * 7) % slots
+        bars = []
+        for j, k in enumerate(band["bars"][:slots]):
+            h = max(2, int(round(k * room)))
+            bars.append((margin + ((j + shift) % slots) * pitch, base - h, bar, h, k))
+        out.append({"caption": (margin + (shift % 8) * 2, top, band["caption"]), "bars": bars})
+    return out
+
+
 # ---- system
 HISTORY = 180               # readings kept for the graphs: three minutes at one a second
 
@@ -346,7 +421,7 @@ def build(win):
             self.reset()
             self.show()
             self.raise_()
-            self.timer.start({"mandelbrot": 50, "stars": 66, "rain": 100}.get(self.kind, 1000))
+            self.timer.start({"mandelbrot": 50, "stars": 66, "rain": 100, "signals": 500}.get(self.kind, 1000))
 
         def stop(self):
             self.timer.stop()
@@ -396,6 +471,36 @@ def build(win):
             elif self.kind == "system":
                 s["cpu"], s["temp"], s["sample"], s["stats"] = [], [], None, {}
                 self.read_system()
+            elif self.kind == "signals":
+                s["bands"] = signal_bands(self.heard())
+
+        def heard(self):
+            """What the pages already hold, as plain lists for signal_bands(). Read only: the same tables the
+            Everything page reads, and nothing is asked of any radio. Each source is optional."""
+            out = {}
+            try:
+                survey = getattr(getattr(win, "wifi_panel", None), "survey", None)
+                out["wifi"] = [{"id": r.get("bssid"), "rssi": dbm_of(r.get("signal"))}
+                               for r in getattr(survey, "ap_list", None) or ()]
+            except Exception:
+                pass
+            try:
+                snap = getattr((getattr(win, "pages", None) or {}).get("Bluetooth"), "last_snap", None) or {}
+                out["bt"] = [{"id": d.get("addr"), "rssi": d.get("rssi")} for d in snap.get("devices") or ()]
+            except Exception:
+                pass
+            try:
+                engine = getattr(getattr(win, "mesh_hub", None), "engine", None)
+                nodes = (engine.snapshot().get("node_info") or {}) if engine is not None else {}
+                out["mesh"] = [{"id": n, "snr": info.get("snr")} for n, info in nodes.items() if isinstance(info, dict)]
+            except Exception:
+                pass
+            try:
+                sats = getattr(getattr(getattr(win, "gps_widget", None), "sky", None), "sats", None) or ()
+                out["gps"] = [{"id": s.get("PRN"), "ss": s.get("ss")} for s in sats if isinstance(s, dict)]
+            except Exception:
+                pass
+            return out
 
         def read_system(self):
             s = self.state
@@ -500,6 +605,8 @@ def build(win):
                 rain_step(s["drops"], s["rows"], dt, self.rng)
             elif self.kind == "system":
                 self.read_system()
+            elif self.kind == "signals":
+                s["bands"] = signal_bands(self.heard())
             self.update()
 
         # ---- drawing
@@ -578,7 +685,27 @@ def build(win):
                 self.words(p, x, y + 198, time.strftime("%a %d %b %Y", now).upper(), 24, pal["label"], "centre", box_w)
             elif self.kind == "system":
                 self.paint_system(p, w, h)
+            elif self.kind == "signals":
+                self.paint_signals(p, w, h)
             p.end()
+
+        def paint_signals(self, p, w, h):
+            pal = self.pal
+            now = time.monotonic()
+            placed_bands = signal_layout(self.state.get("bands") or [], w, h, now)
+            if not placed_bands:                            # a calm, dim line of low bars and the words, drifting
+                x, y = drift(now, w, h, 420, 80)
+                for i in range(30):
+                    p.fillRect(x + i * 14, y + 56 - 2 - (i + int(now)) % 3 * 2, 8, 4 + (i + int(now)) % 3 * 2,
+                               QColor(pal["off"]))
+                self.words(p, x, y, "Nothing being received", 24, pal["dim"], "centre", 420)
+                return
+            for i, band in enumerate(placed_bands):
+                cx, cy, text = band["caption"]
+                self.words(p, cx, cy, text, 16, pal["label"])
+                ink = pal["accent"] if i % 2 == 0 else pal["accent2"]
+                for x, y, bw, bh, k in band["bars"]:
+                    p.fillRect(x, y, bw, bh, QColor(mix(pal["bg"], ink, 0.35 + 0.65 * k)))
 
         def paint_system(self, p, w, h):
             pal, s = self.pal, self.state

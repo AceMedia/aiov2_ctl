@@ -225,7 +225,7 @@ System shows the processor, temperature, memory and disk, with the last three mi
 
 [![The system screensaver](img/app/saver-system.webp)](img/app/saver-system.webp)
 
-Starfield, falling code, and a clock that drifts so nothing stays lit in one place:
+Starfield, falling code, a clock that drifts so nothing stays lit in one place, and Signals, which draws what the Wi-Fi, Bluetooth, mesh and GPS radios are already hearing as bars of signal strength (it starts nothing, and the SDR is left out):
 
 [![The starfield screensaver](img/app/saver-stars.webp)](img/app/saver-stars.webp)
 

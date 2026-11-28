@@ -40,6 +40,83 @@ class WhenTests(unittest.TestCase):
         self.assertFalse(ss.moved_enough(None, (120, 100), 5.0))
 
 
+class SignalsTests(unittest.TestCase):
+    def test_it_is_one_of_the_kinds(self):
+        self.assertEqual(dict(ss.KINDS)["signals"], "Signals")
+        self.assertEqual(ss.kind_of("signals"), "signals")
+
+    def test_nothing_heard_gives_no_bands_and_no_layout(self):
+        for empty in (None, {}, {"wifi": [], "bt": None}, {"wifi": [{"rssi": None}, {"rssi": "strong"}, "junk"]}):
+            self.assertEqual(ss.signal_bands(empty), [], empty)
+        self.assertEqual(ss.signal_layout([], 1280, 720, 0.0), [])
+
+    def test_missing_sources_are_left_out_and_the_order_is_fixed(self):
+        bands = ss.signal_bands({"gps": [{"ss": 30}], "wifi": [{"rssi": -60}]})
+        self.assertEqual([b["key"] for b in bands], ["wifi", "gps"])
+        bands = ss.signal_bands({"gps": [{"ss": 30}], "mesh": [{"snr": 1}], "bt": [{"rssi": -70}], "wifi": [{"rssi": -60}]})
+        self.assertEqual([b["key"] for b in bands], ["wifi", "bt", "mesh", "gps"])
+
+    def test_the_sdr_is_never_drawn(self):
+        self.assertEqual(ss.signal_bands({"sdr": [{"rssi": -40, "ss": 40, "snr": 5}]}), [])
+
+    def test_strengths_are_clamped_to_nought_and_one(self):
+        bars = ss.signal_bands({"wifi": [{"rssi": -120}, {"rssi": -100}, {"rssi": -65}, {"rssi": -30}, {"rssi": -10}]})[0]["bars"]
+        self.assertEqual(bars, [1.0, 1.0, 0.5, 0.0, 0.0])
+        self.assertEqual(ss.strength(25, 0, 50), 0.5)
+        self.assertIsNone(ss.strength(True, 0, 50))
+        self.assertIsNone(ss.strength(float("nan"), 0, 50))
+        self.assertEqual(ss.signal_bands({"mesh": [{"snr": 99}]})[0]["bars"], [1.0])
+
+    def test_captions_give_an_honest_count(self):
+        bands = ss.signal_bands({"wifi": [{"rssi": -50}] * 12, "bt": [{"rssi": -50}], "gps": [{"ss": 20}, {"ss": None}]})
+        self.assertEqual([b["caption"] for b in bands], ["WI-FI  12 NETWORKS", "BLUETOOTH  1 DEVICE", "GPS  1 SATELLITE"])
+        for b in bands:
+            for word in ("METRE", "AWAY", "PERSON", "NEAR"):
+                self.assertNotIn(word, b["caption"])
+
+    def test_the_bars_are_strongest_first_and_the_order_is_stable(self):
+        items = [{"id": "b", "rssi": -60}, {"id": "a", "rssi": -60}, {"id": "c", "rssi": -40}]
+        one = ss.signal_bands({"bt": items})
+        two = ss.signal_bands({"bt": list(reversed(items))})
+        self.assertEqual(one, two)
+        self.assertEqual(one[0]["bars"][0], ss.strength(-40, -100, -30))
+
+    def test_the_table_text_gives_its_number(self):
+        self.assertEqual(ss.dbm_of("-50 dBm"), -50.0)
+        self.assertIsNone(ss.dbm_of("-"))
+        self.assertIsNone(ss.dbm_of(None))
+
+    def test_many_more_than_fit_are_cut_to_what_fits_and_stay_on_the_screen(self):
+        bands = ss.signal_bands({"wifi": [{"id": i, "rssi": -100 + i % 70} for i in range(2000)], "gps": [{"ss": 40}]})
+        self.assertEqual(bands[0]["caption"], "WI-FI  2000 NETWORKS")
+        for t in (0.0, 13.7, 1e6):
+            layout = ss.signal_layout(bands, 1280, 720, t)
+            self.assertEqual(len(layout), 2)
+            xs = [x for x, *_ in layout[0]["bars"]]
+            self.assertLess(len(xs), 2000)
+            self.assertEqual(len(xs), len(set(xs)), "no two bars in one place")
+            for band in layout:
+                for x, y, w, h, k in band["bars"]:
+                    self.assertTrue(0 <= x and x + w <= 1280 and 0 <= y and y + h <= 720)
+                    self.assertGreaterEqual(h, 2)
+
+    def test_the_bands_stack_without_overlapping_and_taller_bars_are_stronger(self):
+        bands = ss.signal_bands({"wifi": [{"rssi": -30}, {"rssi": -90}], "bt": [{"rssi": -50}]})
+        layout = ss.signal_layout(bands, 1280, 720, 0.0)
+        wifi_bottom = max(y + h for _, y, _, h, _ in layout[0]["bars"])
+        self.assertLess(wifi_bottom, layout[1]["caption"][1])
+        heights = [h for _, _, _, h, _ in layout[0]["bars"]]
+        self.assertGreater(heights[0], heights[1])
+
+    def test_the_bars_drift(self):
+        bands = ss.signal_bands({"wifi": [{"rssi": -50}]})
+        xs = {ss.signal_layout(bands, 1280, 720, t)[0]["bars"][0][0] for t in range(0, 60, 5)}
+        self.assertGreater(len(xs), 3)
+
+    def test_a_tiny_screen_gets_nothing_rather_than_an_error(self):
+        self.assertEqual(ss.signal_layout(ss.signal_bands({"wifi": [{"rssi": -50}]}), 40, 40, 0.0), [])
+
+
 class StarInkTests(unittest.TestCase):
     def test_most_stars_are_plain_and_some_take_the_feature_colour_and_its_partner(self):
         inks = [ss.star_ink(i, "#ffffff", "#4c8dff", "#ff8a00") for i in range(240)]
