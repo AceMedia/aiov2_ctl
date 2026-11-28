@@ -252,3 +252,52 @@ class ChatIsKeptApartTests(unittest.TestCase):
         acts = [{"kind": "text", "time": "t", "from": "Ann", "summary": "hi"}]
         self.assertEqual(lp.chat_events({"activities": acts}), acts)
         self.assertEqual(lp.chat_events(None), [])
+
+
+def channel(index, role, name=""):
+    """A stand-in for one of the library's channel objects: index, role (0 disabled, 1 primary, 2 secondary) and
+    settings.name."""
+    return types.SimpleNamespace(index=index, role=role, settings=types.SimpleNamespace(name=name))
+
+
+class ConfiguredChannelTests(unittest.TestCase):
+    CHANNELS = [channel(0, 1, ""), channel(1, 2, "Family"), channel(2, 0, "Old"), channel(3, 2, "Hikers")]
+
+    def test_the_radios_channels_become_the_list_primary_first_disabled_left_out(self):
+        got = lora.configured_channels(list(reversed(self.CHANNELS)))
+        self.assertEqual(got, [{"index": 0, "name": "", "primary": True},
+                               {"index": 1, "name": "Family", "primary": False},
+                               {"index": 3, "name": "Hikers", "primary": False}])
+
+    def test_nothing_usable_means_none(self):
+        for bad in (None, [], [channel(0, 0)], 5, [object()]):
+            self.assertIsNone(lora.configured_channels(bad), bad)
+
+    def test_the_send_on_list_uses_them_and_says_the_default_name(self):
+        snap = {"configured_channels": lora.configured_channels(self.CHANNELS), "selected_channel": 1,
+                "active_channels": [{"channel": 5, "count": 9}]}
+        self.assertEqual(lp.channel_choices(snap),
+                         [(0, "0: default name (primary)"), (1, "1: Family"), (3, "3: Hikers")])
+
+    def test_a_selected_channel_the_radio_does_not_have_is_still_listed_and_said_so(self):
+        snap = {"configured_channels": [{"index": 0, "name": "LongFast", "primary": True}], "selected_channel": 4}
+        self.assertEqual(lp.channel_choices(snap),
+                         [(0, "0: LongFast (primary)"), (4, "Channel 4 (not set up on this radio)")])
+
+    def test_without_them_the_list_is_built_from_traffic_as_before(self):
+        snap = {"configured_channels": None, "active_channels": [{"channel": 2, "count": 5}], "selected_channel": 0}
+        self.assertEqual([c for c, _ in lp.channel_choices(snap)], [0, 2])
+
+    def test_the_engine_reads_them_from_the_connection_and_changes_nothing(self):
+        link = Link()
+        link.localNode = types.SimpleNamespace(channels=list(self.CHANNELS))
+        e = engine(Bus(), link)
+        e.refresh_nodes()
+        self.assertEqual([c["index"] for c in e.snapshot()["configured_channels"]], [0, 1, 3])
+        self.assertEqual([(c.index, c.role, c.settings.name) for c in link.localNode.channels],
+                         [(0, 1, ""), (1, 2, "Family"), (2, 0, "Old"), (3, 2, "Hikers")])
+
+    def test_a_connection_without_them_keeps_the_fallback(self):
+        e = engine(Bus())
+        e.refresh_nodes()
+        self.assertIsNone(e.snapshot()["configured_channels"])

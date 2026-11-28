@@ -8,7 +8,7 @@ from datetime import datetime
 
 from . import bootstrap, companions
 from .power import debug, log
-from . import geo, nodeid
+from . import delivery, geo, nodeid
 
 
 def _pubsub():
@@ -19,6 +19,107 @@ def _pubsub():
         return pub
     except Exception:
         return None
+
+
+SERIAL_CANDIDATES = ("/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyUSB1")
+
+# USB chips that Meshtastic boards actually use, as (vendor id, product id or None for any, name). A serial port
+# whose USB identity is not one of these is never opened: it may be a GPS, a Flipper, a modem or anything else.
+MESHTASTIC_USB_CHIPS = (
+    ("303a", None, "Espressif USB (ESP32-S3/C3)"),
+    ("10c4", "ea60", "Silicon Labs CP210x"),
+    ("1a86", None, "WCH CH340/CH9102"),
+    ("239a", None, "Adafruit nRF52"),
+    ("2e8a", None, "Raspberry Pi RP2040"),
+)
+
+
+def usb_chip(identity):
+    """The name of the Meshtastic chip a (vendor, product) identity is, or None when it is not one of them."""
+    if not identity:
+        return None
+    vid, pid = (str(x or "").lower() for x in identity)
+    for chip_vid, chip_pid, name in MESHTASTIC_USB_CHIPS:
+        if vid == chip_vid and (chip_pid is None or pid == chip_pid):
+            return name
+    return None
+
+
+def _sysfs_usb_identity(device):
+    """(vendor, product) for a tty from /sys/class/tty/<name>/device: the USB device is that directory's parent
+    (ttyACM) or grandparent (ttyUSB), the first one up the tree with an idVendor file."""
+    here = os.path.realpath(os.path.join("/sys/class/tty", os.path.basename(device), "device"))
+    for _ in range(4):
+        try:
+            with open(os.path.join(here, "idVendor")) as v, open(os.path.join(here, "idProduct")) as p:
+                return v.read().strip().lower(), p.read().strip().lower()
+        except OSError:
+            here = os.path.dirname(here)
+    return None
+
+
+def usb_identity(device):
+    """(vendor id, product id) as four hex digits each for a serial device, or None when it cannot be read. pyserial's
+    port list when the library is there, otherwise sysfs. A function of its own so a test can put a stand-in in its
+    place."""
+    try:
+        from serial.tools import list_ports
+        for port in list_ports.comports():
+            if port.device == device and port.vid is not None:
+                return f"{port.vid:04x}", f"{(port.pid or 0):04x}"
+    except Exception:
+        pass
+    return _sysfs_usb_identity(device)
+
+
+def choose_serial_port(devices, identify):
+    """(the port to open or None, the reason in words). Only a port whose USB identity is a chip Meshtastic boards
+    use qualifies; the first such port is chosen. Nothing is left to the library's auto-detection."""
+    notes = []
+    for device in devices:
+        short = device.split("/")[-1]
+        try:
+            identity = identify(device)
+        except Exception:
+            identity = None
+        if not identity:
+            notes.append(f"{short}: USB identity unknown")
+            continue
+        label = f"{identity[0]}:{identity[1]}"
+        chip = usb_chip(identity)
+        if chip:
+            return device, f"{short} is a {chip} ({label})"
+        notes.append(f"{short} ({label}) is not a chip Meshtastic boards use")
+    if not notes:
+        return None, "No USB serial devices found"
+    return None, "No Meshtastic radio on USB serial: " + "; ".join(notes)
+
+
+CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role values (SECONDARY is 2)
+
+
+def configured_channels(channels):
+    """The channels set up on the radio, from the library's channel objects (interface.localNode.channels): a list
+    of {"index", "name", "primary"}, the primary first and then by index, disabled ones left out. The primary's name
+    may be empty, which means the radio's default. None when there is nothing usable, so the caller can fall back
+    to the channels heard lately. Only reads the objects: the radio's configuration is never changed."""
+    try:
+        items = list(channels or [])
+    except TypeError:
+        return None
+    found = []
+    for ch in items:
+        try:
+            role = int(getattr(ch, "role", CHANNEL_DISABLED) or 0)
+            index = int(getattr(ch, "index", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if role == CHANNEL_DISABLED:
+            continue
+        name = getattr(getattr(ch, "settings", None), "name", "") or ""
+        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY})
+    found.sort(key=lambda c: (not c["primary"], c["index"]))
+    return found or None
 
 
 def explain_tcp_failure(exc, host, port):
@@ -58,6 +159,7 @@ class LoRa:
         self.recent_checkins = []
         self.max_checkins = 6
         self.channel_activity = {}
+        self.configured_channels = None     # the radio's own channel list, when the connection gives it
         self.selected_channel = 0
         self.auto_follow_channel = False
         self.channel_locked = False
@@ -73,6 +175,7 @@ class LoRa:
         self.conflict_processes = []
         self._bus = None                    # the bus this is subscribed on, while it is
         self._seen_packets = collections.deque(maxlen=200)
+        self.deliveries = {}                # packet id -> the delivery record of a sent message still awaiting an answer
 
         if not bootstrap.MESHTASTIC_AVAILABLE:
             debug("LoRa: meshtastic library not available")
@@ -89,6 +192,7 @@ class LoRa:
 
     def snapshot(self):
         with self.lock:
+            self._update_deliveries_locked(time.time())
             self_id = self._own_id_locked()
             selected_channel, best_channel, active_channels = self._effective_selected_channel_locked()
             return {
@@ -103,6 +207,7 @@ class LoRa:
                 "recent_alerts": copy.deepcopy(self.recent_alerts),
                 "recent_checkins": copy.deepcopy(self.recent_checkins),
                 "channel_activity": copy.deepcopy(self.channel_activity),
+                "configured_channels": copy.deepcopy(self.configured_channels),
                 "active_channels": active_channels,
                 "selected_channel": selected_channel,
                 "best_channel": best_channel,
@@ -146,6 +251,7 @@ class LoRa:
                 debug("LoRa: no way to receive packets from this library")
             return False
         bus.subscribe(self._on_receive, "meshtastic.receive")
+        bus.subscribe(self._on_routing, "meshtastic.receive.routing")
         bus.subscribe(self._on_lost, "meshtastic.connection.lost")
         self._bus = bus
         debug("LoRa: subscribed for packets and connection changes")
@@ -154,7 +260,9 @@ class LoRa:
     def _stop_listening(self):
         bus, self._bus = self._bus, None
         if bus is not None:
-            for listener, topic in ((self._on_receive, "meshtastic.receive"), (self._on_lost, "meshtastic.connection.lost")):
+            for listener, topic in ((self._on_receive, "meshtastic.receive"),
+                                    (self._on_routing, "meshtastic.receive.routing"),
+                                    (self._on_lost, "meshtastic.connection.lost")):
                 try:
                     bus.unsubscribe(listener, topic)
                 except Exception as e:
@@ -177,6 +285,34 @@ class LoRa:
             self._handle_packet(packet)
         except Exception as e:
             debug(f"LoRa: packet handler error: {e}")
+
+    def _on_routing(self, packet, interface=None):
+        """A routing packet: the library's answer about a packet this app sent with an acknowledgement asked for.
+        Only answers about this connection's own waiting messages change anything (see ops_agent/delivery.py)."""
+        try:
+            if interface is not None and self.interface is not None and interface is not self.interface:
+                return
+            reply = delivery.routing_reply(packet)
+            if reply is None:
+                return
+            request, reason = reply
+            with self.lock:
+                record = self.deliveries.get(request)
+                if record is None:
+                    return
+                record.update(delivery.after_routing(record, reason))
+                if delivery.can_forget(record, time.time()):
+                    self.deliveries.pop(request, None)
+            debug(f"LoRa: answer for packet {request}: {reason}")
+        except Exception as e:
+            debug(f"LoRa: routing handler error: {e}")
+
+    def _update_deliveries_locked(self, now):
+        """Mark messages that have waited too long as not acknowledged, and stop following old ones."""
+        for key, record in list(self.deliveries.items()):
+            record.update(delivery.after_time(record, now))
+            if delivery.can_forget(record, now):
+                del self.deliveries[key]
 
     def _on_lost(self, interface=None):
         """The library says the connection has gone. Say so, so nothing goes on showing it as connected."""
@@ -535,6 +671,26 @@ class LoRa:
             if len(history) > self.max_track_points:
                 del history[:-self.max_track_points]
 
+    def _remember_position_received(self, node_id, position, packet):
+        """Note when this app received a node's position, apart from when the node was last heard: a node heard a
+        minute ago may still be showing a position it sent hours ago. When the new position carries no time of its
+        own, a time kept from an older position must not go on standing for it, so it is removed."""
+        if node_id is None:
+            return
+        received = packet.get("rxTime") if isinstance(packet, dict) else None
+        try:
+            received = float(received) if received else time.time()
+        except (TypeError, ValueError):
+            received = time.time()
+        with self.lock:
+            entry = self.node_info.get(str(node_id))
+            if not isinstance(entry, dict):
+                return
+            entry["positionReceived"] = received
+            stored = entry.get("position")
+            if isinstance(stored, dict) and not position.get("time"):
+                stored.pop("time", None)
+
     def _remember_link_metrics(self, node_id, packet):
         if node_id is None or not isinstance(packet, dict):
             return
@@ -747,6 +903,7 @@ class LoRa:
             position = decoded.get("position")
             if isinstance(position, dict) and position:
                 self._remember_node_info(from_id, position=position)
+                self._remember_position_received(from_id, position, packet)
                 lat = position.get("latitude")
                 lon = position.get("longitude")
                 alt = position.get("altitude")
@@ -841,8 +998,7 @@ class LoRa:
             self.connection_status = "Checking for serial devices..."
         time.sleep(2)
 
-        possible_devices = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1"]
-        found_devices = [dev for dev in possible_devices if os.path.exists(dev)]
+        found_devices = [dev for dev in SERIAL_CANDIDATES if os.path.exists(dev)]
 
         # A Flipper or ESP32 board can enumerate as ttyACM0. Leave those alone
         # (aiov2_ctl --companions --json says which ports they are).
@@ -861,11 +1017,18 @@ class LoRa:
             return
 
         debug(f"LoRa: Found devices: {found_devices}")
+        port, why = choose_serial_port(found_devices, usb_identity)
+        log(f"LoRa: {why}")
+        if port is None:
+            with self.lock:
+                self.connection_status = why
+                self.connecting = False
+            return
         with self.lock:
-            self.connection_status = f"Found: {', '.join([d.split('/')[-1] for d in found_devices])}"
+            self.connection_status = f"Found: {why}"
 
         with self.lock:
-            self.conflict_processes = self._detect_serial_conflicts(found_devices)
+            self.conflict_processes = self._detect_serial_conflicts([port])
         if self.conflict_processes:
             labels = ", ".join(f"{item['name']}:{item['pid']}" for item in self.conflict_processes[:3])
             with self.lock:
@@ -882,13 +1045,10 @@ class LoRa:
 
         try:
             with self.lock:
-                if skipped and len(found_devices) == 1:
-                    # Auto detection could pick the companion, so name the port.
-                    self.interface = bootstrap.meshtastic.serial_interface.SerialInterface(devPath=found_devices[0])
-                else:
-                    self.interface = bootstrap.meshtastic.serial_interface.SerialInterface()
+                # Always the chosen port by name: the library's auto-detection could open an unrelated device.
+                self.interface = bootstrap.meshtastic.serial_interface.SerialInterface(devPath=port)
                 self.active = True
-                self.connection_status = "Connected"
+                self.connection_status = f"Connected (serial: {why})"
             debug("LoRa: Meshtastic connected successfully")
             log("LoRa: Meshtastic mesh connected")
             self._listen()
@@ -896,7 +1056,7 @@ class LoRa:
         except Exception as e:
             debug(f"LoRa: connection failed: {e}")
             log(f"LoRa: Connection failed - {str(e)[:40]}")
-            self.connection_status = f"Failed: {str(e)[:50]}"
+            self.connection_status = f"Failed ({port.split('/')[-1]}): {str(e)[:50]}"
             with self.lock:
                 self.interface = None
                 self.active = False
@@ -945,6 +1105,12 @@ class LoRa:
             if not self.active or not self.interface:
                 return
             nodes = copy.deepcopy(getattr(self.interface, "nodes", None))
+            try:
+                self.configured_channels = configured_channels(
+                    getattr(getattr(self.interface, "localNode", None), "channels", None))
+            except Exception as e:                      # reading only; a library without it keeps the fallback
+                debug(f"LoRa: could not read the configured channels: {e}")
+                self.configured_channels = None
         if isinstance(nodes, dict) and nodes:
             merged_nodes = {}
             for node_id, info in nodes.items():
@@ -965,8 +1131,13 @@ class LoRa:
             with self.lock:
                 self.node_info.update(merged_nodes)
 
-    def send_message(self, text, channel_index=None):
-        """Send a text message on the selected active channel."""
+    def send_message(self, text, channel_index=None, want_ack=False):
+        """Send a text message on the selected active channel. It is handed to the radio and nothing more is known,
+        unless `want_ack` is True (the "Ask for acknowledgement" setting, off by default): then the library is asked
+        for an acknowledgement, which makes the mesh retry and so the radio sends more, and the message's state
+        follows the answer (ops_agent/delivery.py). With `want_ack` off the call to the library is exactly as before."""
+        want_ack = delivery.want_ack_setting(want_ack)
+        result = None
         with self.lock:
             active = self.active
             interface = self.interface
@@ -980,14 +1151,18 @@ class LoRa:
             return False
 
         try:
-            interface.sendText(text, channelIndex=selected_channel)
+            if want_ack:
+                result = interface.sendText(text, channelIndex=selected_channel, wantAck=True)
+            else:
+                result = interface.sendText(text, channelIndex=selected_channel)
         except TypeError:
             if selected_channel != 0:
                 self._set_tx_status(False, f"Send failed: channel {selected_channel} unsupported")
                 log(f"LoRa: send API does not support ch{selected_channel}")
                 return False
             try:
-                interface.sendText(text)
+                result = interface.sendText(text)
+                want_ack = False                 # a library this old was not asked for one
             except Exception as e:
                 self._set_tx_status(False, f"Send failed: {str(e)[:40]}")
                 self._append_activity(
@@ -1031,28 +1206,36 @@ class LoRa:
             log(f"LoRa: Send failed - {e}")
             return False
 
+        sent_id = delivery.packet_id(result)
+        record = delivery.new_delivery(sent_id, want_ack, time.time())
         message = {
             "time": datetime.now().strftime("%H:%M:%S"),
             "from": "Me",
             "text": text,
             "channel": selected_channel,
             "sent": True,
+            "packet_id": sent_id,
+            "delivery": record,
         }
         with self.lock:
             self._remember_channel_activity(selected_channel, sent=True)
             self._append_bounded(self.messages, message, self.max_messages)
-            self._append_activity(
-                self._build_activity(
-                    {
-                        "fromId": "Me",
-                        "channel": selected_channel,
-                        "decoded": {"text": text, "portnum": "TEXT_MESSAGE_APP"},
-                    },
-                    sent=True,
-                    text_override=text,
-                )
+            activity = self._build_activity(
+                {
+                    "fromId": "Me",
+                    "id": sent_id,
+                    "channel": selected_channel,
+                    "decoded": {"text": text, "portnum": "TEXT_MESSAGE_APP"},
+                },
+                sent=True,
+                text_override=text,
             )
-        self._set_tx_status(True, f"Sent ch{selected_channel}: {text[:20]}")
+            activity["delivery"] = record           # the same record: an answer shows wherever the message does
+            self._append_activity(activity)
+            if record["state"] == delivery.WAITING:
+                self.deliveries[sent_id] = record
+        self._set_tx_status(True, f"Handed to the radio, ch{selected_channel}: {text[:20]}"
+                                  + (" (asking for an acknowledgement)" if record["state"] == delivery.WAITING else ""))
 
         debug(f"LoRa TX ch{selected_channel}: {text}")
         log(f"LoRa: Sent on ch{selected_channel} '{text[:30]}{'...' if len(text) > 30 else ''}'")

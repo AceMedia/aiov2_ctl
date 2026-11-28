@@ -12,7 +12,7 @@ import html
 import math
 import time
 
-from ops_agent import geo, nodeid
+from ops_agent import delivery, geo, nodeid
 
 TICK_MS = 1000
 
@@ -86,16 +86,29 @@ def link_reading(info):
     return snr, None, info.get("lastHeard") if snr is not None else None
 
 
+SIGNAL_HEADER = "SNR / RSSI"
+
+
 def signal_cell(snr, rssi, when=None, now=None):
-    """The figures as figures, saying what each is, and how old the reading is: "SNR +6.2 dB  RSSI -91 dBm  2m ago".
-    Never bars, and never a distance: signal strength does not say how far away a node is."""
+    """The figures alone, compact enough for the table: "+6.2 dB  -91 dBm", with "-" in place of a figure that is
+    not known and "-" for the whole cell when neither is. The header ("SNR / RSSI") says which is which, and the
+    age of the reading is left to the Heard column; signal_tooltip() has the full wording. Never bars, and never a
+    distance: signal strength does not say how far away a node is. `when` and `now` are accepted and unused, so
+    the call can pass a whole link_reading()."""
+    if snr is None and rssi is None:
+        return "-"
+    return f"{'-' if snr is None else f'{snr:+.1f} dB'}  {'-' if rssi is None else f'{rssi:.0f} dBm'}"
+
+
+def signal_tooltip(snr, rssi, when=None, now=None):
+    """The same reading in full, saying what each figure is and how old it is: "SNR +6.2 dB  RSSI -91 dBm  2m ago"."""
     bits = []
     if snr is not None:
         bits.append(f"SNR {snr:+.1f} dB")
     if rssi is not None:
         bits.append(f"RSSI {rssi:.0f} dBm")
     if not bits:
-        return "-"
+        return "No signal reading yet."
     if when:
         bits.append(age_text(when, now))
     return "  ".join(bits)
@@ -113,8 +126,25 @@ def message_rows(activities, channel=None, limit=CHAT_LIMIT):
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
                      "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
-                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp")})
+                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp"),
+                     "state": delivery.delivery_text(a.get("delivery") or {"state": delivery.HANDED})
+                     if a.get("sent") else ""})
     return rows[-limit:]
+
+
+def view_signature(rows):
+    """What the Messages view shows, so it is redrawn when a sent message's state changes as well as when a
+    message arrives. row_signature() alone stays the identity used for marking what has been read."""
+    return tuple((row_signature(r), r.get("state")) for r in rows or [])
+
+
+def sent_note(ok, want_ack):
+    """What the Mesh tab says once Send is pressed. Never just "Sent": that would claim more than is known."""
+    if not ok:
+        return "Send failed. See the activity feed."
+    if want_ack:
+        return "Handed to the radio. Waiting for an acknowledgement (see Messages)."
+    return "Handed to the radio. Whether anyone received it is not known."
 
 
 def row_signature(row):
@@ -138,6 +168,23 @@ def stick_to_bottom(position, maximum, slack=4):
         return position >= maximum - slack
     except TypeError:
         return True
+
+
+def scroll_after_fill(first_fill, position, maximum, slack=4):
+    """Where the Messages view goes after it is filled: "bottom" (the newest message) or "keep" (where the reader
+    was). The first time it is filled, and the first time after the channel filter changes, it always goes to the
+    newest message: the scroll position then belongs to an empty view or to other messages, and used to leave the
+    view at the oldest. After that stick_to_bottom() decides, so someone reading older messages keeps their place."""
+    if first_fill:
+        return "bottom"
+    return "bottom" if stick_to_bottom(position, maximum, slack) else "keep"
+
+
+def first_fill_done(has_rows, visible):
+    """Whether the first fill has really happened. Not while the view is empty, and not while it is hidden behind
+    another tab: the view is filled in the background, where it has no size and so no true end to scroll to, and
+    the newest message must still be shown when the reader first opens it."""
+    return bool(has_rows and visible)
 
 
 def unread_count(rows, read_mark):
@@ -200,11 +247,37 @@ def distance_text(km):
     return f"{km * 1000:.0f} m" if km < 1 else f"{km:.1f} km"
 
 
+def position_time(info):
+    """When a node's position is from, in seconds since the epoch, or None when nobody knows: the position's own
+    time when it carries one, otherwise when this app received it (the engine's "positionReceived"). Never when the
+    node was last heard: a node heard a minute ago may be sending nothing but a position from hours ago."""
+    info = info if isinstance(info, dict) else {}
+    position = info.get("position") if isinstance(info.get("position"), dict) else {}
+    for value in (position.get("time"), info.get("positionReceived")):
+        value = _number(value)
+        if value and value > 0:
+            return value / 1000.0 if value > 1_000_000_000_000 else value
+    return None
+
+
+def position_age_text(when, now=None):
+    """The age of a position for the radar: "position 2h ago", or "position of unknown age"."""
+    return f"position {age_text(when, now)}" if when else "position of unknown age"
+
+
+def radar_tooltip(points):
+    """One line per node on the radar: name, distance and how old its position is."""
+    return "\n".join(f"{p['name']}: {distance_text(p['km'])}, {p['position_age']}" for p in points or []) \
+        or "No other node has a position."
+
+
 def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
     """Nodes with a position as plot coordinates around `own`, plus the range plotted in km.
 
     x runs east and y runs north, both scaled so the edge of the plot is 1. The range is twice the
     proximity ring or the farthest node, whichever is larger, so the ring is always visible.
+    A dot is stale when its POSITION is older than `stale_after`, or of unknown age, however recently the node
+    was heard (position_time()).
     """
     now = now or time.time()
     found = []
@@ -216,11 +289,13 @@ def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
             if not where:
                 continue
             km = haversine_km(own[0], own[1], where[0], where[1])
-            heard = (info or {}).get("lastHeard")
+            fixed = position_time(info)
             found.append({"id": str(node_id), "name": node_name(info, node_id), "km": km,
                           "bearing": bearing_deg(own[0], own[1], where[0], where[1]),
                           "inside": km <= radius_km,
-                          "stale": bool(heard) and now - heard >= stale_after})
+                          "position_time": fixed,
+                          "position_age": position_age_text(fixed, now),
+                          "stale": fixed is None or now - fixed >= stale_after})
     span = max([radius_km * 2] + [p["km"] * 1.1 for p in found]) or 1.0
     for p in found:
         rad = math.radians(p["bearing"])
@@ -229,9 +304,25 @@ def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
     return found, span
 
 
+def channel_label(channel):
+    """ "0: LongFast (primary)", or "0: default name (primary)" when the primary's name is empty."""
+    name = channel.get("name") or ("default name" if channel.get("primary") else f"channel {channel.get('index', 0)}")
+    return f"{channel.get('index', 0)}: {name}" + (" (primary)" if channel.get("primary") else "")
+
+
 def channel_choices(snapshot):
-    """[(channel number, label)] for the channels with recent activity, plus the selected one."""
+    """[(channel number, label)] for the "Send on" list. The channels set up on the radio when the connection gives
+    them (configured_channels in the snapshot: the primary first, disabled ones already left out); otherwise, as
+    before, the channels with recent activity. The selected channel is always listed, and said not to be set up
+    when the radio's list does not have it."""
     snap = snapshot or {}
+    configured = [c for c in snap.get("configured_channels") or [] if isinstance(c, dict)]
+    sel = snap.get("selected_channel")
+    if configured:
+        out = [(c.get("index", 0), channel_label(c)) for c in configured]
+        if sel is not None and sel not in [n for n, _ in out]:
+            out.append((sel, f"Channel {sel} (not set up on this radio)"))
+        return out
     items = {}
     for c in snap.get("active_channels") or []:
         items[c["channel"]] = f"Channel {c['channel']}  ({c.get('count', 0)} packets)"
@@ -290,10 +381,12 @@ def node_rows(node_info, self_id=None, now=None, own=None):
         metrics = info.get("deviceMetrics") or {}
         battery = metrics.get("batteryLevel")
         hops = info.get("hopsAway")
+        reading = link_reading(info)
         rows.append({
             "id": str(node_id),
             "name": node_name(info, node_id),
-            "signal": signal_cell(*link_reading(info), now=now),
+            "signal": signal_cell(*reading, now=now),
+            "signal_tip": signal_tooltip(*reading, now=now),
             "heard": age_text(info.get("lastHeard"), now),
             "battery": "-" if battery is None else ("plugged in" if battery > 100 else f"{battery}%"),
             "hops": "-" if hops is None else str(hops),
@@ -310,7 +403,8 @@ NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
 
 def rows_signature(rows):
     """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
-    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (bool(r.get("self")),) for r in rows or [])
+    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (r.get("signal_tip"), bool(r.get("self")))
+                 for r in rows or [])
 
 
 def activity_line(a):
@@ -318,6 +412,8 @@ def activity_line(a):
     if a.get("rx_snr") is not None:
         sig = f"  ({a['rx_snr']:+.1f} dB)"
     arrow = ">" if a.get("sent") else "<"
+    if a.get("sent") and isinstance(a.get("delivery"), dict):
+        sig = f"  [{delivery.delivery_text(a['delivery'])}]"
     return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {a.get('from', '?')}: {a.get('summary', '')}{sig}"
 
 
@@ -393,7 +489,8 @@ def build_panel(win, Switch):
                 x, y = cx + n["x"] * r, cy - n["y"] * r
                 p.drawEllipse(QPointF(x, y), 5, 5)
                 p.setPen(text)
-                p.drawText(QPointF(x + 8, y + 4), n["name"][:14])
+                p.drawText(QPointF(x + 8, y + 4), f"{n['name'][:14]}  {age_text(n['position_time'])}"
+                           if n.get("position_time") else n["name"][:14])
                 p.setPen(QPen(QColor("#111111"), 1))
             p.setPen(text)
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
@@ -472,7 +569,7 @@ def build_panel(win, Switch):
             cap = QLabel("Nodes heard")
             cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
             self.table = NodeTable(0, 6)
-            self.table.setHorizontalHeaderLabels(["Name", "Last signal", "Distance", "Heard", "Battery", "Hops"])
+            self.table.setHorizontalHeaderLabels(["Name", SIGNAL_HEADER, "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -577,7 +674,10 @@ def build_panel(win, Switch):
                 for r, row in enumerate(rows):
                     for c, key in enumerate(NODE_COLUMNS):
                         text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
-                        self.table.setItem(r, c, QTableWidgetItem(text))
+                        item = QTableWidgetItem(text)
+                        if key == "signal":
+                            item.setToolTip(row["signal_tip"])
+                        self.table.setItem(r, c, item)
                 self.table.fit_columns()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
@@ -647,8 +747,9 @@ def build_panel(win, Switch):
             text = self.entry.text().strip()
             if not can_send(self.allow_on, bool(self.lora), text):
                 return
-            ok = self.lora.send_message(text)
-            self.show_note("Sent." if ok else "Send failed. See the activity feed.")
+            want_ack = delivery.want_ack_setting(win.flag("mesh_want_ack") if hasattr(win, "flag") else None)
+            ok = self.lora.send_message(text, want_ack=want_ack)
+            self.show_note(sent_note(ok, want_ack))
             if ok:
                 self.entry.clear()
             self.tick()
@@ -659,6 +760,7 @@ def build_panel(win, Switch):
         def __init__(self):
             super().__init__()
             self.read_mark, self.last_sig, self.rows = None, None, []
+            self.first_fill = True               # the next fill shows the newest message (scroll_after_fill)
             root = QVBoxLayout(self)
             bar = QHBoxLayout()
             self.count = QLabel("No messages yet.")
@@ -666,7 +768,7 @@ def build_panel(win, Switch):
             self.channel = QComboBox()
             self.channel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.channel.addItem("All channels", None)
-            self.channel.activated.connect(lambda _=0: setattr(self, "last_sig", None))
+            self.channel.activated.connect(self.filter_changed)
             reply = QPushButton("Reply on the Mesh tab")
             reply.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             reply.clicked.connect(self.reply)
@@ -687,6 +789,16 @@ def build_panel(win, Switch):
             if self.on_reply:
                 self.on_reply()
 
+        def filter_changed(self, _=0):
+            self.last_sig, self.first_fill = None, True
+
+        def shown(self):
+            """The reader has opened this view: if it has not yet been seen filled, show the newest message."""
+            if self.first_fill and self.rows:
+                bar = self.view.verticalScrollBar()
+                QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+                self.first_fill = False
+
         def update_from(self, snap):
             acts = chat_events(snap)
             chans = message_channels(acts)
@@ -702,7 +814,7 @@ def build_panel(win, Switch):
                 self.channel.setCurrentIndex(max(0, idx))
                 self.channel.blockSignals(False)
             self.rows = message_rows(acts, self.channel.currentData())
-            sig = tuple(row_signature(r) for r in self.rows)
+            sig = view_signature(self.rows)
             if sig == self.last_sig:
                 return
             self.last_sig = sig
@@ -711,12 +823,19 @@ def build_panel(win, Switch):
                 colour = "#3fe0d0" if r["sent"] else "#ff7a45"
                 who = html.escape(r["who"])
                 tag = " checked in" if r["checkin"] else ""
+                if r["state"]:
+                    tag += f' <span style="color:#9a90a6">({html.escape(r["state"])})</span>'
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '
                                  f'<b style="color:{colour}">{who}</b>{tag}<br>{html.escape(r["text"])}</p>')
             bar = self.view.verticalScrollBar()
-            follow, keep = stick_to_bottom(bar.value(), bar.maximum()), bar.value()
+            where, keep = scroll_after_fill(self.first_fill, bar.value(), bar.maximum()), bar.value()
             self.view.setHtml("".join(html_rows) or "<p style='color:#9a90a6'>Nothing heard on the mesh yet.</p>")
-            bar.setValue(bar.maximum() if follow else keep)
+            bar.setValue(bar.maximum() if where == "bottom" else keep)
+            if where == "bottom":
+                # the page may not be laid out yet, so its true end is only known once Qt has done that
+                QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+            if first_fill_done(bool(self.rows), self.view.isVisible()):
+                self.first_fill = False
             incoming = sum(1 for r in self.rows if not r["sent"])
             self.count.setText(f"{len(self.rows)} messages, {incoming} heard" if self.rows else "No messages yet.")
 
@@ -751,7 +870,9 @@ def build_panel(win, Switch):
             self.alerts = QPlainTextEdit()
             self.alerts.setReadOnly(True)
             self.alerts.setStyleSheet("font-size: 11pt;")
-            self.legend = QLabel("Green: inside the ring.  Amber: outside.  Grey: not heard for 15 minutes.")
+            self.legend = QLabel("Green: inside the ring.  Amber: outside.  Grey: the position is more than "
+                                 "15 minutes old, or of unknown age, even if the node was heard since. Each dot "
+                                 "says how old its position is; rest the pointer on the radar for the list.")
             self.legend.setWordWrap(True)
             self.legend.setStyleSheet("font-size: 11pt; color: #9e9e9e;")
             rl.addWidget(cap)
@@ -770,6 +891,7 @@ def build_panel(win, Switch):
             points, span = radar_points(snap["node_info"], snap.get("self_id"), own, radius)
             self.radar.points, self.radar.span, self.radar.radius = points, span, radius
             self.radar.waiting = own is None
+            self.radar.setToolTip(radar_tooltip(points))
             self.radar.update()
             lines = alert_lines(snap.get("recent_alerts"), engine.stale_nodes(), snap["node_info"])
             self.alerts.setPlainText("\n".join(lines) if lines else "No alerts.")
@@ -799,6 +921,8 @@ def build_panel(win, Switch):
             self.setTabText(1, f"Messages ({unread})" if unread else "Messages")
 
         def tab_changed(self, _=0):
+            if self.currentWidget() is self.messages:
+                self.messages.shown()
             if self.currentWidget() is self.messages and self.messages.rows:
                 self.messages.read_mark = row_signature(self.messages.rows[-1])
                 self.setTabText(1, "Messages")
