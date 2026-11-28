@@ -44,6 +44,10 @@ from . import fieldlog, gps_track, position, walkmap
 
 SAMPLE_EVERY = 5.0                   # seconds between readings
 BUCKET_SECONDS = 60.0                # "what changed together" compares one minute with the next
+MIN_READINGS = 12                    # fewer readings than this behind a pair of counts: too few to compare
+STRONG_SHARE = 0.5                   # changed together in at least half the minutes compared: "strongly"
+CAVEAT = ("Readings that change together are not shown to be connected: two things can both follow a third, "
+          "such as the time of day or this computer being moved.")
 FILE_CAP = 20 * 1024 * 1024          # a session stops growing here (an hour is about a third of a megabyte)
 RESTART_SLACK = 20.0                 # a scan that ended this close to its time limit ended by itself
 MIN_MOVE_M = 5.0                     # GPS wander smaller than this is not counted as distance moved
@@ -648,7 +652,8 @@ def bucket_means(session, seconds=BUCKET_SECONDS):
     t0, found = session.t0, {}
     for s in session.samples:
         i = int((s["ts"] - t0) // seconds)
-        b = found.setdefault(i, {"i": i, "t": t0 + i * seconds, "sums": {}, "lat": None, "lon": None})
+        b = found.setdefault(i, {"i": i, "t": t0 + i * seconds, "sums": {}, "lat": None, "lon": None, "n": 0})
+        b["n"] += 1
         for key in TOGETHER:
             v = value(s, key)
             if v is not None:
@@ -656,7 +661,7 @@ def bucket_means(session, seconds=BUCKET_SECONDS):
                 b["sums"][key] = (total + v, n + 1)
         if "lat" in s and "lon" in s:
             b["lat"], b["lon"] = s["lat"], s["lon"]
-    return [{"i": b["i"], "t": b["t"], "lat": b["lat"], "lon": b["lon"],
+    return [{"i": b["i"], "t": b["t"], "lat": b["lat"], "lon": b["lon"], "n": b["n"],
              "means": {k: total / n for k, (total, n) in b["sums"].items()}} for _i, b in sorted(found.items())]
 
 
@@ -680,7 +685,7 @@ def changed_together(session, seconds=BUCKET_SECONDS):
     buckets = bucket_means(session, seconds)
     by_i = {b["i"]: b for b in buckets}
     shaken = [e["ts"] for e in session.events if e.get("what") == "source"]
-    rows, tally = [], {}
+    rows, tally, used = [], {}, {}
     pairs = [(a, b) for n, a in enumerate(TOGETHER) for b in TOGETHER[n + 1:] if a.split(".")[0] != b.split(".")[0]]
     for cur in buckets:
         prev = by_i.get(cur["i"] - 1)
@@ -699,8 +704,13 @@ def changed_together(session, seconds=BUCKET_SECONDS):
             da = direction(prev["means"][a], cur["means"][a])
             db = direction(prev["means"][b], cur["means"][b])
             if not settling:
-                t = tally.setdefault((a, b), {"a": a, "b": b, "minutes": 0, "same": 0, "opposite": 0})
+                t = tally.setdefault((a, b), {"a": a, "b": b, "minutes": 0, "same": 0, "opposite": 0, "readings": 0})
                 t["minutes"] += 1
+                seen = used.setdefault((a, b), set())
+                for bucket in (prev, cur):                       # the readings behind the minutes compared
+                    if bucket["i"] not in seen:
+                        seen.add(bucket["i"])
+                        t["readings"] += bucket.get("n", 0)
                 if da and db:
                     t["same" if da == db else "opposite"] += 1
             if da and db:
@@ -709,6 +719,28 @@ def changed_together(session, seconds=BUCKET_SECONDS):
                              "b_to": round(cur["means"][b], 1), "same": da == db, "settling": settling,
                              "moved_m": moved, "lat": cur["lat"], "lon": cur["lon"]})
     return {"rows": rows, "pairs": [tally[p] for p in pairs if p in tally]}
+
+
+def pair_explanation(tally, minimum=MIN_READINGS):
+    """One plain line about a pair of counts: which way they changed together, over how many minutes, from how
+    many readings, and how often, as a word and the figure it comes from. It says what was measured and no more."""
+    a, b = LABELS.get(tally.get("a"), tally.get("a")), LABELS.get(tally.get("b"), tally.get("b"))
+    minutes, readings = int(tally.get("minutes") or 0), int(tally.get("readings") or 0)
+    same, opposite = int(tally.get("same") or 0), int(tally.get("opposite") or 0)
+    if readings < minimum or minutes < 1:
+        return f"{a} and {b}: too few readings to compare."
+    over = f"over {minutes} minute{'s' if minutes != 1 else ''} compared, from {readings} readings"
+    if not same and not opposite:
+        return f"{a} and {b}: did not change in the same minute ({over})."
+    if same > opposite:
+        how, count = "rose together or fell together", same
+    elif opposite > same:
+        how, count = "one rose as the other fell", opposite
+    else:
+        how, count = "changed in the same minute, as often the same way as opposite ways", same + opposite
+    share = count / minutes
+    word = "strongly" if share >= STRONG_SHARE else "loosely"
+    return f"{a} and {b}: {how}, {word} ({share:.2f}: {count} of {minutes} minutes), {over}."
 
 
 def together_lines(result, limit=40):
@@ -723,6 +755,9 @@ def together_lines(result, limit=40):
         both = p["same"] + p["opposite"]
         lines.append(f"{LABELS[p['a']]} and {LABELS[p['b']]}: in {p['minutes']} minute{'s' if p['minutes'] != 1 else ''} "
                      f"compared, both changed in {both} (the same way in {p['same']}, opposite ways in {p['opposite']}).")
+        lines.append("  " + pair_explanation(p))
+    if pairs:
+        lines.append(CAVEAT)
 
     def word(a, b):
         return "rose" if b > a else "fell"

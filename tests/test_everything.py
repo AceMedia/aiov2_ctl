@@ -464,7 +464,8 @@ class TogetherTests(unittest.TestCase):
         self.assertEqual((row["a"], row["b"], row["a_from"], row["a_to"], row["b_from"], row["b_to"], row["same"]),
                          ("wifi.nets", "bt.addrs", 10.0, 20.0, 5.0, 9.0, True))
         self.assertEqual(row["t"], T0 + 180)
-        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 4, "same": 1, "opposite": 0}])
+        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 4, "same": 1, "opposite": 0,
+                                         "readings": 60}])
 
     def test_counts_moving_opposite_ways_are_tallied_as_that(self):
         out = ev.changed_together(self.minutes([10, 10, 10, 20], [9, 9, 9, 5]))
@@ -484,7 +485,8 @@ class TogetherTests(unittest.TestCase):
         started = [ev.event(T0, "source", "Bluetooth scan started by this session")]
         out = ev.changed_together(self.minutes([2, 10, 20, 20, 20], [1, 8, 16, 16, 16], started))
         self.assertEqual([r["settling"] for r in out["rows"]], [True, True])
-        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 2, "same": 0, "opposite": 0}])
+        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 2, "same": 0, "opposite": 0,
+                                         "readings": 36}])
 
     def test_a_source_that_has_only_just_appeared_is_settling_too(self):
         out = ev.changed_together(self.minutes([10, 10, 10, 20, 20], [None, None, 4, 9, 9]))
@@ -513,8 +515,51 @@ class TogetherTests(unittest.TestCase):
                       "(the same way in 1, opposite ways in 0).", text)
         self.assertIn("Wi-Fi networks rose 10 to 20, Bluetooth addresses rose 8 to 12", text)
         self.assertIn("a scan had just started or stopped, so not counted above", text)
+        self.assertEqual(lines.count(ev.CAVEAT), 1)
         for claim in ("same device", "person", "people", "direction", "because", "caused", "follow"):
-            self.assertNotIn(claim, text.replace("does not say the same devices", ""))
+            self.assertNotIn(claim, text.replace("does not say the same devices", "").replace(ev.CAVEAT, ""))
+
+    def tally(self, minutes=20, same=0, opposite=0, readings=240):
+        return {"a": "wifi.nets", "b": "bt.addrs", "minutes": minutes, "same": same, "opposite": opposite,
+                "readings": readings}
+
+    def test_each_pair_gets_one_plain_line_with_the_figure_behind_its_word(self):
+        self.assertEqual(ev.pair_explanation(self.tally(same=12, opposite=1)),
+                         "Wi-Fi networks and Bluetooth addresses: rose together or fell together, strongly "
+                         "(0.60: 12 of 20 minutes), over 20 minutes compared, from 240 readings.")
+        self.assertEqual(ev.pair_explanation(self.tally(same=1, opposite=4)),
+                         "Wi-Fi networks and Bluetooth addresses: one rose as the other fell, loosely "
+                         "(0.20: 4 of 20 minutes), over 20 minutes compared, from 240 readings.")
+        self.assertIn("as often the same way as opposite ways, strongly (1.00: 2 of 2 minutes)",
+                      ev.pair_explanation(self.tally(minutes=2, same=1, opposite=1, readings=36)))
+        self.assertEqual(ev.pair_explanation(self.tally(minutes=1, readings=24)),
+                         "Wi-Fi networks and Bluetooth addresses: did not change in the same minute "
+                         "(over 1 minute compared, from 24 readings).")
+
+    def test_the_strength_word_turns_at_half_the_minutes(self):
+        self.assertIn("strongly (0.50", ev.pair_explanation(self.tally(same=10)))
+        self.assertIn("loosely (0.45", ev.pair_explanation(self.tally(same=9)))
+
+    def test_fewer_than_twelve_readings_are_too_few_to_compare(self):
+        self.assertEqual(ev.pair_explanation(self.tally(minutes=1, same=1, readings=11)),
+                         "Wi-Fi networks and Bluetooth addresses: too few readings to compare.")
+        self.assertNotIn("too few", ev.pair_explanation(self.tally(minutes=1, same=1, readings=12)))
+        self.assertIn("too few", ev.pair_explanation({"a": "wifi.nets", "b": "bt.addrs"}))
+
+    def test_the_lines_say_what_was_measured_and_stop_there(self):
+        for t in (self.tally(same=12), self.tally(opposite=12), self.tally(same=3, opposite=3), self.tally(),
+                  self.tally(readings=3)):
+            line = ev.pair_explanation(t).lower()
+            for claim in ("because", "caused", "cause", "person", "people", "towards", "away", "closer", "moved",
+                          "direction", "position", "connected"):
+                self.assertNotIn(claim, line, line)
+
+    def test_the_caveat_comes_once_for_the_list_and_not_when_there_is_nothing_to_compare(self):
+        s = self.minutes([10, 10, 10, 20, 20, 10, 30], [5, 5, 5, 9, 9, 4, 12])
+        lines = ev.together_lines(ev.changed_together(s))
+        self.assertEqual(lines.count(ev.CAVEAT), 1)
+        self.assertEqual(sum(1 for line in lines if line.startswith("  Wi-Fi networks and Bluetooth addresses: ")), 1)
+        self.assertNotIn(ev.CAVEAT, ev.together_lines(ev.changed_together(ev.Session())))
 
     def test_too_little_to_compare_is_said(self):
         self.assertIn("Not enough yet", ev.together_lines(ev.changed_together(ev.Session()))[-1])
