@@ -394,7 +394,7 @@ def build_settings(win, Bridge_signals):
                                              "~/.local/share/aiov2_ctl/iga and readable only by you.", history_b)
         wipe_b = onoff(lambda on: save_iga("iga_clear_on_close", bool(on)))
         wipe_b.setChecked(cur["iga_clear_on_close"])
-        setting(v, "Clear everything when the app closes", "Cookies, saved logins, cache and history. Bookmarks "
+        setting(v, "Clear everything when the app closes", "Cookies, site storage, cache and history. Bookmarks "
                                                            "are kept.", wipe_b)
         forget_b = button("Clear history")
         forget_b.clicked.connect(lambda: (iga.clear_history(iga.user_folder()), win.say("IGA's history is cleared.")))

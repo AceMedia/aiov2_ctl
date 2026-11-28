@@ -31,6 +31,7 @@ A tab has its icon in two places, and tests/test_icon_parity.py fails if either 
 | Apps | rocket | rocket |
 | Settings | cog | cog |
 | Help | notes | question mark |
+| IGA (optional) | globe, shared with Wi-Fi | a globe |
 
 The rail rows on Overview reuse compass, email, search and server (`RAIL_INFO` in ops_gui/data.py).
 

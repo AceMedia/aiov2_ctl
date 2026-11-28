@@ -967,7 +967,7 @@ def build(win):
             tell("\n".join(lines) if lines else "Nothing downloaded since the app started.")
 
         def clear_now(ask=True):
-            if ask and not win.ask("Clear IGA's cookies, saved logins, cache and history now? Bookmarks are kept."):
+            if ask and not win.ask("Clear IGA's cookies, site storage, cache and history now? You will be signed out of sites. Bookmarks are kept."):
                 return
             clear_data()
             if ask:
