@@ -65,6 +65,42 @@ def chat_events(snapshot):
     return chat if isinstance(chat, list) else snap.get("activities") or []
 
 
+def _number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def link_reading(info):
+    """(SNR in dB, RSSI in dBm, when) for the last reading of a node's signal, each None where unknown. The
+    engine's own reading of the last packet heard from the node (linkMetrics, which carries RSSI and its time)
+    comes first; otherwise the mesh service's SNR, as of when the node was last heard."""
+    info = info if isinstance(info, dict) else {}
+    link = info.get("linkMetrics") if isinstance(info.get("linkMetrics"), dict) else {}
+    snr, rssi = _number(link.get("rxSnr")), _number(link.get("rxRssi"))
+    if snr is not None or rssi is not None:
+        return snr, rssi, link.get("time")
+    snr = _number(info.get("snr"))
+    return snr, None, info.get("lastHeard") if snr is not None else None
+
+
+def signal_cell(snr, rssi, when=None, now=None):
+    """The figures as figures, saying what each is, and how old the reading is: "SNR +6.2 dB  RSSI -91 dBm  2m ago".
+    Never bars, and never a distance: signal strength does not say how far away a node is."""
+    bits = []
+    if snr is not None:
+        bits.append(f"SNR {snr:+.1f} dB")
+    if rssi is not None:
+        bits.append(f"RSSI {rssi:.0f} dBm")
+    if not bits:
+        return "-"
+    if when:
+        bits.append(age_text(when, now))
+    return "  ".join(bits)
+
+
 def message_rows(activities, channel=None, limit=CHAT_LIMIT):
     """Text messages and check-ins from the activity list, oldest first, optionally for one channel."""
     rows = []
@@ -262,7 +298,7 @@ def node_rows(node_info, self_id=None, now=None, own=None):
         rows.append({
             "id": str(node_id),
             "name": node_name(info, node_id),
-            "signal": signal_text(info.get("snr")),
+            "signal": signal_cell(*link_reading(info), now=now),
             "heard": age_text(info.get("lastHeard"), now),
             "battery": "-" if battery is None else ("plugged in" if battery > 100 else f"{battery}%"),
             "hops": "-" if hops is None else str(hops),
@@ -432,7 +468,7 @@ def build_panel(win, Switch):
             cap = QLabel("Nodes heard")
             cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
             self.table = NodeTable(0, 6)
-            self.table.setHorizontalHeaderLabels(["Name", "Signal", "Distance", "Heard", "Battery", "Hops"])
+            self.table.setHorizontalHeaderLabels(["Name", "Last signal", "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)

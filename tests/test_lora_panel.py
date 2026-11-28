@@ -243,3 +243,28 @@ class RowIdentityTests(unittest.TestCase):
         act = engine.snapshot()["activities"][-1]
         self.assertEqual(act["packet_id"], 4242)
         self.assertIsInstance(act["stamp"], float)
+
+
+class SignalFigureTests(unittest.TestCase):
+    def test_link_metrics_come_first_with_their_time(self):
+        info = {"snr": 1.0, "lastHeard": 500, "linkMetrics": {"rxSnr": 6.25, "rxRssi": -91, "time": 880}}
+        self.assertEqual(lp.link_reading(info), (6.25, -91.0, 880))
+        self.assertEqual(lp.signal_cell(*lp.link_reading(info), now=1000), "SNR +6.2 dB  RSSI -91 dBm  2m ago")
+
+    def test_only_the_service_snr(self):
+        info = {"snr": -3.5, "lastHeard": 990}
+        self.assertEqual(lp.link_reading(info), (-3.5, None, 990))
+        self.assertEqual(lp.signal_cell(*lp.link_reading(info), now=1000), "SNR -3.5 dB  now")
+
+    def test_nothing_known(self):
+        self.assertEqual(lp.link_reading({}), (None, None, None))
+        self.assertEqual(lp.link_reading(None), (None, None, None))
+        self.assertEqual(lp.signal_cell(None, None, 100), "-")
+        self.assertEqual(lp.link_reading({"snr": float("nan")}), (None, None, None))
+
+    def test_the_table_row_shows_the_labelled_figures(self):
+        info = {"1": {"user": {"longName": "Hill"}, "lastHeard": 900,
+                      "linkMetrics": {"rxSnr": 2.0, "rxRssi": -100, "time": 940}}}
+        row = lp.node_rows(info, now=1000)[0]
+        self.assertEqual(row["signal"], "SNR +2.0 dB  RSSI -100 dBm  1m ago")
+        self.assertNotIn("km", row["signal"])
