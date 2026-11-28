@@ -213,6 +213,26 @@ High contrast, then the plain and black backgrounds:
 
 [![High contrast and the plain and black backgrounds](img/clips/looks.webp)](img/clips/looks.webp)
 
+The screensaver is off until you switch it on here. Choose which one and how long to wait (1, 2, 5, 10 or 30 minutes); Show brings it up straight away. After that long with nothing touched it covers the app's window. Any key, button, click or movement of the pointer takes it away, and that touch does nothing else. It only draws: no rail is switched and nothing is saved.
+
+[![Settings, General: the screensaver's options](img/app/settings-01-general-screensaver.webp)](img/app/settings-01-general-screensaver.webp)
+
+Mandelbrot is a slow dive into the set, coloured from the feature colour:
+
+[![The Mandelbrot screensaver](img/app/saver-mandelbrot.webp)](img/app/saver-mandelbrot.webp)
+
+System shows the processor, temperature, memory and disk, with the last three minutes of processor and temperature as graphs:
+
+[![The system screensaver](img/app/saver-system.webp)](img/app/saver-system.webp)
+
+Starfield, falling code, and a clock that drifts so nothing stays lit in one place:
+
+[![The starfield screensaver](img/app/saver-stars.webp)](img/app/saver-stars.webp)
+
+[![The falling code screensaver](img/app/saver-rain.webp)](img/app/saver-rain.webp)
+
+[![The clock screensaver](img/app/saver-clock.webp)](img/app/saver-clock.webp)
+
 ### Notifications
 
 What to tell you about, as pop-up notices inside the app and, if you want, desktop notifications too. **Send a test notice** shows what one looks like. Mesh notices need the LoRa rail on.

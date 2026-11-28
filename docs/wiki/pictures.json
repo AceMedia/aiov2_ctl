@@ -47,6 +47,30 @@
   "bytes": 39118,
   "sha256": "eb8842193beb03607c6ecacab69748a074a595a08147497e670849dc5738721f"
  },
+ "img/app/saver-clock.webp": {
+  "bytes": 2426,
+  "sha256": "42598c6e09a481e5cfc9f3ac6d37590bba59c734dc153e88a44793d1ca6e16ab"
+ },
+ "img/app/saver-mandelbrot.webp": {
+  "bytes": 14836,
+  "sha256": "8a30ba0154eb3ce9ab2750461be3e82657c0e119926acaa13d3578f4b3d219f3"
+ },
+ "img/app/saver-rain.webp": {
+  "bytes": 10732,
+  "sha256": "1b01cabfcf6227314840cf586488ed00cbff962eaa2b84dc9556d0725c7ea590"
+ },
+ "img/app/saver-stars.webp": {
+  "bytes": 2100,
+  "sha256": "3dff7e5fd263c6ba96d99536244f466a9781794daa5699fde09cfffe595a2241"
+ },
+ "img/app/saver-system.webp": {
+  "bytes": 4642,
+  "sha256": "72b1fe997b68932b512ee98563d53e157fd3198f9a5392a79c704efec796ba24"
+ },
+ "img/app/settings-01-general-screensaver.webp": {
+  "bytes": 47256,
+  "sha256": "3d1e1cdc8749d7df2cddee5bce7705d74de06f2d1bd76934141c7260b196b5fd"
+ },
  "img/app/settings-01-general.webp": {
   "bytes": 59790,
   "sha256": "b5850a8880a53faaa81b4f52cf6a110c94ea8eaa283cc6e72e50fb860da263ce"
