@@ -305,6 +305,27 @@ def dbm_of(text):
         return None
 
 
+def wifi_heard(survey_rows, scan_networks):
+    """The Wi-Fi networks the app has heard, for signal_bands(): [{"id", "rssi"}], each network once. Two pages
+    hold them: the listening survey's table (signal as text, '-50 dBm') and the ordinary scan's list
+    ('signal_dbm'). The survey's reading is used when both have a network; a network without a usable reading
+    is left out."""
+    out, seen = [], set()
+    for row in survey_rows or ():
+        if isinstance(row, dict):
+            key, dbm = str(row.get("bssid") or "").lower(), dbm_of(row.get("signal"))
+            if key and key not in seen and dbm is not None:
+                seen.add(key)
+                out.append({"id": key, "rssi": dbm})
+    for net in scan_networks or ():
+        if isinstance(net, dict):
+            key, dbm = str(net.get("bssid") or "").lower(), net.get("signal_dbm")
+            if key and key not in seen and isinstance(dbm, (int, float)) and not isinstance(dbm, bool):
+                seen.add(key)
+                out.append({"id": key, "rssi": dbm})
+    return out
+
+
 def strength(value, lo, hi):
     """A reading from lo to hi as 0 to 1, clamped at both ends; None when it is not a number."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or hi <= lo:
@@ -479,9 +500,9 @@ def build(win):
             Everything page reads, and nothing is asked of any radio. Each source is optional."""
             out = {}
             try:
-                survey = getattr(getattr(win, "wifi_panel", None), "survey", None)
-                out["wifi"] = [{"id": r.get("bssid"), "rssi": dbm_of(r.get("signal"))}
-                               for r in getattr(survey, "ap_list", None) or ()]
+                panel = getattr(win, "wifi_panel", None)
+                out["wifi"] = wifi_heard(getattr(getattr(panel, "survey", None), "ap_list", None),
+                                         (getattr(panel, "scan_data", None) or {}).get("networks"))
             except Exception:
                 pass
             try:
