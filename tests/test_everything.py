@@ -464,7 +464,8 @@ class TogetherTests(unittest.TestCase):
         self.assertEqual((row["a"], row["b"], row["a_from"], row["a_to"], row["b_from"], row["b_to"], row["same"]),
                          ("wifi.nets", "bt.addrs", 10.0, 20.0, 5.0, 9.0, True))
         self.assertEqual(row["t"], T0 + 180)
-        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 4, "same": 1, "opposite": 0}])
+        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 4, "same": 1, "opposite": 0,
+                                         "readings": 60}])
 
     def test_counts_moving_opposite_ways_are_tallied_as_that(self):
         out = ev.changed_together(self.minutes([10, 10, 10, 20], [9, 9, 9, 5]))
@@ -484,7 +485,8 @@ class TogetherTests(unittest.TestCase):
         started = [ev.event(T0, "source", "Bluetooth scan started by this session")]
         out = ev.changed_together(self.minutes([2, 10, 20, 20, 20], [1, 8, 16, 16, 16], started))
         self.assertEqual([r["settling"] for r in out["rows"]], [True, True])
-        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 2, "same": 0, "opposite": 0}])
+        self.assertEqual(out["pairs"], [{"a": "wifi.nets", "b": "bt.addrs", "minutes": 2, "same": 0, "opposite": 0,
+                                         "readings": 36}])
 
     def test_a_source_that_has_only_just_appeared_is_settling_too(self):
         out = ev.changed_together(self.minutes([10, 10, 10, 20, 20], [None, None, 4, 9, 9]))
@@ -513,8 +515,51 @@ class TogetherTests(unittest.TestCase):
                       "(the same way in 1, opposite ways in 0).", text)
         self.assertIn("Wi-Fi networks rose 10 to 20, Bluetooth addresses rose 8 to 12", text)
         self.assertIn("a scan had just started or stopped, so not counted above", text)
+        self.assertEqual(lines.count(ev.CAVEAT), 1)
         for claim in ("same device", "person", "people", "direction", "because", "caused", "follow"):
-            self.assertNotIn(claim, text.replace("does not say the same devices", ""))
+            self.assertNotIn(claim, text.replace("does not say the same devices", "").replace(ev.CAVEAT, ""))
+
+    def tally(self, minutes=20, same=0, opposite=0, readings=240):
+        return {"a": "wifi.nets", "b": "bt.addrs", "minutes": minutes, "same": same, "opposite": opposite,
+                "readings": readings}
+
+    def test_each_pair_gets_one_plain_line_with_the_figure_behind_its_word(self):
+        self.assertEqual(ev.pair_explanation(self.tally(same=12, opposite=1)),
+                         "Wi-Fi networks and Bluetooth addresses: rose together or fell together, strongly "
+                         "(0.60: 12 of 20 minutes), over 20 minutes compared, from 240 readings.")
+        self.assertEqual(ev.pair_explanation(self.tally(same=1, opposite=4)),
+                         "Wi-Fi networks and Bluetooth addresses: one rose as the other fell, loosely "
+                         "(0.20: 4 of 20 minutes), over 20 minutes compared, from 240 readings.")
+        self.assertIn("as often the same way as opposite ways, strongly (1.00: 2 of 2 minutes)",
+                      ev.pair_explanation(self.tally(minutes=2, same=1, opposite=1, readings=36)))
+        self.assertEqual(ev.pair_explanation(self.tally(minutes=1, readings=24)),
+                         "Wi-Fi networks and Bluetooth addresses: did not change in the same minute "
+                         "(over 1 minute compared, from 24 readings).")
+
+    def test_the_strength_word_turns_at_half_the_minutes(self):
+        self.assertIn("strongly (0.50", ev.pair_explanation(self.tally(same=10)))
+        self.assertIn("loosely (0.45", ev.pair_explanation(self.tally(same=9)))
+
+    def test_fewer_than_twelve_readings_are_too_few_to_compare(self):
+        self.assertEqual(ev.pair_explanation(self.tally(minutes=1, same=1, readings=11)),
+                         "Wi-Fi networks and Bluetooth addresses: too few readings to compare.")
+        self.assertNotIn("too few", ev.pair_explanation(self.tally(minutes=1, same=1, readings=12)))
+        self.assertIn("too few", ev.pair_explanation({"a": "wifi.nets", "b": "bt.addrs"}))
+
+    def test_the_lines_say_what_was_measured_and_stop_there(self):
+        for t in (self.tally(same=12), self.tally(opposite=12), self.tally(same=3, opposite=3), self.tally(),
+                  self.tally(readings=3)):
+            line = ev.pair_explanation(t).lower()
+            for claim in ("because", "caused", "cause", "person", "people", "towards", "away", "closer", "moved",
+                          "direction", "position", "connected"):
+                self.assertNotIn(claim, line, line)
+
+    def test_the_caveat_comes_once_for_the_list_and_not_when_there_is_nothing_to_compare(self):
+        s = self.minutes([10, 10, 10, 20, 20, 10, 30], [5, 5, 5, 9, 9, 4, 12])
+        lines = ev.together_lines(ev.changed_together(s))
+        self.assertEqual(lines.count(ev.CAVEAT), 1)
+        self.assertEqual(sum(1 for line in lines if line.startswith("  Wi-Fi networks and Bluetooth addresses: ")), 1)
+        self.assertNotIn(ev.CAVEAT, ev.together_lines(ev.changed_together(ev.Session())))
 
     def test_too_little_to_compare_is_said(self):
         self.assertIn("Not enough yet", ev.together_lines(ev.changed_together(ev.Session()))[-1])
@@ -749,6 +794,95 @@ class AircraftTests(unittest.TestCase):
         self.assertEqual([lane["label"] for lane in ev.lanes(s, T0, T0 + 60, 10)], ["Aircraft heard", "Aircraft giving a position"])
         self.assertIn("Aircraft heard 5", ev.readout(s.samples[-1]))
         self.assertIn("Aircraft heard: 3 to 5, last 5", ev.summary_lines(ev.summarise(s)))
+
+
+class BookmarkTests(unittest.TestCase):
+    """A bookmark: the last few minutes the tab already holds, kept as a small private session of its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def readings(self, count, every=5.0):
+        return [sample(i * every, sys={"battery": 80 - i}) for i in range(count)]
+
+    def test_the_window_keeps_the_last_five_minutes_with_both_ends_included(self):
+        recs = self.readings(100)                                   # 0 to 495 seconds
+        got = ev.last_window(recs, 300, T0 + 495)
+        self.assertEqual((got[0]["ts"], got[-1]["ts"], len(got)), (T0 + 195, T0 + 495, 61))
+        just = ev.last_window(recs, 300, T0 + 495.5)
+        self.assertEqual(just[0]["ts"], T0 + 200)                   # 195 is half a second outside now
+
+    def test_fewer_readings_than_the_window_keeps_them_all(self):
+        recs = self.readings(6)
+        self.assertEqual(ev.last_window(recs, 300, T0 + 25), recs)
+        self.assertEqual(ev.last_window(recs, 300), recs)           # no moment given: up to the last reading
+
+    def test_no_readings_gives_nothing_and_nothing_is_saved(self):
+        self.assertEqual(ev.last_window([], 300, T0), [])
+        self.assertEqual(ev.last_window(None, 300, T0), [])
+        self.assertIsNone(ev.bookmark_records(session_of(), [], T0))
+        self.assertIsNone(ev.save_bookmark(None, T0))
+        self.assertEqual(ev.all_files(), [])
+
+    def test_readings_out_of_order_come_back_in_order_and_later_ones_are_left_out(self):
+        recs = self.readings(10)
+        shuffled = [recs[i] for i in (7, 2, 9, 0, 5, 3, 8, 1, 6, 4)] + [{"k": "sample", "ts": "late"}]
+        got = ev.last_window(shuffled, 20, T0 + 35)
+        self.assertEqual([r["ts"] - T0 for r in got], [15, 20, 25, 30, 35])
+
+    def test_the_end_is_now_while_recording_else_the_picked_moment_else_the_last_reading(self):
+        recs = self.readings(4)
+        self.assertEqual(ev.bookmark_until(True, T0 + 5, recs, T0 + 99), T0 + 99)
+        self.assertEqual(ev.bookmark_until(False, T0 + 5, recs, T0 + 99), T0 + 5)
+        self.assertEqual(ev.bookmark_until(False, None, recs, T0 + 99), T0 + 15)
+
+    def test_the_file_is_a_session_that_opens_as_one_with_its_note(self):
+        recs = self.readings(80)
+        s = session_of(*recs)
+        s.path = "/x/session-20261125-140310.jsonl"
+        s.add(ev.event(T0 + 50, "rail", "too early"))
+        s.add(ev.event(T0 + 300, "rail", "LoRa rail on"))
+        picked = ev.last_window(s.samples, 300, T0 + 395)
+        records = ev.bookmark_records(s, picked, T0 + 400, "  heard   it\nhere  ")
+        self.assertEqual([r["k"] for r in records][:2] + [r["k"] for r in records][-2:], ["start", "sample", "event", "stop"])
+        self.assertEqual(records[0]["bookmark"], {"made": ev.stamp(T0 + 400), "seconds": 300, "note": "heard it here",
+                                                  "from": "session-20261125-140310.jsonl"})
+        path = ev.save_bookmark(records, T0 + 400)
+        self.assertRegex(os.path.basename(path), r"^session-\d{8}-\d{6}-bookmark\.jsonl$")
+        self.assertEqual(os.path.dirname(path), reports.state_dir())
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(reports.state_dir()).st_mode), 0o700)
+        self.assertEqual(ev.files(), [path])
+        back = ev.load(path)
+        self.assertEqual((len(back.samples), back.t0, back.t1), (61, T0 + 95, T0 + 395))
+        self.assertEqual([e["text"] for e in back.events], ["LoRa rail on"])
+        self.assertEqual(back.stop["summary"]["samples"], 61)
+        self.assertEqual(ev.bookmark_note(back), "heard it here")
+        self.assertIsNone(ev.bookmark_note(s))
+        self.assertTrue(ev.picker_label(path).startswith("Bookmark "))
+        self.assertLess(os.path.getsize(path), 20 * 1024)
+
+    def test_two_bookmarks_in_the_same_second_get_their_own_files_and_delete_takes_only_one(self):
+        records = ev.bookmark_records(session_of(), self.readings(3), T0)
+        a, b = ev.save_bookmark(records, T0), ev.save_bookmark(records, T0)
+        self.assertNotEqual(a, b)
+        self.assertTrue(b.endswith("-bookmark-2.jsonl"))
+        self.assertEqual(ev.files(), sorted([a, b]))
+        self.assertEqual(ev.delete(b), 1)
+        self.assertEqual(ev.files(), [a])
+
+    def test_a_long_note_is_cut_and_an_empty_one_is_kept_empty(self):
+        records = ev.bookmark_records(session_of(), self.readings(2), T0, "x" * 2000)
+        self.assertEqual(len(records[0]["bookmark"]["note"]), ev.NOTE_MAX)
+        self.assertEqual(ev.bookmark_records(session_of(), self.readings(2), T0)[0]["bookmark"]["note"], "")
+
+    def test_the_picker_names_a_bookmark_as_one(self):
+        self.assertEqual(ev.picker_label("/x/session-20261125-140310-bookmark-2.jsonl", 9 * 1024),
+                         "Bookmark 25 Nov 2026 14:03:10  (9 KB)")
 
 
 class TabTests(unittest.TestCase):

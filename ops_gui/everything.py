@@ -23,6 +23,11 @@ A session is written as it goes to a private file beside the field log (session-
 object a line, pushed to the disk at every reading so a flat battery loses nothing). It holds positions, so it
 never goes into a problem report, and Settings > Clear removes it with the other logs.
 
+Bookmark keeps the last few minutes of the readings the tab already holds (the session being recorded, or the
+saved one that is open, up to the moment picked on the chart) as a small session file of its own, with an optional
+note: session-YYYYMMDD-HHMMSS-bookmark.jsonl, in the same format and the same private folder, so it opens from
+Saved sessions like any other. It takes no reading of its own. Bookmarks are never deleted by themselves.
+
 The helpers above build_page are pure so they can be tested without a radio, a receiver or a window.
 """
 import bisect
@@ -39,10 +44,16 @@ from . import fieldlog, gps_track, position, walkmap
 
 SAMPLE_EVERY = 5.0                   # seconds between readings
 BUCKET_SECONDS = 60.0                # "what changed together" compares one minute with the next
+MIN_READINGS = 12                    # fewer readings than this behind a pair of counts: too few to compare
+STRONG_SHARE = 0.5                   # changed together in at least half the minutes compared: "strongly"
+CAVEAT = ("Readings that change together are not shown to be connected: two things can both follow a third, "
+          "such as the time of day or this computer being moved.")
 FILE_CAP = 20 * 1024 * 1024          # a session stops growing here (an hour is about a third of a megabyte)
 RESTART_SLACK = 20.0                 # a scan that ended this close to its time limit ended by itself
 MIN_MOVE_M = 5.0                     # GPS wander smaller than this is not counted as distance moved
 VIEWS = (("Whole session", 0), ("Last 5 minutes", 300), ("Last 30 minutes", 1800))
+BOOKMARK_SECONDS = 300.0             # how much a bookmark keeps: the last five minutes, or all there is if less
+NOTE_MAX = 500                       # characters of a bookmark's note that are kept
 VERSION = 1
 
 SOURCES = (("wifi", "Wi-Fi"), ("bt", "Bluetooth"), ("gps", "GPS"), ("mesh", "Mesh"), ("sdr", "SDR"),
@@ -72,7 +83,8 @@ RAIL_LABEL = {"GPS": "GPS", "LORA": "LoRa", "SDR": "SDR", "USB": "USB"}
 NOTABLE = (("New network", "network"), ("Network security changed", "security"), ("Same name, no security", "security"),
            ("Deauthentication burst", "security"))
 _MAC = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
-_NAME = re.compile(r"^session-\d{8}-\d{6}\.(jsonl|csv|gpx|geojson)$")
+_NAME = re.compile(r"^session-\d{8}-\d{6}(-bookmark(-\d+)?)?\.(jsonl|csv|gpx|geojson)$")
+_STEM = re.compile(r"^session-(\d{8}-\d{6})(-bookmark(?:-\d+)?)?\.jsonl$")
 
 
 # ---- which sources can be read right now
@@ -640,7 +652,8 @@ def bucket_means(session, seconds=BUCKET_SECONDS):
     t0, found = session.t0, {}
     for s in session.samples:
         i = int((s["ts"] - t0) // seconds)
-        b = found.setdefault(i, {"i": i, "t": t0 + i * seconds, "sums": {}, "lat": None, "lon": None})
+        b = found.setdefault(i, {"i": i, "t": t0 + i * seconds, "sums": {}, "lat": None, "lon": None, "n": 0})
+        b["n"] += 1
         for key in TOGETHER:
             v = value(s, key)
             if v is not None:
@@ -648,7 +661,7 @@ def bucket_means(session, seconds=BUCKET_SECONDS):
                 b["sums"][key] = (total + v, n + 1)
         if "lat" in s and "lon" in s:
             b["lat"], b["lon"] = s["lat"], s["lon"]
-    return [{"i": b["i"], "t": b["t"], "lat": b["lat"], "lon": b["lon"],
+    return [{"i": b["i"], "t": b["t"], "lat": b["lat"], "lon": b["lon"], "n": b["n"],
              "means": {k: total / n for k, (total, n) in b["sums"].items()}} for _i, b in sorted(found.items())]
 
 
@@ -672,7 +685,7 @@ def changed_together(session, seconds=BUCKET_SECONDS):
     buckets = bucket_means(session, seconds)
     by_i = {b["i"]: b for b in buckets}
     shaken = [e["ts"] for e in session.events if e.get("what") == "source"]
-    rows, tally = [], {}
+    rows, tally, used = [], {}, {}
     pairs = [(a, b) for n, a in enumerate(TOGETHER) for b in TOGETHER[n + 1:] if a.split(".")[0] != b.split(".")[0]]
     for cur in buckets:
         prev = by_i.get(cur["i"] - 1)
@@ -691,8 +704,13 @@ def changed_together(session, seconds=BUCKET_SECONDS):
             da = direction(prev["means"][a], cur["means"][a])
             db = direction(prev["means"][b], cur["means"][b])
             if not settling:
-                t = tally.setdefault((a, b), {"a": a, "b": b, "minutes": 0, "same": 0, "opposite": 0})
+                t = tally.setdefault((a, b), {"a": a, "b": b, "minutes": 0, "same": 0, "opposite": 0, "readings": 0})
                 t["minutes"] += 1
+                seen = used.setdefault((a, b), set())
+                for bucket in (prev, cur):                       # the readings behind the minutes compared
+                    if bucket["i"] not in seen:
+                        seen.add(bucket["i"])
+                        t["readings"] += bucket.get("n", 0)
                 if da and db:
                     t["same" if da == db else "opposite"] += 1
             if da and db:
@@ -701,6 +719,28 @@ def changed_together(session, seconds=BUCKET_SECONDS):
                              "b_to": round(cur["means"][b], 1), "same": da == db, "settling": settling,
                              "moved_m": moved, "lat": cur["lat"], "lon": cur["lon"]})
     return {"rows": rows, "pairs": [tally[p] for p in pairs if p in tally]}
+
+
+def pair_explanation(tally, minimum=MIN_READINGS):
+    """One plain line about a pair of counts: which way they changed together, over how many minutes, from how
+    many readings, and how often, as a word and the figure it comes from. It says what was measured and no more."""
+    a, b = LABELS.get(tally.get("a"), tally.get("a")), LABELS.get(tally.get("b"), tally.get("b"))
+    minutes, readings = int(tally.get("minutes") or 0), int(tally.get("readings") or 0)
+    same, opposite = int(tally.get("same") or 0), int(tally.get("opposite") or 0)
+    if readings < minimum or minutes < 1:
+        return f"{a} and {b}: too few readings to compare."
+    over = f"over {minutes} minute{'s' if minutes != 1 else ''} compared, from {readings} readings"
+    if not same and not opposite:
+        return f"{a} and {b}: did not change in the same minute ({over})."
+    if same > opposite:
+        how, count = "rose together or fell together", same
+    elif opposite > same:
+        how, count = "one rose as the other fell", opposite
+    else:
+        how, count = "changed in the same minute, as often the same way as opposite ways", same + opposite
+    share = count / minutes
+    word = "strongly" if share >= STRONG_SHARE else "loosely"
+    return f"{a} and {b}: {how}, {word} ({share:.2f}: {count} of {minutes} minutes), {over}."
 
 
 def together_lines(result, limit=40):
@@ -715,6 +755,9 @@ def together_lines(result, limit=40):
         both = p["same"] + p["opposite"]
         lines.append(f"{LABELS[p['a']]} and {LABELS[p['b']]}: in {p['minutes']} minute{'s' if p['minutes'] != 1 else ''} "
                      f"compared, both changed in {both} (the same way in {p['same']}, opposite ways in {p['opposite']}).")
+        lines.append("  " + pair_explanation(p))
+    if pairs:
+        lines.append(CAVEAT)
 
     def word(a, b):
         return "rose" if b > a else "fell"
@@ -839,11 +882,15 @@ def load(path):
 
 
 def picker_label(path, size=None):
-    """How a saved session is named in the picker: when it started and how big it is."""
+    """How a saved session is named in the picker: when it started (or, for a bookmark, when it was made) and
+    how big it is."""
     name = os.path.basename(path)
+    found = _STEM.match(name)
     try:
-        when = time.strftime("%d %b %Y %H:%M:%S", time.strptime(name[len("session-"):-len(".jsonl")], "%Y%m%d-%H%M%S"))
-    except ValueError:
+        when = time.strftime("%d %b %Y %H:%M:%S", time.strptime(found.group(1), "%Y%m%d-%H%M%S"))
+        if found.group(2):
+            when = "Bookmark " + when
+    except (AttributeError, ValueError):
         when = name
     if size is None:
         try:
@@ -851,6 +898,88 @@ def picker_label(path, size=None):
         except OSError:
             size = 0
     return f"{when}  ({max(1, round(size / 1024))} KB)"
+
+
+def last_window(samples, seconds=BOOKMARK_SECONDS, now=None):
+    """The readings from the `seconds` up to `now`, both ends included, oldest first. Readings stamped after
+    `now` (a moment picked further back on the chart) are left out, and so is anything without a time."""
+    kept = [s for s in samples or () if isinstance(s, dict) and isinstance(s.get("ts"), (int, float))
+            and not isinstance(s.get("ts"), bool)]
+    if now is None:
+        now = max((s["ts"] for s in kept), default=0.0)
+    return sorted((s for s in kept if now - seconds <= s["ts"] <= now), key=lambda s: s["ts"])
+
+
+def bookmark_until(recording, scrub, samples, now):
+    """The moment a bookmark ends: now while recording, else the moment picked on the chart, else the last
+    reading of the saved session that is open."""
+    if recording:
+        return now
+    if isinstance(scrub, (int, float)):
+        return scrub
+    return max((s["ts"] for s in samples or () if isinstance(s.get("ts"), (int, float))), default=now)
+
+
+def clean_note(note):
+    return " ".join(str(note or "").split())[:NOTE_MAX]
+
+
+def bookmark_records(session, samples, made, note="", seconds=BOOKMARK_SECONDS):
+    """The lines of a bookmark file, in the same format as a session: a start line (saying it is a bookmark,
+    when it was made and the note), the readings, the events among them, and a stop line with the summary.
+    None when there are no readings, so nothing is saved."""
+    samples = sorted(samples or (), key=lambda s: s["ts"])
+    if not samples:
+        return None
+    t0, t1 = samples[0]["ts"], samples[-1]["ts"]
+    every = getattr(session, "every", SAMPLE_EVERY)
+    start = {"k": "start", "t": stamp(t0), "ts": t0, "v": VERSION, "every": every,
+             "sources": dict((getattr(session, "start", None) or {}).get("sources") or {}),
+             "bookmark": {"made": stamp(made), "seconds": seconds, "note": clean_note(note),
+                          "from": os.path.basename(getattr(session, "path", None) or "")}}
+    events = sorted((e for e in getattr(session, "events", ()) or () if t0 <= e.get("ts", -1) <= t1),
+                    key=lambda e: e["ts"])
+    part = Session()
+    for rec in [start] + samples + events:
+        part.add(rec)
+    return [start] + samples + events + [stop_record(t1, summarise(part, t1))]
+
+
+def bookmark_text(records):
+    """The file's content: one JSON object a line, exactly as a session is written."""
+    return "".join(json.dumps(rec, separators=(",", ":"), default=str) + "\n" for rec in records or ())
+
+
+def bookmark_note(session):
+    """The note of a bookmark that has been opened, or None when it is an ordinary session."""
+    mark = (getattr(session, "start", None) or {}).get("bookmark")
+    return clean_note(mark.get("note")) if isinstance(mark, dict) else None
+
+
+def save_bookmark(records, made=None, directory=None):
+    """Write a bookmark beside the sessions, private, under a name that cannot be taken twice. Returns the
+    path, or None when there was nothing to save."""
+    if not records:
+        return None
+    made = time.time() if made is None else made
+    directory = directory or session_dir()
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    base = time.strftime("session-%Y%m%d-%H%M%S-bookmark", time.localtime(made))
+    for n in range(1, 1000):
+        path = os.path.join(directory, base + ("" if n == 1 else f"-{n}") + ".jsonl")
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(f"too many bookmarks made at once in {directory}")
+    with os.fdopen(fd, "w") as f:
+        f.write(bookmark_text(records))
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(path, 0o600)
+    return path
 
 
 def csv_text(session):
@@ -907,7 +1036,7 @@ def delete(path):
 
 def build_page(win):
     from PyQt6.QtCore import QObject, QPoint, QTimer, Qt, pyqtSignal
-    from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter
+    from PyQt6.QtGui import QColor, QFont, QFontDatabase, QKeySequence, QPainter, QShortcut
     from PyQt6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout,
                                  QWidget)
     from . import bt_panel, home_panel, pixel, sense, statusbar, style, survey
@@ -1102,8 +1231,15 @@ def build_page(win):
             self.remove.clicked.connect(self.delete)
             self.go = QPushButton("Start")
             self.go.clicked.connect(self.toggle)
+            self.mark = QPushButton("Bookmark")
+            self.mark.setToolTip("Keep the last 5 minutes of readings shown here as a small saved session, with a "
+                                 "note (Ctrl+B)")
+            self.mark.clicked.connect(self.bookmark)
+            QShortcut(QKeySequence("Ctrl+B"), self, activated=self.bookmark,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
             row.addWidget(self.state, 1)
-            for w in (self.span_pick, self.pick, self.map_b, self.export, self.gpx, self.geojson, self.remove, self.go):
+            for w in (self.span_pick, self.pick, self.map_b, self.export, self.gpx, self.geojson, self.remove,
+                      self.mark, self.go):
                 w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 row.addWidget(w)
             hl.addLayout(row)
@@ -1551,8 +1687,42 @@ def build_page(win):
             self.session = session
             self.span_pick.setCurrentIndex(0)
             ended = "" if session.stop else " It has no end line: it was cut short."
-            self.show_review(f"Saved session of {picker_label(session.path).split('  (')[0]}.{ended}")
+            note = bookmark_note(session)
+            if note is None:
+                self.show_review(f"Saved session of {picker_label(session.path).split('  (')[0]}.{ended}")
+            else:
+                self.show_review(f"{picker_label(session.path).split('  (')[0]}." + (f" Note: {note}" if note else ""))
             self.say(f"{session.path} (private). Drag across the chart to read any moment; double click to let go.")
+
+        def bookmark(self):
+            """Keep the last few minutes of what the tab holds. Nothing is read or started for it."""
+            s = self.session
+            if s is None or not s.samples:
+                self.say("Nothing to bookmark: there are no readings here yet. Readings are only taken while a "
+                         "session is recording, or come from a saved session you open.")
+                return
+            until = bookmark_until(self.recording, self.chart.scrub, s.samples, time.time())
+            picked = last_window(s.samples, BOOKMARK_SECONDS, until)
+            if not picked:
+                self.say("Nothing to bookmark: there are no readings in the 5 minutes up to that moment.")
+                return
+            from PyQt6.QtWidgets import QInputDialog
+            note, ok = QInputDialog.getText(self, "Bookmark", "A note for this bookmark (you can leave it empty). "
+                                            "Enter saves it; Escape saves nothing.")
+            if not ok:
+                self.say("Bookmark not saved.")
+                return
+            try:
+                path = save_bookmark(bookmark_records(s, picked, time.time(), note))
+            except OSError as exc:
+                self.say(f"Could not save the bookmark: {exc}")
+                return
+            took = duration_text(picked[-1]["ts"] - picked[0]["ts"])
+            self.say(f"Bookmarked {len(picked)} readings ({took}) to {path} (private). It opens from Saved "
+                     "sessions like any other session.")
+            win.activity.add(f"Everything bookmark saved: {os.path.basename(path)}")
+            if not self.recording:
+                self.fill_picker(s.path)
 
         def export_csv(self):
             if self.session is None or self.recording or not self.session.path:
