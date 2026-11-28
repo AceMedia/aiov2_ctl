@@ -152,64 +152,64 @@
   "sha256": "832c7edca0600504de5f4beb91b2dc523eb57358d3ed9a7101e289214742b964"
  },
  "img/install/cli-01-features.webp": {
-  "bytes": 27996,
-  "sha256": "c9e98f138fc3a8e4d5d9aa06b05aed3607abb8d16f15dba8cd70e9c6dc0cb648"
+  "bytes": 32018,
+  "sha256": "cbb29520ee7f864dd49510e2814d4b8b7bd7988da608846148dbd29130aebf40"
  },
  "img/install/cli-02-uninstall-plan.webp": {
-  "bytes": 26894,
-  "sha256": "ede2c10adac06403bcf7cb63f4ce42ad944b459b04a27837cfe256c6ce9835b8"
+  "bytes": 28418,
+  "sha256": "4896380aafc8217850ae08b881c8b22932865552532b5ebbb505b4d4301c591d"
  },
  "img/install/cli-03-uninstall-question.webp": {
-  "bytes": 28002,
-  "sha256": "a77da6f4350d1b246fb227111880a9541bf74d9f0620234dd2376eb9e013a4b9"
+  "bytes": 31380,
+  "sha256": "52df0567276097ab8c6fd3c42fd08f1681ced7d556904978ec6e4a8c60367901"
  },
  "img/install/cli-04-uninstall-result.webp": {
   "bytes": 21874,
   "sha256": "a072c58c26f72f930cfe18c99baa1539fb2a42cc428615f8317d4d417fe55ae5"
  },
  "img/install/cli-05-install-plan.webp": {
-  "bytes": 30792,
-  "sha256": "7d6e36bfb1e00eb703d2ae6ed6cdba8b3c8033f934aeb9fee6481e83532b9f85"
+  "bytes": 29204,
+  "sha256": "04d593e3d2a8a0aa011ecc9f41696700a591e455552c92d7b6d8ed73ea89c387"
  },
  "img/install/cli-06-install-question.webp": {
-  "bytes": 28758,
-  "sha256": "d346b73041d3cb226629f9b543779b7ec93980232e64798d9a81af23402bce4b"
+  "bytes": 34618,
+  "sha256": "6e8279d9f52fd15bcce74d9823132a00e908ccaf687aa4a1a5a4b5b01193a97b"
  },
  "img/install/cli-07-install-result.webp": {
   "bytes": 23092,
   "sha256": "9ec55aef940d1d84662cd281f4e6ec855c5fd207241552ff7a92d904062fa6e9"
  },
  "img/install/cli-08-install-picker.webp": {
-  "bytes": 18222,
-  "sha256": "c6e59600f3b42af13a5ab0977a3de915fc217373123ba328f2c92730309c38dc"
+  "bytes": 13400,
+  "sha256": "45993a6bd01c4f85e0a20da67c3aa4dd00fa42af299e59b80c73506fbae64f4d"
  },
  "img/install/cli-09-status.webp": {
-  "bytes": 8272,
-  "sha256": "01bde62d2392749931cf86e6b0cebf21da9b59a735c2848fbfdbfdbd13ff9c88"
+  "bytes": 8032,
+  "sha256": "23129899ae82859f478000e1655f46896ed6e76319cbef51ea207e3ec0f9ba5f"
  },
  "img/install/cli-10-channel.webp": {
-  "bytes": 4520,
-  "sha256": "4b1675ec50a4278d5ffad26e7cbbe95a7085a65932c296d6ef797bfddc07270a"
+  "bytes": 4412,
+  "sha256": "23b8c57f94fef9280ba582c30da6408ea51a48bb2f0dd5c60f314fd94390e0d7"
  },
  "img/install/cli-11-doctor.webp": {
-  "bytes": 2730,
-  "sha256": "43f720d2eabf5027a4ce5860d8748f9873b2d9252df547e1c5bb2ad068a44c39"
+  "bytes": 19648,
+  "sha256": "c0c0a95f035ab0d0ffde8febe233cd469efb9f2d34d5eff333d728757a4b339d"
  },
  "img/install/gui-01-choose.webp": {
-  "bytes": 27298,
-  "sha256": "a85b6663da61e8fa5d0bf0b5b6eba4167f6af31b4f4f77e97a1c4cd3d847d44a"
+  "bytes": 25784,
+  "sha256": "b453a29d38a357747b5953e11aa23d50a8f3ada161e50a8981cee5ab6754d63e"
  },
  "img/install/gui-02-everything-ticked.webp": {
-  "bytes": 25864,
-  "sha256": "753888e770e99de95b11d1de73e199a62d509e4e06750e5bac940d4f51f032f4"
+  "bytes": 26776,
+  "sha256": "c7159da31cd955861a98e9ab0566141e14f8c4446bbb610018e584006c213279"
  },
  "img/install/gui-03-one-feature-unticked.webp": {
-  "bytes": 28156,
-  "sha256": "cae04666ba81dccdf27ebd885f72645b1f96956adc136afbd4d0148ccef96fdb"
+  "bytes": 28974,
+  "sha256": "810eb13134d770bf1c17fb90781f210e8ac19051211327ac6f1cc5025c4bf36c"
  },
  "img/install/gui-04-plan-to-remove.webp": {
-  "bytes": 29846,
-  "sha256": "8e9cf9440f7231a870bc0f8ff5c1c23c6e621a59acd6f2453fb7fc1fa3052188"
+  "bytes": 29260,
+  "sha256": "a3cafb76fad6f4980ba999d42ab82bf4d47c72c8e35ee6346b178a3dcf855017"
  },
  "img/install/gui-05-removing.webp": {
   "bytes": 29808,
@@ -228,8 +228,8 @@
   "sha256": "5e1341d3f8992e4dde34bf3fdec9fc249af2d9165d789377a6294cdd6dc70599"
  },
  "img/install/gui-09-plan-to-install.webp": {
-  "bytes": 31590,
-  "sha256": "c041a6f6bc53387562ffe6b086776b3364c926fd308279ac103de107ba9b5503"
+  "bytes": 30380,
+  "sha256": "5f43ec0396fbbbb94801c78d90c06c7efc8b8fffdebd2e452eaccafe3252f379"
  },
  "img/install/gui-10-installed.webp": {
   "bytes": 20440,
@@ -240,7 +240,7 @@
   "sha256": "a5f7b35d2ae64b8e42d55d960b1f4e0685fa4c425c3ebadf80dae3934909dbe1"
  },
  "img/install/gui-12-repair-plan.webp": {
-  "bytes": 24454,
-  "sha256": "3805bbbed7ca18db450172e14becd4941481ecf278a0f45b71142c0ec17e6d37"
+  "bytes": 23224,
+  "sha256": "f392f64c440496b8e771d0a885196306107d9cfe0ff38f67f2e56979770a223f"
  }
 }
