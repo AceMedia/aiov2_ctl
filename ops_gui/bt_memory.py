@@ -473,6 +473,9 @@ class Travel:
             del entry["sightings"][:-MAX_SIGHTINGS]
         for mac in [a for a, e in self.trackers.items() if now - e["last"] > TRACKER_KEEP]:
             del self.trackers[mac]
+        if len(self.trackers) > MAX_TALLIED:                        # trackers change address: keep the latest
+            keep = sorted(self.trackers.values(), key=lambda e: e["last"], reverse=True)[:MAX_TALLIED]
+            self.trackers = {e["addr"]: e for e in keep}
 
     def tracker_facts(self, addr):
         """The facts for one tracker address that meets the rule, or None."""
