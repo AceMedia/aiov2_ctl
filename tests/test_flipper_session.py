@@ -91,6 +91,45 @@ class DeviceInfoTests(unittest.TestCase):
         self.assertEqual(s.about_rows({}), [("Details", "The Flipper has not described itself yet.")])
 
 
+class CapabilityTests(unittest.TestCase):
+    def test_stock_with_card_offers_everything(self):
+        caps = s.capabilities(s.parse_device_info(STOCK), {"mode": "cli", "sd_card": "present"})
+        self.assertEqual(set(caps), set(s.FEATURES))
+        self.assertTrue(all(ok for ok, _ in caps.values()))
+        self.assertEqual(s.unavailable_rows(caps), [])
+
+    def test_no_rpc_version_greys_screen_and_transfers_only(self):
+        caps = s.capabilities(s.parse_device_info(FORK), {"mode": "cli", "sd_card": "present"})
+        for key in ("live_screen", "copy", "send"):
+            self.assertFalse(caps[key][0], key)
+            self.assertIn("RPC", caps[key][1])
+        for key in ("files", "apps", "pins"):
+            self.assertTrue(caps[key][0], key)
+
+    def test_missing_card(self):
+        caps = s.capabilities(s.parse_device_info(STOCK), {"mode": "cli", "sd_card": "missing"})
+        self.assertFalse(caps["files"][0])
+        self.assertEqual(caps["files"][1], "The Flipper reports no SD card.")
+        self.assertTrue(caps["live_screen"][0])
+
+    def test_bridge_mode_turns_all_off(self):
+        caps = s.capabilities({}, {"mode": "bridge"})
+        self.assertFalse(any(ok for ok, _ in caps.values()))
+        self.assertEqual(len(s.unavailable_rows(caps)), len(s.FEATURES))
+
+    def test_unknown_layout_takes_nothing_away(self):
+        caps = s.capabilities({}, {"mode": "cli"})
+        self.assertTrue(all(ok for ok, _ in caps.values()))
+        self.assertTrue(all(ok for ok, _ in s.capabilities(None).values()))
+
+    def test_available(self):
+        caps = {"copy": (False, "x")}
+        self.assertFalse(s.available(caps, "copy"))
+        self.assertTrue(s.available(caps, "files"))
+        self.assertTrue(s.available(None, "copy"))
+        self.assertEqual(s.unavailable_rows(caps), [("Copy to uConsole", "x")])
+
+
 if __name__ == "__main__":
     unittest.main()
 

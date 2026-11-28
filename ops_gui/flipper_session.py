@@ -99,3 +99,49 @@ def about_rows(record):
         rows.append(("Reports", ", ".join(f"{n} {s}" for n, s in record["modules"])))
     return rows
 
+
+
+# ---- 2. Which of the tab's features can work on this Flipper ---------------------------------------------
+
+FEATURES = {
+    "live_screen": "Live display",
+    "files": "File browser",
+    "copy": "Copy to uConsole",
+    "send": "Send a file / new folder / install",
+    "apps": "App list",
+    "pins": "Reading the header pins",
+}
+_NEEDS_RPC = ("live_screen", "copy", "send")       # these go over the protobuf RPC session
+_NEEDS_SD = ("files", "copy", "send")
+
+
+def capabilities(record, status=None):
+    """{feature: (available, reason)} for the tab's existing features.
+
+    A feature is only switched off on real evidence that it cannot work: the Flipper is in USB-UART Bridge
+    mode, it reports no SD card, or it described itself without an RPC (protobuf) version, which the screen
+    and file transfers need. When the Flipper has not described itself at all nothing is switched off, so an
+    unexpected device_info layout never takes away something that works today."""
+    status = status or {}
+    out = {}
+    for key in FEATURES:
+        ok, why = True, ""
+        if status.get("mode") == "bridge":
+            ok, why = False, "The Flipper is in USB-UART Bridge mode. Press Back on it for the CLI."
+        elif key in _NEEDS_SD and status.get("sd_card") == "missing":
+            ok, why = False, "The Flipper reports no SD card."
+        elif key in _NEEDS_RPC and record and not record.get("rpc_version"):
+            ok, why = False, "This firmware does not report an RPC version, which this needs."
+        out[key] = (ok, why)
+    return out
+
+
+def unavailable_rows(caps):
+    """[(feature label, reason)] for the features switched off, to show under the About block."""
+    return [(FEATURES.get(k, k), why) for k, (ok, why) in (caps or {}).items() if not ok]
+
+
+def available(caps, feature):
+    """True unless `caps` says the feature cannot work (unknown features are left alone)."""
+    return bool((caps or {}).get(feature, (True, ""))[0])
+
