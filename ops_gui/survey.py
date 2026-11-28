@@ -142,10 +142,20 @@ def probe_rows(snap):
 
 
 def channel_shares(snap):
-    """[(channel, share 0..1 of the busiest)] in channel order, for the bars."""
-    frames = {int(c): v.get("frames", 0) for c, v in snap.get("channels", {}).items() if str(c).isdigit()}
-    top = max(frames.values(), default=0)
-    return [(c, (n / top if top else 0.0)) for c, n in sorted(frames.items())]
+    """[(channel, share 0..1 of the busiest)] in channel order, for the bars.
+
+    The share is of frames per second of listening when the listener reports it, so a channel listened to for
+    longer does not look busier. A channel it reports as not listened to has share None (no bar), not zero. An
+    older listener without listening times is shown by raw frame counts, as before."""
+    chans = {int(c): v for c, v in snap.get("channels", {}).items() if str(c).isdigit() and isinstance(v, dict)}
+    rate = {}
+    for c, v in chans.items():
+        if "seconds" in v:
+            rate[c] = v.get("per_second")
+        else:
+            rate[c] = v.get("frames", 0)
+    top = max((r for r in rate.values() if r is not None), default=0)
+    return [(c, None if r is None else (r / top if top else 0.0)) for c, r in sorted(rate.items())]
 
 
 def summary(snap):
@@ -286,6 +296,10 @@ def build_page(win, sense_network=None):
             n = len(self.shares)
             slot = w / n
             for i, (ch, share) in enumerate(self.shares):
+                if share is None:                     # not listened to: no bar, and the label greyed
+                    p.setPen(QColor("#6e6e6e"))
+                    p.drawText(QRectF(i * slot, h - 16, slot, 16), Qt.AlignmentFlag.AlignCenter, str(ch))
+                    continue
                 bar = max(2.0, share * (h - 28))
                 p.fillRect(QRectF(i * slot + 2, h - 18 - bar, max(2.0, slot - 4), bar), QColor("#e95420"))
                 p.setPen(QColor("#b9aec6"))

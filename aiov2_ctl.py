@@ -5113,7 +5113,11 @@ def security_of(capability, ies):
 
 
 def parse_dot11(raw, off):
-    """What a frame says about who is around, or None. Never reads past the header unless it must."""
+    """What a frame says about who is around, or None. Never reads past the header unless it must.
+
+    Every result that names a sender carries "tx", the transmitter address (address 2). The signal strength in
+    the radiotap header was measured on that transmitter's frame, so it belongs to "tx" and to nobody else: an
+    access point's frame to a station says nothing about how strongly the station is heard."""
     if len(raw) < off + 16:
         return None
     fc0, fc1 = raw[off], raw[off + 1]
@@ -5123,7 +5127,7 @@ def parse_dot11(raw, off):
         # Request to send, block ack and block ack request name both ends. Which one is the access point is
         # decided later, from the access points already heard.
         if sub in (8, 9, 11) and not a1[0] & 1 and not a2[0] & 1:
-            return {"kind": "pair", "a": _mac(a1), "b": _mac(a2)}
+            return {"kind": "pair", "a": _mac(a1), "b": _mac(a2), "tx": _mac(a2)}
         return None
     if len(raw) < off + 24:
         return None
@@ -5138,38 +5142,70 @@ def parse_dot11(raw, off):
             ssid = ies.get(0, b"")
             ssid = "" if ssid and not any(ssid) else ssid.decode("utf-8", "replace")
             ch = ies.get(3)[0] if ies.get(3) else (ies.get(61)[0] if ies.get(61) else None)
-            return {"kind": kind, "bssid": _mac(a3), "ssid": ssid, "channel": ch, "security": security_of(cap, ies)}
+            return {"kind": kind, "bssid": _mac(a3), "ssid": ssid, "channel": ch, "security": security_of(cap, ies),
+                    "tx": _mac(a2)}
         if kind == "probereq":
             if a2[0] & 1:
                 return None
             ssid = _ies(raw[off + 24:]).get(0, b"")
-            return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else ""}
+            return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else "",
+                    "tx": _mac(a2)}
         if kind in ("deauth", "disassoc"):
             return {"kind": kind, "src": _mac(a2), "dst": _mac(a1), "bssid": _mac(a3)}
         if sub in (0, 1, 2, 3, 11, 13) and not a1[0] & 1 and not a2[0] & 1 and not a3[0] & 1:
             # Association, reassociation, authentication and action frames: whichever end is the BSSID is the
             # access point, the other is a device talking to it.
             if a3 == a2:
-                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a1)}
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a1), "tx": _mac(a2)}
             if a3 == a1:
-                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a2)}
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a2), "tx": _mac(a2)}
         return None
     if ftype == 2:
+        # To DS only: a1 = BSSID, a2 = station (the transmitter). From DS only: a1 = station, a2 = BSSID (the
+        # transmitter). Neither (a direct or ad hoc link) and both (a bridge between access points) do not say
+        # which end is a station of which network, so they name nobody.
         to_ds, from_ds = bool(fc1 & 1), bool(fc1 & 2)
         if to_ds == from_ds:
             return None
         bssid, sta = (a1, a2) if to_ds else (a2, a1)
         if sta[0] & 1 or bssid[0] & 1 or sta == bssid:
             return None
-        return {"kind": "data", "bssid": _mac(bssid), "sta": _mac(sta)}
+        return {"kind": "data", "bssid": _mac(bssid), "sta": _mac(sta), "tx": _mac(a2)}
     return None
 
 
+def channel_activity(counts, dwell):
+    """{channel: activity} from frame counts and the seconds each channel was actually listened to.
+
+    Channels are listened to for different lengths of time (a failed channel change, or the report cycle, can
+    leave one tuned longer), so raw counts are not comparable. Each entry keeps the raw "frames" and "bytes",
+    adds "seconds" listened and "per_second" (frames per second of listening: a frame rate, not airtime), and
+    a channel never listened to has "per_second" None and "note" "not listened to" rather than a zero."""
+    out = {}
+    for ch in sorted(set(counts) | set(dwell)):
+        got = counts.get(ch, {})
+        frames, seconds = got.get("frames", 0), max(0.0, float(dwell.get(ch, 0.0)))
+        entry = {"frames": frames, "bytes": got.get("bytes", 0), "seconds": round(seconds, 2)}
+        if seconds > 0:
+            entry["per_second"] = round(frames / seconds, 2)
+        else:
+            entry["per_second"], entry["note"] = None, "not listened to"
+        out[ch] = entry
+    return out
+
+
 class Survey:
-    """The tables a survey fills in. Feed it frames with see(); read it with snapshot()."""
+    """The tables a survey fills in. Feed it frames with see(); say how long each channel was listened to with
+    listened(); read it with snapshot()."""
 
     def __init__(self):
         self.aps, self.stations, self.probes, self.deauth, self.channels = {}, {}, {}, {}, {}
+        self.dwell = {}
+
+    def listened(self, channel, seconds):
+        """Add `seconds` of actual listening on `channel` (only time the radio was really tuned there)."""
+        if channel is not None and seconds > 0:
+            self.dwell[channel] = self.dwell.get(channel, 0.0) + seconds
 
     def see(self, raw, now):
         fields = radiotap_fields(raw)
@@ -5185,17 +5221,21 @@ class Survey:
         if not info or signal is None or not -120 <= signal < 0:
             return info
         kind = info["kind"]
+        tx = info.get("tx")
         if kind == "pair":
             if info["a"] in self.aps:
-                info = {"kind": "data", "bssid": info["a"], "sta": info["b"]}
+                info = {"kind": "data", "bssid": info["a"], "sta": info["b"], "tx": tx}
             elif info["b"] in self.aps:
-                info = {"kind": "data", "bssid": info["b"], "sta": info["a"]}
+                info = {"kind": "data", "bssid": info["b"], "sta": info["a"], "tx": tx}
             else:
                 return info
             kind = "data"
         if kind in ("beacon", "proberesp"):
+            if tx != info["bssid"] and info["bssid"] not in self.aps:
+                return info                      # sent by someone other than the access point it names
             ap = self.aps.setdefault(info["bssid"], {"first": now, "beacons": 0, "ssid": "", "rssi": float(signal)})
-            ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
+            if tx == info["bssid"]:
+                ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
             ap["last"], ap["security"] = now, info["security"]
             ap["channel"] = info["channel"] or ch or ap.get("channel")
             if info["ssid"]:
@@ -5203,10 +5243,15 @@ class Survey:
             if kind == "beacon":
                 ap["beacons"] += 1
         elif kind == "data":
-            sta = self.stations.setdefault(info["sta"], {"frames": 0, "rssi": float(signal)})
+            # The frame counts towards the station either way, but its signal goes to whichever end sent it.
+            sta = self.stations.setdefault(info["sta"], {"frames": 0, "rssi": None})
             sta.update(bssid=info["bssid"], last=now)
             sta["frames"] += 1
-            sta["rssi"] = 0.7 * sta["rssi"] + 0.3 * signal
+            if tx == info["sta"]:
+                sta["rssi"] = float(signal) if sta["rssi"] is None else 0.7 * sta["rssi"] + 0.3 * signal
+            elif tx == info["bssid"] and info["bssid"] in self.aps:
+                ap = self.aps[info["bssid"]]
+                ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
         elif kind == "probereq":
             pr = self.probes.setdefault(info["sta"], {"ssids": [], "count": 0, "rssi": float(signal)})
             pr["count"] += 1
@@ -5234,12 +5279,13 @@ class Survey:
             "aps": [{"bssid": b, "ssid": a["ssid"], "channel": a.get("channel"), "security": a.get("security", ""),
                      "rssi": round(a["rssi"], 1), "beacons": a["beacons"], "first": round(a["first"], 1),
                      "last": round(a["last"], 1)} for b, a in aps],
-            "stations": [{"mac": m, "bssid": s["bssid"], "rssi": round(s["rssi"], 1), "frames": s["frames"],
+            "stations": [{"mac": m, "bssid": s["bssid"],
+                          "rssi": None if s["rssi"] is None else round(s["rssi"], 1), "frames": s["frames"],
                           "last": round(s["last"], 1)} for m, s in stas],
             "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1),
                         "last": round(p["last"], 1)} for m, p in probes],
             "deauth": sorted(floods, key=lambda f: -f["frames"]),
-            "channels": {str(c): v for c, v in sorted(self.channels.items())},
+            "channels": {str(c): v for c, v in channel_activity(self.channels, self.dwell).items()},
         }
 
 
@@ -5380,6 +5426,9 @@ def survey_run(iface, band, seconds, emit, pcap=False):
     try:
         sock = monitor_setup(iface, channels[0])
         iw = _tool("iw")
+        # The channel the radio is really on, and since when. Time is credited to it only: a channel change
+        # that fails leaves the radio where it was, so that time belongs to the old channel.
+        tuned, tuned_at = channels[0], time.monotonic()
         index, hop_at, report_at = 0, time.monotonic() + SURVEY_DWELL, time.monotonic() + SURVEY_EVERY
         end = time.monotonic() + seconds
         while time.monotonic() < end:
@@ -5392,10 +5441,13 @@ def survey_run(iface, band, seconds, emit, pcap=False):
                 pass
             now = time.monotonic()
             if now >= hop_at and len(channels) > 1:
+                survey.listened(tuned, now - tuned_at)
+                tuned_at = now
                 for _ in range(len(channels)):
                     index = (index + 1) % len(channels)
                     try:
                         _monitor_cmd(iw, "dev", iface, "set", "channel", str(channels[index]))
+                        tuned, tuned_at = channels[index], time.monotonic()
                         break
                     except subprocess.CalledProcessError:
                         channels.pop(index)         # this radio or region cannot use it
@@ -5404,6 +5456,9 @@ def survey_run(iface, band, seconds, emit, pcap=False):
                         index %= len(channels)
                 hop_at = now + SURVEY_DWELL
             if now >= report_at:
+                now = time.monotonic()
+                survey.listened(tuned, now - tuned_at)
+                tuned_at = now
                 emit(survey.snapshot(time.time(), channels[index] if channels else None))
                 report_at = now + SURVEY_EVERY
     except KeyboardInterrupt:
@@ -6102,6 +6157,83 @@ def check_mesh(known, active, rail, spi_node):
                      "start meshtasticd, to use it.")]
 
 
+def parse_iw_modes(text):
+    """The interface modes listed under 'Supported interface modes:' in 'iw phy' output, as a list of lower case
+    names (for example ['managed', 'monitor']), or None when the output has no such list."""
+    modes, inside = None, False
+    for line in (text or "").splitlines():
+        if re.match(r"^\s*Supported interface modes:", line):
+            modes, inside = [], True
+            continue
+        if inside:
+            m = re.match(r"^\s*\*\s*(.+?)\s*$", line)
+            if not m:
+                inside = False
+                continue
+            modes.append(m.group(1).lower())
+    return modes
+
+
+def parse_iw_link_freq(text):
+    """The frequency in MHz from 'iw dev <iface> link' when connected, or None when not connected."""
+    if not text or "Connected to" not in text:
+        return None
+    m = re.search(r"^\s*freq:\s*(\d+)", text, re.M)
+    return int(float(m.group(1))) if m else 0
+
+
+def check_wifi_monitor(iface, driver, kernel, iw_found, phy_text, link_text):
+    """
+    What can be told about listening (monitor mode) on the internal card without changing anything.
+    iface: its interface name, or None when the card is not present (it is on a switchable power rail and is
+    often off). phy_text: 'iw phy <phy> info' output, link_text: 'iw dev <iface> link' output. Advertising
+    monitor mode does not prove it works on this kernel; only a real listen shows that.
+    """
+    if not iface:
+        return [("info", "Wi-Fi listening: the internal card (USB 0e8d:7961) is not present, so there is nothing "
+                         "to check. It is on a switchable power rail and is often off.")]
+    about = f"{iface}, driver {driver or 'unknown'}, kernel {kernel or 'unknown'}"
+    if not iw_found:
+        return [("info", f"Wi-Fi listening: {about}. 'iw' is not installed, so monitor mode support cannot be read. "
+                         "Install it with: sudo apt install iw")]
+    modes = parse_iw_modes(phy_text)
+    out = []
+    if modes is None:
+        out.append(("info", f"Wi-Fi listening: {about}. Could not read the card's supported modes from 'iw phy'."))
+    elif "monitor" in modes:
+        out.append(("ok", f"Wi-Fi listening: {about}. The card advertises monitor mode. That it works on this "
+                          "kernel is only shown by a real listen (Survey or Sense)."))
+    else:
+        out.append(("warn", f"Wi-Fi listening: {about}. The card does not advertise monitor mode, so Survey and "
+                            "Sense cannot listen with it."))
+    freq = parse_iw_link_freq(link_text)
+    if freq is not None:
+        where = f" on channel {freq_to_channel(freq)} ({freq} MHz)" if freq and freq_to_channel(freq) else ""
+        out.append(("info", f"Wi-Fi listening: {iface} is connected to a network{where}. While it is connected the "
+                            "card stays on that network's channel, so listening follows that channel; Survey and "
+                            "Sense ask for it to be disconnected first."))
+    return out
+
+
+def _doctor_wifi_monitor():
+    """Gather check_wifi_monitor's inputs. Reads only: sysfs, 'iw dev', 'iw phy ... info' and 'iw dev ... link'."""
+    iface, driver = None, ""
+    for radio in detect_wifi_radios():
+        if radio["kind"] == "internal-usb":
+            iface, driver = radio["name"], radio["driver"]
+            break
+    if not iface:
+        return check_wifi_monitor(None, "", "", False, None, None)
+    iw = _tool("iw")
+    phy_text = link_text = None
+    if iw:
+        phy = (read_sysfs(os.path.join(SYS_NET, iface, "phy80211", "name")) or "").strip()
+        if re.match(r"^[A-Za-z0-9_.-]{1,32}$", phy):
+            phy_text = _doctor_cmd([iw, "phy", phy, "info"])
+        link_text = _doctor_cmd([iw, "dev", iface, "link"])
+    return check_wifi_monitor(iface, driver, os.uname().release, bool(iw), phy_text, link_text)
+
+
 def doctor_command():
     config = None
     try:
@@ -6156,6 +6288,7 @@ def doctor_command():
     results += check_tray_autostart(autostart_text, tray_up)
     results += check_mesh("meshtasticd.service" in units, state == "active", lora_rail,
                           os.path.exists("/dev/spidev1.0"))
+    results += _doctor_wifi_monitor()
 
     print("aiov2_ctl doctor (read only)")
     print("----------------------------")

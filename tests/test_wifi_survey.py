@@ -127,6 +127,14 @@ class FrameTests(unittest.TestCase):
             self.assertEqual(list(s.stations), ["02:11:22:33:44:55"], sub)
             self.assertEqual(s.stations["02:11:22:33:44:55"]["bssid"], "aa:bb:cc:00:11:22")
 
+    def test_management_frames_credit_the_signal_to_their_sender(self):
+        s = a.Survey()
+        s.see(frame(beacon(), signal=-40), 1.0)
+        s.see(frame(mgmt(11, STA, AP, AP, b"\x00" * 6), signal=-80), 2.0)    # access point to device
+        self.assertIsNone(s.stations["02:11:22:33:44:55"]["rssi"])
+        s.see(frame(mgmt(0, AP, STA, AP, b"\x00" * 6), signal=-75), 3.0)     # device to access point
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -75.0)
+
     def test_management_frames_between_two_strangers_name_nobody(self):
         other = bytes.fromhex("0a0b0c0d0e0f")
         s = a.Survey()
@@ -181,6 +189,156 @@ class FrameTests(unittest.TestCase):
     def test_frequency_to_channel(self):
         self.assertEqual([a.freq_to_channel(f) for f in (2412, 2437, 2484, 5180, 5745, 0, None, 9999)],
                          [1, 6, 14, 36, 149, None, None, None])
+
+
+class ChannelActivityTests(unittest.TestCase):
+    def test_unequal_listening_is_made_comparable(self):
+        out = a.channel_activity({1: {"frames": 100, "bytes": 5}, 6: {"frames": 20, "bytes": 2}}, {1: 10.0, 6: 1.0})
+        self.assertEqual(out[1], {"frames": 100, "bytes": 5, "seconds": 10.0, "per_second": 10.0})
+        self.assertEqual(out[6]["per_second"], 20.0)               # fewer frames, but busier per second
+
+    def test_a_channel_never_listened_to_is_not_zero(self):
+        out = a.channel_activity({3: {"frames": 2, "bytes": 1}}, {1: 0.5})
+        self.assertEqual(out[1], {"frames": 0, "bytes": 0, "seconds": 0.5, "per_second": 0.0})
+        self.assertIsNone(out[3]["per_second"])
+        self.assertEqual(out[3]["note"], "not listened to")
+        self.assertEqual(out[3]["frames"], 2)                       # the raw count is kept
+
+    def test_survey_records_listening_time(self):
+        s = a.Survey()
+        s.listened(6, 0.5)
+        s.listened(6, 0.25)
+        s.listened(1, 0)                                            # no time: nothing recorded
+        s.listened(None, 3)
+        for _ in range(3):
+            s.see(frame(beacon(), freq=2437), 1.0)
+        ch = s.snapshot(2.0)["channels"]
+        self.assertEqual(set(ch), {"6"})
+        self.assertEqual((ch["6"]["frames"], ch["6"]["seconds"], ch["6"]["per_second"]), (3, 0.75, 4.0))
+        s2 = a.Survey()
+        s2.see(frame(beacon(), freq=2437), 1.0)
+        self.assertEqual(s2.snapshot(2.0)["channels"]["6"]["note"], "not listened to")
+
+
+class SurveyRunTimingTests(unittest.TestCase):
+    """survey_run with a fake radio and clock: time goes to the channel the radio was really on."""
+
+    def run_survey(self, fail_channels=()):
+        import subprocess
+        clock = [100.0]
+
+        def monotonic():
+            clock[0] += 0.05
+            return clock[0]
+
+        class Sock:
+            def recv(self, _n):
+                raise a.socket.timeout
+
+            def close(self):
+                pass
+
+        def cmd(*args, check=True):
+            if args[-1] in {str(c) for c in fail_channels}:
+                raise subprocess.CalledProcessError(1, args)
+            return mock.Mock(stdout="")
+        snaps = []
+        with mock.patch.object(a.os, "geteuid", return_value=0), mock.patch.object(a, "monitor_check"), \
+                mock.patch.object(a, "monitor_setup", return_value=Sock()), \
+                mock.patch.object(a, "monitor_restore"), mock.patch.object(a, "_tool", return_value="/x"), \
+                mock.patch.object(a, "_monitor_cmd", side_effect=cmd), \
+                mock.patch.dict(a.SURVEY_BANDS, {"t": (1, 6, 11)}), \
+                mock.patch.object(a.time, "monotonic", side_effect=monotonic):
+            a.survey_run("wlan1", "t", 12.0, snaps.append)
+        return snaps
+
+    def test_time_is_shared_out_by_actual_listening(self):
+        ch = self.run_survey()[-1]["channels"]
+        self.assertEqual(set(ch), {"1", "6", "11"})
+        total = sum(v["seconds"] for v in ch.values())
+        self.assertGreater(total, 8.0)
+        self.assertLessEqual(total, 12.5)
+        for v in ch.values():
+            self.assertGreater(v["seconds"], 1.0)
+
+    def test_a_channel_that_cannot_be_tuned_gets_no_time(self):
+        ch = self.run_survey(fail_channels=(6,))[-1]["channels"]
+        self.assertNotIn("6", ch)
+        self.assertGreater(ch["1"]["seconds"], 1.0)
+        self.assertGreater(ch["11"]["seconds"], 1.0)
+
+
+class SignalOwnerTests(unittest.TestCase):
+    """A frame's signal belongs to its transmitter (address 2), never to the other end."""
+
+    OTHER = bytes.fromhex("0a0b0c0d0e0f")
+
+    def data_frame(self, to_ds, from_ds, a1, a2, a3, a4=b""):
+        fc1 = (1 if to_ds else 0) | (2 if from_ds else 0)
+        return bytes([0x08, fc1]) + b"\x00\x00" + a1 + a2 + a3 + b"\x00\x00" + a4 + b"payload"
+
+    def survey_with_ap(self, ap_signal=-40):
+        s = a.Survey()
+        s.see(frame(beacon(), signal=ap_signal), 1.0)
+        return s
+
+    def test_to_ds_credits_the_station(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(True, False, AP, STA, BROADCAST), signal=-70), 2.0)
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -70.0)
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_from_ds_credits_the_access_point_not_the_station(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(False, True, STA, AP, self.OTHER), signal=-60), 2.0)
+        sta = s.stations["02:11:22:33:44:55"]
+        self.assertEqual((sta["frames"], sta["rssi"]), (1, None))     # counted, but its strength is not known
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], 0.7 * -40 + 0.3 * -60)
+        snap = s.snapshot(3.0)
+        self.assertIsNone(snap["stations"][0]["rssi"])
+
+    def test_opposite_directions_keep_their_own_strengths(self):
+        s = self.survey_with_ap(-40)
+        for i in range(20):
+            s.see(frame(self.data_frame(True, False, AP, STA, BROADCAST), signal=-80), 2.0 + i)
+            s.see(frame(self.data_frame(False, True, STA, AP, self.OTHER), signal=-40), 2.5 + i)
+        self.assertAlmostEqual(s.stations["02:11:22:33:44:55"]["rssi"], -80.0)
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_neither_and_both_ds_bits_credit_nobody(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(False, False, STA, self.OTHER, AP), signal=-90), 2.0)
+        s.see(frame(self.data_frame(True, True, STA, AP, self.OTHER, STA), signal=-90), 3.0)
+        self.assertEqual(s.stations, {})
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_the_transmitter_is_address_two(self):
+        self.assertEqual(a.parse_dot11(self.data_frame(True, False, AP, STA, BROADCAST), 0)["tx"], "02:11:22:33:44:55")
+        self.assertEqual(a.parse_dot11(self.data_frame(False, True, STA, AP, BROADCAST), 0)["tx"], "aa:bb:cc:00:11:22")
+
+    def test_control_frames_credit_their_transmitter_only(self):
+        s = self.survey_with_ap()
+        s.see(frame(bytes([0xB4, 0, 0, 0]) + AP + STA, signal=-77), 2.0)        # request to send from the device
+        s.see(frame(bytes([0xB4, 0, 0, 0]) + STA + AP, signal=-30), 3.0)        # and from the access point
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -77.0)
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], 0.7 * -40 + 0.3 * -30)
+
+    def test_frames_without_a_transmitter_credit_nobody(self):
+        s = self.survey_with_ap()
+        ack = bytes([0xD4, 0, 0, 0]) + STA                 # acknowledgement: receiver only
+        cts = bytes([0xC4, 0, 0, 0]) + AP                  # clear to send: receiver only
+        for f in (ack, cts, ack + b"\x00" * 6, cts + b"\x00" * 6):
+            s.see(frame(f, signal=-20), 2.0)
+        self.assertEqual(s.stations, {})
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_a_beacon_sent_by_someone_else_does_not_move_the_access_point(self):
+        s = self.survey_with_ap()
+        s.see(frame(mgmt(8, BROADCAST, STA, AP, beacon()[24:]), signal=-20), 2.0)
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+        fresh = a.Survey()
+        fresh.see(frame(mgmt(8, BROADCAST, STA, AP, beacon()[24:]), signal=-20), 2.0)
+        self.assertEqual(fresh.aps, {})
 
 
 class CaptureKeepTests(unittest.TestCase):
