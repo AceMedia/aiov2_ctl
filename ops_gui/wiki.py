@@ -457,6 +457,16 @@ def build(win):
         side.setCurrentItem(first)
     if state["page"] is None:
         go(HOME)
+    def recolour():
+        """Draw the open page again, where it was. Its colours (the code panels, headings, links and table
+        borders) are written into the page when it is opened, so a change of theme, contrast or feature colour
+        while it is open left them as they were: black code panels and pale headings on the light theme."""
+        if state["page"]:
+            at = page.verticalScrollBar().value()
+            go(state["page"][:-3])
+            page.verticalScrollBar().setValue(at)
+
+    box.recolour = recolour
     box.go, box.current, box.current_row = go, (lambda: state["page"]), current_row
     box.main_action, box.back, box.side, box.page = main_action, to_list, side, page
     return box

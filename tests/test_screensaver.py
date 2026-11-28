@@ -40,6 +40,15 @@ class WhenTests(unittest.TestCase):
         self.assertFalse(ss.moved_enough(None, (120, 100), 5.0))
 
 
+class StarInkTests(unittest.TestCase):
+    def test_most_stars_are_plain_and_some_take_the_feature_colour_and_its_partner(self):
+        inks = [ss.star_ink(i, "#ffffff", "#4c8dff", "#ff8a00") for i in range(240)]
+        self.assertEqual(inks.count("#4c8dff"), 60, "one in four")
+        self.assertEqual(inks.count("#ff8a00"), 20, "one in twelve")
+        self.assertEqual(inks.count("#ffffff"), 160)
+        self.assertEqual(ss.star_ink(1, "t", "a", "b"), "t")
+
+
 class MandelbrotTests(unittest.TestCase):
     def test_points_in_the_set_never_leave_and_points_far_outside_leave_at_once(self):
         self.assertEqual(ss.smooth(0.0, 0.0, 50), -1.0)

@@ -648,6 +648,9 @@ def build_window():
                         swapped = style.muted_sheet(sheet, self.theme)
                         if swapped != sheet:
                             child.setStyleSheet(swapped)
+            wiki_page = self.pages.get("Wiki")
+            if wiki_page is not None and hasattr(wiki_page, "recolour"):
+                wiki_page.recolour()                        # its page carries its colours inside it
             can = handoff.has_display() and handoff.terminal_argv(handoff.install_dir()) is not None
             self.term_btn.setVisible(True)
             self.term_btn.setIcon(theme_icon("terminal", pal.color(QPalette.ColorRole.ButtonText)))
