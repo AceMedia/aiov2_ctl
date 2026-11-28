@@ -14,6 +14,13 @@ itself was standing when it heard it. An address heard at three or more places a
 ten minutes has moved along with you, and the page says so in exactly those words. That is all that is measured.
 It does not know where the device is, what it is or whose it is, and the things you carry yourself show up the
 same way. A device that changes its address cannot be picked out like this.
+
+Item trackers get a second, slower rule from Kismet's documentation, kept in the same in-memory Travel: the same
+tracker address heard over at least 30 minutes at three or more places at least 100 m apart. For each address that
+bt_trackers names as a tracker, the uConsole's own position is noted each time it is heard (at most one note every
+30 seconds, the latest few hundred kept, and an address not heard for 48 hours forgotten). Trackers change their
+address, some every 15 minutes or so, and different addresses are never joined up by guesswork, so a tracker
+that changes its address is not noticed and the absence of a notice means little.
 Everything above the classes is a pure function so it can be tested without a radio, a receiver or a screen.
 """
 import json
@@ -23,7 +30,7 @@ import re
 import threading
 import time
 
-from . import position, reports, survey
+from . import bt_trackers, position, reports, survey
 
 REMEMBERED = ("public", "random (fixed)")   # the address kinds aiov2_ctl reports that stay the same over days
 MAX_ENTRIES = 3000                          # the file stays small on a uConsole that listens for years
@@ -36,6 +43,18 @@ MAX_FIX_ERROR = 100.0                       # a fix worse than this (metres) is 
 MAX_PLACES = 40                             # places kept per address: 12 km of walking is plenty
 MAX_TALLIED = 2000                          # addresses followed at once
 TALLY_KEEP = 2 * 3600                       # an address not heard for this long starts again from nothing
+
+TRACKER_MINUTES = 30                        # Kismet's rule for a separated tracker: heard over this long,
+TRACKER_PLACES = 3                          # at this many places,
+TRACKER_METRES = 100.0                      # each at least this far from the others (this computer's positions)
+MAX_SIGHTINGS = 300                         # sightings kept per tracker address, the latest ones
+SIGHTING_EVERY = 30                         # seconds between two sightings noted for one address
+TRACKER_KEEP = 48 * 3600                    # a tracker address not heard for this long is forgotten
+TRACKER_SOURCE = "bttrackers"               # its optional notification, off unless switched on in Settings
+TRACKER_CAVEAT = "A tracker that changes its address is not noticed by this check."
+TRACKER_HELP = ("While a scan runs with a GPS fix, a tracker's address heard for 30 minutes or more at 3 places at "
+                "least 100 m apart (this computer's own positions) is pointed out in its row. " + TRACKER_CAVEAT +
+                " Trackers change their address, so seeing no such note means little.")
 
 # The notification is on unless switched off in Settings. It can only fire while you are scanning with the GPS
 # on, once per address, and a needless one costs a glance where a missed one could matter.
@@ -102,6 +121,50 @@ def usable_fix(tpv, max_error=MAX_FIX_ERROR):
 def moved_along(tally, places=MIN_PLACES, seconds=MIN_SECONDS):
     """The rule itself: heard at enough places far enough apart, over long enough."""
     return len(tally.get("places") or []) >= places and tally.get("last", 0) - tally.get("first", 0) >= seconds
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def seen_at_several_places(sightings, min_minutes=TRACKER_MINUTES, min_places=TRACKER_PLACES,
+                           min_metres=TRACKER_METRES):
+    """Kismet's rule for one address. `sightings` are (time, lat, lon): when the address was heard and where this
+    computer itself was then (lat and lon None when it had no fix). Places are found greedily in time order: a
+    sighting starts a new place when it is at least `min_metres` from every place so far. Sightings without a
+    fix count for the time span but not for places. Returns None unless the span and the places both reach the
+    thresholds, otherwise {'first', 'last', 'minutes', 'places'}."""
+    timed = sorted((s for s in sightings or () if len(s) == 3 and _number(s[0])), key=lambda s: s[0])
+    if not timed:
+        return None
+    places = []
+    for _, lat, lon in timed:
+        if _number(lat) and _number(lon):
+            add_place(places, lat, lon, metres=min_metres, limit=len(timed))
+    first, last = timed[0][0], timed[-1][0]
+    minutes = (last - first) / 60.0
+    if minutes < min_minutes or len(places) < min_places:
+        return None
+    return {"first": first, "last": last, "minutes": minutes, "places": len(places)}
+
+
+def tracker_mark(facts):
+    """The short mark added to the row's Known column: '3 places in 47 min'."""
+    return f"{facts['places']} places in {int(facts['minutes'])} min"
+
+
+def tracker_text(facts):
+    """The facts in words, for the row's tooltip."""
+    return (f"This tracker's address has been heard for {int(facts['minutes'])} minutes at {facts['places']} places "
+            f"at least {TRACKER_METRES:.0f} m apart (this computer's own positions). It may belong to someone "
+            f"travelling the same way. {TRACKER_CAVEAT}")
+
+
+def describe_tracker(addr, facts):
+    """(source, title, body, level) for the optional notification. Plain information, not a warning."""
+    body = (f"Tracker address {addr} heard for {int(facts['minutes'])} min at {facts['places']} places at least "
+            f"{TRACKER_METRES:.0f} m apart (this computer's positions). Address changes are not noticed.")
+    return (TRACKER_SOURCE, "Bluetooth: a tracker's address heard at several places", body, "info")
 
 
 def distance_text(metres):
@@ -386,10 +449,49 @@ class Travel:
 
     def __init__(self):
         self.tallies = {}
+        self.trackers = {}                  # addr -> {'addr', 'sightings': [(t, lat, lon)], 'last', 'told'}
+
+    def add_trackers(self, snap, tpv):
+        """Note this computer's position against each address bt_trackers names as a tracker that was heard in
+        the last few seconds of this snapshot. Nothing is noted without a usable fix."""
+        now = snap.get("t")
+        if not usable_fix(tpv) or not _number(now):
+            return
+        for d in snap.get("devices") or []:
+            mac = normalise(d.get("addr"))
+            if not mac or not survey.heard_now(d, now) or not bt_trackers.identify(d):
+                continue
+            when = d.get("last") if _number(d.get("last")) else now
+            entry = self.trackers.setdefault(mac, {"addr": mac, "sightings": [], "last": when, "told": False})
+            entry["last"] = max(entry["last"], when)
+            if entry["sightings"] and when - entry["sightings"][-1][0] < SIGHTING_EVERY:
+                continue
+            entry["sightings"].append((when, tpv["lat"], tpv["lon"]))
+            del entry["sightings"][:-MAX_SIGHTINGS]
+        for mac in [a for a, e in self.trackers.items() if now - e["last"] > TRACKER_KEEP]:
+            del self.trackers[mac]
+
+    def tracker_facts(self, addr):
+        """The facts for one tracker address that meets the rule, or None."""
+        entry = self.trackers.get(normalise(addr))
+        return seen_at_several_places(entry["sightings"]) if entry else None
+
+    def trackers_to_tell(self, memory=None):
+        """(addr, facts) for each tracker address that met the rule and was not handed out before."""
+        out = []
+        for mac, entry in sorted(self.trackers.items()):
+            if entry["told"] or (memory and memory.is_mine(mac)):
+                continue
+            facts = seen_at_several_places(entry["sightings"])
+            if facts:
+                entry["told"] = True
+                out.append((mac, facts))
+        return out
 
     def add(self, snap, tpv):
         """Note the current position against every rememberable address heard in the last few seconds of this
         snapshot. Without a usable fix nothing is noted. Returns the tallies that met the rule just now."""
+        self.add_trackers(snap, tpv)
         if not usable_fix(tpv):
             return []
         now, met = snap.get("t"), []
@@ -435,4 +537,4 @@ class Travel:
         return fresh
 
     def clear(self):
-        self.tallies = {}
+        self.tallies, self.trackers = {}, {}

@@ -69,15 +69,26 @@ def device_rows(snap, now=None, memory=None, travel=None, session_start=None):
     session_start = now if session_start is None else session_start
     rows = []
     for d in snap["devices"]:
+        facts = travel.tracker_facts(d["addr"]) if travel else None
+        known = bt_memory.known_text(d.get("kind"), memory.known(d["addr"]) if memory else None, now,
+                                     session_start, travel.places(d["addr"]) if travel else 0)
+        if facts:
+            known = ", ".join(p for p in (known, bt_memory.tracker_mark(facts)) if p)
         rows.append({
-            "known": bt_memory.known_text(d.get("kind"), memory.known(d["addr"]) if memory else None, now,
-                                          session_start, travel.places(d["addr"]) if travel else 0),
+            "known": known,
             "name": d.get("name") or NO_NAME, "maker": d.get("maker") or "-", "addr": d["addr"],
             "kind": d.get("kind") or "-", "signal": dbm_text(d.get("rssi")), "best": dbm_text(d.get("best")),
             "count": str(d.get("count", 0)), "seen": ago(now, d.get("last", now)),
             "what": what_text(d),
         })
     return rows
+
+
+def known_tooltip(device, travel=None):
+    """The Known cell's tooltip: how addresses are remembered, then the tracker facts if its address met the rule."""
+    facts = travel.tracker_facts(device["addr"]) if travel else None
+    return "\n\n".join(t for t in (bt_memory.known_tip(device.get("kind") or ""),
+                                    bt_memory.tracker_text(facts) if facts else "") if t)
 
 
 def what_text(device):
@@ -312,7 +323,7 @@ def build_page(win):
                     c, QHeaderView.ResizeMode.Stretch if c in (0, len(COLUMNS) - 1) else QHeaderView.ResizeMode.ResizeToContents)
             self.table.cellClicked.connect(self.pick_row)
             root.addWidget(self.table, 1)
-            self.tracker_note = QLabel(bt_trackers.NOTE)
+            self.tracker_note = QLabel(bt_trackers.NOTE + " " + bt_memory.TRACKER_HELP)
             self.tracker_note.setWordWrap(True)
             self.tracker_note.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
             root.addWidget(self.tracker_note)
@@ -511,7 +522,7 @@ def build_page(win):
                 for c, (_, key) in enumerate(COLUMNS):
                     item = QTableWidgetItem(row[key])
                     if key == "known":
-                        item.setToolTip(bt_memory.known_tip(self.row_info[r][1]))
+                        item.setToolTip(known_tooltip(snap["devices"][r], self.travel))
                     elif key == "what" and tracker_tip(snap["devices"][r]):
                         item.setToolTip(tracker_tip(snap["devices"][r]))
                     self.table.setItem(r, c, item)
@@ -526,6 +537,8 @@ def build_page(win):
             self.travel.add(snap, tpv)                              # notes nothing without a usable fix
             for tally in self.travel.to_tell(self.memory):
                 win.notify_user(*bt_memory.describe(tally))
+            for addr, facts in self.travel.trackers_to_tell(self.memory):
+                win.notify_user(*bt_memory.describe_tracker(addr, facts))
             self.show_places(position.gps_rail_on(getattr(win, "snap", None)), tpv)
             self.fill_table(snap)
             self.state.setText("Listening: " + summary(snap))
