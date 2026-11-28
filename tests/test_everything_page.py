@@ -103,6 +103,17 @@ class TextBox(Widget):
     def toPlainText(self): return self.words
 
 
+class InputDialog:
+    """The note asked for after Bookmark: what is typed, and whether Enter (True) or Escape (False) was pressed."""
+    answer = ("", True)
+    asked = 0
+
+    @classmethod
+    def getText(cls, *_a):
+        cls.asked += 1
+        return cls.answer
+
+
 class Timer:
     def __init__(self, _parent=None):
         self.timeout, self.running = Signal(), False
@@ -128,10 +139,10 @@ def stand_in_for_qt():
     core, gui, widgets = (types.ModuleType(n) for n in ("PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"))
     core.QObject, core.QTimer, core.pyqtSignal, core.Qt, core.QPoint = object, Timer, Signal, mock.MagicMock(), mock.MagicMock()
     gui.QColor, gui.QFont, gui.QPainter = mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
-    gui.QPen = mock.MagicMock()
+    gui.QPen, gui.QShortcut, gui.QKeySequence = mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
     gui.QFontDatabase = types.SimpleNamespace(families=lambda: [])
     widgets.QWidget, widgets.QLabel, widgets.QPushButton, widgets.QComboBox = Widget, Label, Button, Combo
-    widgets.QPlainTextEdit = TextBox
+    widgets.QPlainTextEdit, widgets.QInputDialog = TextBox, InputDialog
     widgets.QFrame, widgets.QHBoxLayout, widgets.QVBoxLayout = mock.MagicMock(), mock.MagicMock(), mock.MagicMock()
     package = types.ModuleType("PyQt6")
     package.QtCore, package.QtGui, package.QtWidgets = core, gui, widgets
@@ -387,6 +398,34 @@ class PageTests(unittest.TestCase):
         self.assertEqual((q.session.path, len(q.session.samples)), (path, 3))
         self.assertIn("Saved session of", q.state.text())
         self.assertIn("ran 11 s, 3 readings", q.notes.toPlainText())
+
+    def test_bookmark_keeps_the_last_minutes_of_a_recording_with_a_note_and_opens_like_a_session(self):
+        p = self.page()
+        InputDialog.answer, InputDialog.asked = ("", True), 0
+        p.mark.clicked.emit()                                      # nothing held yet: said, and nothing asked
+        self.assertIn("Nothing to bookmark", p.detail.text())
+        self.assertEqual((InputDialog.asked, ev.all_files()), (0, []))
+        p.start()
+        self.seconds(400)
+        asked_gps = self.gpsd_asked
+        InputDialog.answer = ("by the gate", True)
+        p.mark.clicked.emit()
+        self.assertEqual(self.gpsd_asked, asked_gps)               # no reading of its own
+        self.assertTrue(p.recording)
+        marks = [f for f in ev.files() if "-bookmark" in f]
+        self.assertEqual(len(marks), 1)
+        self.assertIn("Bookmarked 61 readings (5 min 00 s)", p.detail.text())
+        self.assertEqual(stat.S_IMODE(os.stat(marks[0]).st_mode), 0o600)
+        InputDialog.answer = ("", False)                            # Escape: nothing saved
+        p.mark.clicked.emit()
+        self.assertIn("Bookmark not saved", p.detail.text())
+        p.stop()
+        q = ev.build_page(self.win)
+        q.showEvent(None)
+        q.pick.activated.emit(q.pick.findData(marks[0]))
+        self.assertEqual(len(q.session.samples), 61)
+        self.assertIn("Bookmark ", q.state.text())
+        self.assertIn("Note: by the gate", q.state.text())
 
     def test_the_chart_draws_and_scrubs_without_falling_over(self):
         p = self.page(GPS="on")

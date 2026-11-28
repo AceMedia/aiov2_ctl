@@ -751,6 +751,95 @@ class AircraftTests(unittest.TestCase):
         self.assertIn("Aircraft heard: 3 to 5, last 5", ev.summary_lines(ev.summarise(s)))
 
 
+class BookmarkTests(unittest.TestCase):
+    """A bookmark: the last few minutes the tab already holds, kept as a small private session of its own."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def readings(self, count, every=5.0):
+        return [sample(i * every, sys={"battery": 80 - i}) for i in range(count)]
+
+    def test_the_window_keeps_the_last_five_minutes_with_both_ends_included(self):
+        recs = self.readings(100)                                   # 0 to 495 seconds
+        got = ev.last_window(recs, 300, T0 + 495)
+        self.assertEqual((got[0]["ts"], got[-1]["ts"], len(got)), (T0 + 195, T0 + 495, 61))
+        just = ev.last_window(recs, 300, T0 + 495.5)
+        self.assertEqual(just[0]["ts"], T0 + 200)                   # 195 is half a second outside now
+
+    def test_fewer_readings_than_the_window_keeps_them_all(self):
+        recs = self.readings(6)
+        self.assertEqual(ev.last_window(recs, 300, T0 + 25), recs)
+        self.assertEqual(ev.last_window(recs, 300), recs)           # no moment given: up to the last reading
+
+    def test_no_readings_gives_nothing_and_nothing_is_saved(self):
+        self.assertEqual(ev.last_window([], 300, T0), [])
+        self.assertEqual(ev.last_window(None, 300, T0), [])
+        self.assertIsNone(ev.bookmark_records(session_of(), [], T0))
+        self.assertIsNone(ev.save_bookmark(None, T0))
+        self.assertEqual(ev.all_files(), [])
+
+    def test_readings_out_of_order_come_back_in_order_and_later_ones_are_left_out(self):
+        recs = self.readings(10)
+        shuffled = [recs[i] for i in (7, 2, 9, 0, 5, 3, 8, 1, 6, 4)] + [{"k": "sample", "ts": "late"}]
+        got = ev.last_window(shuffled, 20, T0 + 35)
+        self.assertEqual([r["ts"] - T0 for r in got], [15, 20, 25, 30, 35])
+
+    def test_the_end_is_now_while_recording_else_the_picked_moment_else_the_last_reading(self):
+        recs = self.readings(4)
+        self.assertEqual(ev.bookmark_until(True, T0 + 5, recs, T0 + 99), T0 + 99)
+        self.assertEqual(ev.bookmark_until(False, T0 + 5, recs, T0 + 99), T0 + 5)
+        self.assertEqual(ev.bookmark_until(False, None, recs, T0 + 99), T0 + 15)
+
+    def test_the_file_is_a_session_that_opens_as_one_with_its_note(self):
+        recs = self.readings(80)
+        s = session_of(*recs)
+        s.path = "/x/session-20261125-140310.jsonl"
+        s.add(ev.event(T0 + 50, "rail", "too early"))
+        s.add(ev.event(T0 + 300, "rail", "LoRa rail on"))
+        picked = ev.last_window(s.samples, 300, T0 + 395)
+        records = ev.bookmark_records(s, picked, T0 + 400, "  heard   it\nhere  ")
+        self.assertEqual([r["k"] for r in records][:2] + [r["k"] for r in records][-2:], ["start", "sample", "event", "stop"])
+        self.assertEqual(records[0]["bookmark"], {"made": ev.stamp(T0 + 400), "seconds": 300, "note": "heard it here",
+                                                  "from": "session-20261125-140310.jsonl"})
+        path = ev.save_bookmark(records, T0 + 400)
+        self.assertRegex(os.path.basename(path), r"^session-\d{8}-\d{6}-bookmark\.jsonl$")
+        self.assertEqual(os.path.dirname(path), reports.state_dir())
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(reports.state_dir()).st_mode), 0o700)
+        self.assertEqual(ev.files(), [path])
+        back = ev.load(path)
+        self.assertEqual((len(back.samples), back.t0, back.t1), (61, T0 + 95, T0 + 395))
+        self.assertEqual([e["text"] for e in back.events], ["LoRa rail on"])
+        self.assertEqual(back.stop["summary"]["samples"], 61)
+        self.assertEqual(ev.bookmark_note(back), "heard it here")
+        self.assertIsNone(ev.bookmark_note(s))
+        self.assertTrue(ev.picker_label(path).startswith("Bookmark "))
+        self.assertLess(os.path.getsize(path), 20 * 1024)
+
+    def test_two_bookmarks_in_the_same_second_get_their_own_files_and_delete_takes_only_one(self):
+        records = ev.bookmark_records(session_of(), self.readings(3), T0)
+        a, b = ev.save_bookmark(records, T0), ev.save_bookmark(records, T0)
+        self.assertNotEqual(a, b)
+        self.assertTrue(b.endswith("-bookmark-2.jsonl"))
+        self.assertEqual(ev.files(), sorted([a, b]))
+        self.assertEqual(ev.delete(b), 1)
+        self.assertEqual(ev.files(), [a])
+
+    def test_a_long_note_is_cut_and_an_empty_one_is_kept_empty(self):
+        records = ev.bookmark_records(session_of(), self.readings(2), T0, "x" * 2000)
+        self.assertEqual(len(records[0]["bookmark"]["note"]), ev.NOTE_MAX)
+        self.assertEqual(ev.bookmark_records(session_of(), self.readings(2), T0)[0]["bookmark"]["note"], "")
+
+    def test_the_picker_names_a_bookmark_as_one(self):
+        self.assertEqual(ev.picker_label("/x/session-20261125-140310-bookmark-2.jsonl", 9 * 1024),
+                         "Bookmark 25 Nov 2026 14:03:10  (9 KB)")
+
+
 class TabTests(unittest.TestCase):
     def test_the_tab_sits_after_overview_and_is_there_whatever_the_rails_are_doing(self):
         self.assertEqual(data.tab_names({}, False, home=True, everything=True)[:4], ["Home", "Overview", "Everything", "Wi-Fi"])
