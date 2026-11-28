@@ -3489,6 +3489,38 @@ def flipper_gpio(cli, rest, yes=False):
     print(f"{pin} is now an output set to {rest[2]}. Use 'gpio read {pin}' to turn it back into an input.")
 
 
+# ---- The Flipper's clock ----------------------------------------------------------------------------------
+# The Flipper's real-time clock keeps local wall-clock time with no time zone, so it is read and set in this
+# computer's local time. Reading is `date`; setting is one `date YYYY-MM-DD HH:MM:SS W` command (W is the
+# ISO weekday, Monday 1), which only runs with --yes and is followed by a fresh read to check it took.
+def flipper_date_command(when):
+    """The single command that sets the Flipper's clock to `when` (a naive local datetime)."""
+    return f"date {when:%Y-%m-%d %H:%M:%S} {when.isoweekday()}"
+
+
+def flipper_date_refused(text):
+    """True when the Flipper's answer to a date-setting command says it did not take it."""
+    return bool(re.search(r"invalid|usage|error|wrong", text or "", re.IGNORECASE))
+
+
+def flipper_clock(cli, rest, yes=False):
+    import datetime as _dt
+    if rest and rest != ["set"]:
+        raise FlipperError("Usage: --flipper clock [set --yes]")
+    if rest:
+        if not yes:
+            raise FlipperError("Setting the Flipper's clock needs --yes.")
+        command = flipper_date_command(_dt.datetime.now())
+        out = cli.run(command)
+        if flipper_date_refused(out):
+            raise FlipperError("The Flipper did not take the new time: " + out.strip().splitlines()[0])
+        print(f"Sent: {command}")
+    reading = cli.run("date").strip()
+    now = _dt.datetime.now()
+    print(f"Flipper clock: {reading.splitlines()[0] if reading else '(no answer)'}")
+    print(f"This computer: {now:%Y-%m-%d %H:%M:%S}")
+
+
 def flipper_command(args):
     usage = (
         "Usage: aiov2_ctl --flipper <command> [--port /dev/ttyACMx]\n"
@@ -3503,6 +3535,7 @@ def flipper_command(args):
         "  mkdir REMOTE          make a folder on the SD card\n"
         "  install APP.fap [--category Tools] [--force]   put an app in /ext/apps/<Category>\n"
         "  gpio list | read PIN | set PIN 0|1 --yes       the Flipper's header pins (home screen only)\n"
+        "  clock [set --yes]     read the Flipper's clock; 'set' copies this computer's local time to it\n"
         "Transfers only touch /ext (the SD card), never overwrite without --force "
         "and never overwrite local files."
     )
@@ -3556,7 +3589,8 @@ def flipper_command(args):
             return 1
         del args[i:i + 2]
     arity = {"screen": (0, 0), "status": (0, 0), "info": (0, 0), "apps": (0, 0), "ls": (0, 1), "open": (1, 1),
-             "put": (2, 2), "get": (1, 2), "mkdir": (1, 1), "install": (1, 1), "gpio": (1, 3)}
+             "put": (2, 2), "get": (1, 2), "mkdir": (1, 1), "install": (1, 1), "gpio": (1, 3),
+             "clock": (0, 1)}
     if not args or args[0] not in arity:
         print(usage)
         return 1
@@ -3583,6 +3617,9 @@ def flipper_command(args):
                 return 0
             if sub == "gpio":
                 flipper_gpio(cli, rest, yes)
+                return 0
+            if sub == "clock":
+                flipper_clock(cli, rest, yes)
                 return 0
             if sub == "screen":
                 flipper_screen(cli, seconds if live else 5.0, live, png_path)

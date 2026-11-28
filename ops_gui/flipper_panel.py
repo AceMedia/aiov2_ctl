@@ -13,6 +13,8 @@ import re
 import subprocess
 import threading
 
+from . import flipper_session as fs
+
 SD_ROOT = "/ext"
 ROW_RE = re.compile(r"^([d-])\s{2}(.+?)(?:\s{2}(\d+\s*\w*))?$")
 SAFE_RE = re.compile(r"^[A-Za-z0-9_./ +()\-]{1,200}$")
@@ -198,6 +200,10 @@ def build_panel(win, Switch):
             self.entries = []
             self.busy = False
             self.ok = False
+            self.record = {}
+            self.caps = {}
+            self.want_clock = False
+            self.clock_seen = False
             self.signals = Signals()
             self.signals.result.connect(self.on_result)
             root = QHBoxLayout(self)
@@ -225,6 +231,19 @@ def build_panel(win, Switch):
             self.text.setAlignment(Qt.AlignmentFlag.AlignTop)
             il.addWidget(self.text)
             left.addWidget(info, 1)
+            about, abl = card("About this Flipper")
+            self.about = QLabel("")
+            self.about.setTextFormat(Qt.TextFormat.RichText)
+            self.about.setWordWrap(True)
+            self.about.setStyleSheet("font-size: 11pt;")
+            abl.addWidget(self.about)
+            self.clock_l = QLabel("")
+            self.clock_l.setWordWrap(True)
+            self.clock_l.setStyleSheet("font-size: 11pt;")
+            abl.addWidget(self.clock_l)
+            self.clock_b = button("Set Flipper clock from this computer", self.set_clock)
+            abl.addWidget(self.clock_b)
+            left.addWidget(about)
             root.addLayout(left, 0)
 
             right, rl = card("On the Flipper")
@@ -341,6 +360,10 @@ def build_panel(win, Switch):
             from . import data
             self.text.setText(data.facts_html(data.flipper_facts(status, with_apps=True),
                                               data.flipper_tips(status)))
+            self.record = fs.parse_device_info((status or {}).get("device"))
+            self.caps = fs.capabilities(self.record, status)
+            off = [(f"Not offered: {n}", why) for n, why in fs.unavailable_rows(self.caps)]
+            self.about.setText(data.facts_html(fs.about_rows(self.record) + off))
             note = mode_note(status)
             if note or was != self.ok:          # do not wipe a result message on every poll
                 self.note.setText(note)
@@ -358,21 +381,30 @@ def build_panel(win, Switch):
         # ---- controls
         def sync(self):
             idle = self.ok and not self.busy
+            can = lambda feature: fs.available(self.caps, feature)    # noqa: E731
             self.refresh_b.setEnabled(not self.busy)
-            self.up_b.setEnabled(idle and self.path != SD_ROOT)
+            self.up_b.setEnabled(idle and can("files") and self.path != SD_ROOT)
             row = self.table.currentRow()
-            self.copy_b.setEnabled(idle and 0 <= row < len(self.entries) and self.entries[row][0] == "file")
+            self.copy_b.setEnabled(idle and can("copy") and 0 <= row < len(self.entries) and self.entries[row][0] == "file")
             self.open_b.setEnabled(idle and self.apps.currentRow() >= 0)
-            self.send_b.setEnabled(idle)
-            self.folder_b.setEnabled(idle)
-            self.install_b.setEnabled(idle)
+            self.send_b.setEnabled(idle and can("send"))
+            self.folder_b.setEnabled(idle and can("send"))
+            self.install_b.setEnabled(idle and can("send"))
             pin_row = self.pin_table.currentRow() >= 0
-            self.read_b.setEnabled(idle and pin_row)
-            self.read_all_b.setEnabled(idle)
+            self.read_b.setEnabled(idle and can("pins") and pin_row)
+            self.read_all_b.setEnabled(idle and can("pins"))
             for b in (self.high_b, self.low_b):
                 b.setEnabled(idle and pin_row and self.outputs_on)
-            self.table.setEnabled(idle)
-            self.apps.setEnabled(idle)
+            self.table.setEnabled(idle and can("files"))
+            self.apps.setEnabled(idle and can("apps"))
+            self.clock_b.setEnabled(idle and can("clock") and self.clock_seen)
+            # Switching the live display off always stays possible.
+            self.live_switch.setEnabled(can("live_screen") or bool(getattr(win, "live", False)))
+            for widget, feature in ((self.live_switch, "live_screen"), (self.table, "files"),
+                                    (self.copy_b, "copy"), (self.send_b, "send"), (self.folder_b, "send"),
+                                    (self.install_b, "send"), (self.apps, "apps"), (self.read_b, "pins"),
+                                    (self.read_all_b, "pins"), (self.clock_b, "clock")):
+                widget.setToolTip(self.caps.get(feature, (True, ""))[1])
 
         def run(self, tag, args, timeout=60):
             if self.busy:
@@ -392,9 +424,12 @@ def build_panel(win, Switch):
 
         def refresh(self):
             self.note.setText(mode_note(win.flip_status) or "Reading the Flipper...")
+            self.want_clock = True                       # read once the listing is done; never set here
             win.refresh()
-            if self.ok:
-                self.list_dir(self.path)
+            if self.ok and fs.available(self.caps, "files"):
+                self.list_dir(self.path)                  # the app list follows the folder listing
+            elif self.ok and fs.available(self.caps, "apps"):
+                self.run("apps", ["aiov2_ctl", "--flipper", "apps"])
 
         def list_dir(self, path):
             self.path = path
@@ -445,6 +480,11 @@ def build_panel(win, Switch):
                                  "on the Flipper? It will run on the Flipper, so only install apps you trust."):
                 self.note.setText("Installing...")
                 self.run("install", install_args(local, self.category.currentData()), timeout=300)
+
+        def set_clock(self):
+            if self.clock_seen and win.ask(fs.CLOCK_SET_QUESTION):
+                self.clock_l.setText("Setting the Flipper's clock...")
+                self.run("clockset", fs.clock_set_args())
 
         def toggle_outputs(self):
             self.outputs_on = not self.outputs_on
@@ -511,9 +551,22 @@ def build_panel(win, Switch):
                     self.list_dir(self.path)
                     return
             elif tag == "get":
-                self.note.setText(why or saved_line(text) or "Copied.")
+                line = saved_line(text)
+                preview = "" if why else fs.preview_file(fs.saved_path(line))   # reads the local copy only
+                self.note.setText(why or " ".join(x for x in (line or "Copied.", preview) if x))
             elif tag == "open":
                 self.note.setText(why or "Asked the Flipper to open it.")
+            elif tag in ("clock", "clockset"):
+                flipper, computer = fs.clock_reading(text)
+                offset = fs.clock_offset(flipper, computer)
+                self.clock_seen = offset is not None
+                self.clock_l.setText(why or fs.clock_text(offset))
+                if tag == "clockset":
+                    self.note.setText(why or "Clock set and read back.")
+            if self.want_clock and self.ok and fs.available(self.caps, "clock"):
+                self.want_clock = False
+                self.run("clock", fs.clock_args())
+                return
             self.sync()
 
     panel = Panel()
