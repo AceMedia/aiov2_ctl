@@ -598,7 +598,7 @@ def save_settings(values, path=None):
 TAB_ICONS = {"Overview": "blocks", "Wi-Fi": "globe", "GPS": "compass", "LoRa": "email",
              "SDR": "search", "Flipper": "code", "Settings": "cog", "Help": "notes", "Wiki": "domain", "Apps": "rocket", "Marauder": "shield", "Home": "heartbeat", "Network": "server",
              "Bluetooth": "bluetooth", "Everything": "growth", "Ghost hunt": "media",
-             "IGA": "globe"}
+             "IGA": "iga"}
 
 SUN = [
     "................",

@@ -19,6 +19,54 @@ RAILS = ("#00cf70", "#c4a1ff", "#13c9f2", "#ffad00")            # GPS, LoRa, SDR
 NAMES = {"app": "ops-app.png", "console": "ops-console.png", "installer": "installer.png", "iga": "iga.png"}
 
 
+# The IGA tab's icon on the tab bar (ops_gui/icons/32 and 64/iga-bare.png): drawn for this app on the same 16 by 16
+# grid as its Help bitmap (ops_gui/helpview.py), a browser window with a compass, so it is not the Wi-Fi globe.
+# '#' is orange, 'o' cyan, '.' inside the window navy; outside the window is clear. Seen on both themes: the navy
+# body shows on a light bar and the orange frame on a dark one.
+IGA_TAB_ART = [
+    "................",
+    "################",
+    "#o.o.o##########",
+    "################",
+    "#..............#",
+    "#......oo......#",
+    "#.....o##o.....#",
+    "#....o#..#o....#",
+    "#....o#..#o....#",
+    "#.....o##o.....#",
+    "#......oo......#",
+    "#..............#",
+    "################",
+    "................",
+    "................",
+    "................",
+]
+IGA_TAB_ROWS = range(1, 13)          # the window's rows; the rest is clear
+TAB_SIZES = (32, 64)
+
+
+def tab_cells(art=None):
+    """[(x, y, colour)] for the IGA tab icon on its 16 by 16 grid."""
+    out = []
+    for y, row in enumerate(art or IGA_TAB_ART):
+        for x, cell in enumerate(row):
+            if cell == "#":
+                out.append((x, y, ORANGE))
+            elif cell == "o":
+                out.append((x, y, RAILS[2]))
+            elif y in IGA_TAB_ROWS:
+                out.append((x, y, NAVY))
+    return out
+
+
+def draw_tab(size):
+    from PIL import Image
+    im = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+    for x, y, colour in tab_cells():
+        im.putpixel((x, y), tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5)) + (255,))
+    return im.resize((size, size), Image.NEAREST)
+
+
 def tile():
     """The plate every icon sits on: a pale edge round a navy square with its corners cut."""
     out = []
@@ -105,6 +153,11 @@ def main(argv):
     for kind, name in NAMES.items():
         draw(kind).save(os.path.join(folder, name), optimize=True)
         print(os.path.join(folder, name))
+    if not args:                                   # the tab icon lives with the app's other tab icons
+        for size in TAB_SIZES:
+            path = os.path.join(os.path.dirname(HERE), "ops_gui", "icons", str(size), "iga-bare.png")
+            draw_tab(size).save(path, optimize=True)
+            print(path)
     if preview:
         out = preview
         sheet = Image.new("RGB", (2 * 760, 200), "#ffffff")

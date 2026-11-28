@@ -58,6 +58,30 @@ class FileTests(unittest.TestCase):
             self.assertEqual(saved.tobytes(), icons.draw(kind).tobytes(), name)
 
 
+class IgaTabIconTests(unittest.TestCase):
+    def test_it_is_the_same_drawing_as_its_help_bitmap_and_not_the_wifi_globe(self):
+        from ops_gui import data, helpview
+        self.assertEqual(list(icons.IGA_TAB_ART), list(helpview.TAB_ICONS["IGA"]))
+        self.assertEqual(data.TAB_ICONS["IGA"], "iga")
+        self.assertNotEqual(data.TAB_ICONS["IGA"], data.TAB_ICONS["Wi-Fi"])
+
+    def test_it_uses_the_orange_frame_and_a_navy_body_for_both_themes(self):
+        colours = {c for _, _, c in icons.tab_cells()}
+        self.assertTrue({icons.ORANGE, icons.NAVY} <= colours)
+        for x, y, _ in icons.tab_cells():
+            self.assertTrue(0 <= x < 16 and 0 <= y < 16)
+
+    def test_the_files_are_what_the_tool_draws(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow is not installed")
+        for size in icons.TAB_SIZES:
+            path = os.path.join(REPO, "ops_gui", "icons", str(size), "iga-bare.png")
+            saved = Image.open(path).convert("RGBA")
+            self.assertEqual(saved.tobytes(), icons.draw_tab(size).tobytes(), size)
+
+
 class IconLineTests(unittest.TestCase):
     def test_the_projects_own_icon_when_the_checkout_has_it_else_the_themes(self):
         self.assertEqual(launchers.icon_for("/r", "ops-app.png", "fallback", isfile=lambda p: True), "/r/img/ops-app.png")
