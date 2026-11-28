@@ -56,8 +56,8 @@
   "sha256": "1b01cabfcf6227314840cf586488ed00cbff962eaa2b84dc9556d0725c7ea590"
  },
  "img/app/saver-stars.webp": {
-  "bytes": 2100,
-  "sha256": "3dff7e5fd263c6ba96d99536244f466a9781794daa5699fde09cfffe595a2241"
+  "bytes": 1956,
+  "sha256": "8f46fe9aff071ac460fbc4e260e26cd1d3ba13875b0eeede7e5c9a1964b9dee0"
  },
  "img/app/saver-system.webp": {
   "bytes": 4642,
@@ -84,8 +84,8 @@
   "sha256": "b14b5dc856f226eb0ed73c5defbe78879d08be1abb7f1d4b931d07eecada8e1a"
  },
  "img/app/settings-05-lora.webp": {
-  "bytes": 24364,
-  "sha256": "06a539f1d4fdc1672a92525272d399f102c0662f2da747125049e1716f2bcfea"
+  "bytes": 37054,
+  "sha256": "a2a989abfe75e18e3be1927ee4953067fc8567210179c543da86f6c0a189cc00"
  },
  "img/app/settings-06-wi-fi.webp": {
   "bytes": 20162,
@@ -192,8 +192,8 @@
   "sha256": "23b8c57f94fef9280ba582c30da6408ea51a48bb2f0dd5c60f314fd94390e0d7"
  },
  "img/install/cli-11-doctor.webp": {
-  "bytes": 19648,
-  "sha256": "c0c0a95f035ab0d0ffde8febe233cd469efb9f2d34d5eff333d728757a4b339d"
+  "bytes": 21938,
+  "sha256": "9c9dd11b03a87f1716f92213cb180d556a9cde73000ba0f5a237b666aa079206"
  },
  "img/install/gui-01-choose.webp": {
   "bytes": 25728,
