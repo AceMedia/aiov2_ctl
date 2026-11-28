@@ -207,6 +207,27 @@ def build_settings(win, Bridge_signals):
                                       capture_output=True, timeout=30), daemon=True).start())
     setting(v, "Tray icon at login", "The rails and services menu beside the clock.", auto)
 
+    from . import screensaver
+    v = card("Screensaver", right)
+    saver_box = onoff(lambda on: win.set_saver("saver_on", bool(on)))
+    setting(v, "Screensaver", "Covers the app when it has been left alone. Any key, button or movement of the "
+                              "pointer takes it away. It only draws: no rail is switched.", saver_box)
+    saver_kind = QComboBox()
+    saver_kind.setStyleSheet("font-size: 13pt;")
+    for key, name in screensaver.KINDS:
+        saver_kind.addItem(name, key)
+    saver_kind.currentIndexChanged.connect(lambda i: win.set_saver("saver_kind", saver_kind.itemData(i)))
+    setting(v, "Which one", "", saver_kind)
+    saver_wait = QComboBox()
+    saver_wait.setStyleSheet("font-size: 13pt;")
+    for m in screensaver.MINUTES:
+        saver_wait.addItem(f"After {m} minute{'s' if m != 1 else ''}", m)
+    saver_wait.currentIndexChanged.connect(lambda i: win.set_saver("saver_minutes", saver_wait.itemData(i)))
+    setting(v, "When", "How long with nothing touched.", saver_wait)
+    saver_try = button("Show")
+    saver_try.clicked.connect(lambda: QTimer.singleShot(400, lambda: win.saver_start(saver_kind.currentData())))
+    setting(v, "Try it now", "Shows the chosen one straight away.", saver_try)
+
     v = card("Refresh", right)
     combo = QComboBox()
     combo.setStyleSheet("font-size: 13pt;")
@@ -774,6 +795,12 @@ def build_settings(win, Bridge_signals):
         combo.blockSignals(False)
         auto.setChecked(os.path.exists(os.path.expanduser("~/.config/autostart/aiov2_ctl.desktop")))
         start_box.setChecked(startup.enabled())
+        saver_box.setChecked(bool(win.flag("saver_on")))
+        for box, value in ((saver_kind, screensaver.kind_of(win.flag("saver_kind"))),
+                           (saver_wait, screensaver.minutes_of(win.flag("saver_minutes")))):
+            box.blockSignals(True)
+            box.setCurrentIndex(max(0, box.findData(value)))
+            box.blockSignals(False)
         log_box.setChecked(bool(win.flag("debug_log")))
         crash_box.setChecked(bool(win.flag("crash_reports")))
         from . import fieldlog
