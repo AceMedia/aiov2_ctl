@@ -114,6 +114,8 @@ def uses_default_key(settings, primary=False, modem_preset=None):
         return None
     psk = getattr(settings, "psk", None)
     if psk is not None:
+        if isinstance(psk, int):                # bytes(n) is n zero bytes, not a key: it cannot be told
+            return None
         try:
             return bytes(psk) == DEFAULT_PSK
         except (TypeError, ValueError):
@@ -246,6 +248,9 @@ class LoRa:
         # answers that came before send_message() had registered the message they answer (the library's reader
         # thread can publish one while sendText() is still returning): packet id -> reason, the newest few only
         self._early_answers = collections.OrderedDict()
+        # request ids of our own messages the routing listener has just answered: the bus also hands the same
+        # routing packet to the "meshtastic.receive" listener, which must then leave it out of Activity
+        self._answered = collections.deque(maxlen=50)
 
         if not bootstrap.MESHTASTIC_AVAILABLE:
             debug("LoRa: meshtastic library not available")
@@ -354,6 +359,11 @@ class LoRa:
                     if mark in self._seen_packets:
                         return
                     self._seen_packets.append(mark)
+            reply = delivery.routing_reply(packet)
+            if reply is not None:
+                with self.lock:
+                    if reply[0] in self.deliveries or reply[0] in self._answered:
+                        return              # an answer to our own message: it changes that message's state only
             self._handle_packet(packet)
         except Exception as e:
             debug(f"LoRa: packet handler error: {e}")
@@ -376,6 +386,7 @@ class LoRa:
                         self._early_answers.popitem(last=False)
                     return
                 record.update(delivery.after_routing(record, reason))
+                self._answered.append(request)
                 if delivery.can_forget(record, time.time()):
                     self.deliveries.pop(request, None)
             debug(f"LoRa: answer for packet {request}: {reason}")

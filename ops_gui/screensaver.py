@@ -160,6 +160,13 @@ def work_rows(np, job, put, alive, duty=DUTY, strip=24, clock=time.monotonic, sl
     return y >= rows
 
 
+def flags_still_needed(flags, pictures):
+    """The stop flags worth keeping: those of `pictures` not yet finished, whose threads may still be running.
+    A finished picture's thread has ended, so its flag would only make the list grow for as long as a dive runs."""
+    live = [p.get("flag") for p in pictures or () if isinstance(p, dict) and not p.get("done")]
+    return [f for f in flags or () if any(f is x for x in live)]
+
+
 def ramp(bg, accent, accent2, steps=32):
     """The colours of the picture: the first is the set itself, the rest run from the background up through
     the feature colour and its partner to a pale tip and back down, so neighbouring bands flow into each other."""
@@ -617,7 +624,8 @@ def build(win):
                 pic["points"] = np.full((rows, cols), s["colours"][0], dtype=np.uint32)
                 pic["image"] = QImage(pic["points"].data, cols, rows, cols * 4, QImage.Format.Format_RGB32)
                 pic["strips"], flag = queue.Queue(), threading.Event()
-                s["flags"].append(flag)
+                pic["flag"] = flag
+                s["flags"] = flags_still_needed(s["flags"], (s.get("work"), s.get("shown"))) + [flag]
                 threading.Thread(target=work_rows, daemon=True,
                                  args=(np, (cols, rows, pic["view"], limit_for(level)),
                                        lambda y, numbers, strips=pic["strips"]: strips.put((y, numbers)),

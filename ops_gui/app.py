@@ -61,6 +61,11 @@ def closing_listeners(win):
             bool(timer is not None and timer.isActive())
         if busy:
             out.append(page)
+    if getattr(win, "ghost_on", False):            # the optional Ghost hunt tab: its stop() ends a recording
+        from . import ghost
+        page = getattr(win, "pages", {}).get(ghost.TAB)
+        if page is not None and callable(getattr(page, "stop", None)):
+            out.append(page)
     return out
 
 

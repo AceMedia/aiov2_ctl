@@ -35,6 +35,8 @@ RECORD_SECONDS = 2.0            # one line in a session this often
 ENERGY_WINDOW = 10.0            # seconds of history ENERGY looks over
 ARRIVAL_WINDOW = 60.0           # ARRIVALS compares now with this many seconds ago
 HISTORY_SECONDS = 70.0          # how much history is kept in memory
+RECORD_MOST_SECONDS = 4 * 3600  # a recording stops by itself after this long
+RECORD_MOST_BYTES = 20 * 1000 * 1000   # or once its file would grow past this (20 MB), whichever comes first
 STILL_DB = 3.0                  # a change bigger than this (dB), or in how many are heard, ends the stillness
 FLARE = 0.08                    # a bar that moves more than this share of its scale flares for a moment
 FLARE_HOLD = 1.5                # seconds a flare stays bright
@@ -332,6 +334,17 @@ def due(last, now, every=RECORD_SECONDS):
     return last is None or now - last >= every - 1e-6
 
 
+def recording_limit(started, now, written, next_line=0, most_seconds=RECORD_MOST_SECONDS,
+                    most_bytes=RECORD_MOST_BYTES):
+    """Why a recording must stop by itself before writing a line of `next_line` bytes, as the words shown on the
+    tab, or "" while it may go on: after four hours, or when the file would grow past 20 MB."""
+    if now - started >= most_seconds:
+        return "Recording stopped by itself after four hours, its longest"
+    if written + next_line > most_bytes:
+        return "Recording stopped by itself at 20 MB, its largest"
+    return ""
+
+
 def session_name(started):
     return time.strftime("ghost-%Y%m%d-%H%M%S.jsonl", time.localtime(started))
 
@@ -424,7 +437,7 @@ def build(win):
     pal = pixel.palette("dark")             # drawn dark like the Signals screensaver, whatever the theme
     folder = sessions_folder()
     st = {"history": [], "bands": ss.signal_bands({}), "meters": instruments([]), "lit": {}, "error": "",
-          "rec": None, "rec_started": None, "rec_last": None,
+          "rec": None, "rec_started": None, "rec_last": None, "rec_bytes": 0,
           "records": None, "head": None, "pos": 0.0, "playing": False, "shown": None}
 
     def words(p, x, y, text, px, colour, align="left", width=0):
@@ -578,9 +591,17 @@ def build(win):
         live_meters = instruments(st["history"])
         if st["rec"] is not None and due(st["rec_last"], now):
             try:
-                st["rec"].write(session_line(frame, live_meters, st["rec_started"]) + "\n")
-                st["rec"].flush()
-                st["rec_last"] = now
+                line = session_line(frame, live_meters, st["rec_started"]) + "\n"
+                size = len(line.encode("utf-8"))
+                why = recording_limit(st["rec_started"], now, st["rec_bytes"], size)
+                if why:
+                    stop_recording()
+                    st["error"] = why
+                else:
+                    st["rec"].write(line)
+                    st["rec"].flush()
+                    st["rec_bytes"] += size
+                    st["rec_last"] = now
             except (OSError, ValueError) as e:
                 stop_recording()
                 st["error"] = f"Recording stopped: {e}"
@@ -610,9 +631,11 @@ def build(win):
             started = time.time()
             try:
                 _path, f = open_session(folder, started)
-                f.write(header_line(started) + "\n")
+                head = header_line(started) + "\n"
+                f.write(head)
                 f.flush()
                 st["rec"], st["rec_started"], st["rec_last"] = f, started, None
+                st["rec_bytes"] = len(head.encode("utf-8"))
             except OSError as e:
                 st["error"] = f"Could not start a recording: {e.strerror or e}"
         refresh()
@@ -683,6 +706,7 @@ def build(win):
     timer.start(int(SAMPLE_SECONDS * 1000))
     page.ghost_timer = timer
     page.stop_recording = stop_recording
+    page.stop = stop_recording              # the window's closeEvent stops the pages it lists (app.closing_listeners)
     refresh()
     return page
 
