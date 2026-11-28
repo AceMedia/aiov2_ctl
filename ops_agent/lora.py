@@ -21,6 +21,80 @@ def _pubsub():
         return None
 
 
+SERIAL_CANDIDATES = ("/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyUSB1")
+
+# USB chips that Meshtastic boards actually use, as (vendor id, product id or None for any, name). A serial port
+# whose USB identity is not one of these is never opened: it may be a GPS, a Flipper, a modem or anything else.
+MESHTASTIC_USB_CHIPS = (
+    ("303a", None, "Espressif USB (ESP32-S3/C3)"),
+    ("10c4", "ea60", "Silicon Labs CP210x"),
+    ("1a86", None, "WCH CH340/CH9102"),
+    ("239a", None, "Adafruit nRF52"),
+    ("2e8a", None, "Raspberry Pi RP2040"),
+)
+
+
+def usb_chip(identity):
+    """The name of the Meshtastic chip a (vendor, product) identity is, or None when it is not one of them."""
+    if not identity:
+        return None
+    vid, pid = (str(x or "").lower() for x in identity)
+    for chip_vid, chip_pid, name in MESHTASTIC_USB_CHIPS:
+        if vid == chip_vid and (chip_pid is None or pid == chip_pid):
+            return name
+    return None
+
+
+def _sysfs_usb_identity(device):
+    """(vendor, product) for a tty from /sys/class/tty/<name>/device: the USB device is that directory's parent
+    (ttyACM) or grandparent (ttyUSB), the first one up the tree with an idVendor file."""
+    here = os.path.realpath(os.path.join("/sys/class/tty", os.path.basename(device), "device"))
+    for _ in range(4):
+        try:
+            with open(os.path.join(here, "idVendor")) as v, open(os.path.join(here, "idProduct")) as p:
+                return v.read().strip().lower(), p.read().strip().lower()
+        except OSError:
+            here = os.path.dirname(here)
+    return None
+
+
+def usb_identity(device):
+    """(vendor id, product id) as four hex digits each for a serial device, or None when it cannot be read. pyserial's
+    port list when the library is there, otherwise sysfs. A function of its own so a test can put a stand-in in its
+    place."""
+    try:
+        from serial.tools import list_ports
+        for port in list_ports.comports():
+            if port.device == device and port.vid is not None:
+                return f"{port.vid:04x}", f"{(port.pid or 0):04x}"
+    except Exception:
+        pass
+    return _sysfs_usb_identity(device)
+
+
+def choose_serial_port(devices, identify):
+    """(the port to open or None, the reason in words). Only a port whose USB identity is a chip Meshtastic boards
+    use qualifies; the first such port is chosen. Nothing is left to the library's auto-detection."""
+    notes = []
+    for device in devices:
+        short = device.split("/")[-1]
+        try:
+            identity = identify(device)
+        except Exception:
+            identity = None
+        if not identity:
+            notes.append(f"{short}: USB identity unknown")
+            continue
+        label = f"{identity[0]}:{identity[1]}"
+        chip = usb_chip(identity)
+        if chip:
+            return device, f"{short} is a {chip} ({label})"
+        notes.append(f"{short} ({label}) is not a chip Meshtastic boards use")
+    if not notes:
+        return None, "No USB serial devices found"
+    return None, "No Meshtastic radio on USB serial: " + "; ".join(notes)
+
+
 CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role values (SECONDARY is 2)
 
 
@@ -924,8 +998,7 @@ class LoRa:
             self.connection_status = "Checking for serial devices..."
         time.sleep(2)
 
-        possible_devices = ["/dev/ttyACM0", "/dev/ttyUSB0", "/dev/ttyACM1"]
-        found_devices = [dev for dev in possible_devices if os.path.exists(dev)]
+        found_devices = [dev for dev in SERIAL_CANDIDATES if os.path.exists(dev)]
 
         # A Flipper or ESP32 board can enumerate as ttyACM0. Leave those alone
         # (aiov2_ctl --companions --json says which ports they are).
@@ -944,11 +1017,18 @@ class LoRa:
             return
 
         debug(f"LoRa: Found devices: {found_devices}")
+        port, why = choose_serial_port(found_devices, usb_identity)
+        log(f"LoRa: {why}")
+        if port is None:
+            with self.lock:
+                self.connection_status = why
+                self.connecting = False
+            return
         with self.lock:
-            self.connection_status = f"Found: {', '.join([d.split('/')[-1] for d in found_devices])}"
+            self.connection_status = f"Found: {why}"
 
         with self.lock:
-            self.conflict_processes = self._detect_serial_conflicts(found_devices)
+            self.conflict_processes = self._detect_serial_conflicts([port])
         if self.conflict_processes:
             labels = ", ".join(f"{item['name']}:{item['pid']}" for item in self.conflict_processes[:3])
             with self.lock:
@@ -965,13 +1045,10 @@ class LoRa:
 
         try:
             with self.lock:
-                if skipped and len(found_devices) == 1:
-                    # Auto detection could pick the companion, so name the port.
-                    self.interface = bootstrap.meshtastic.serial_interface.SerialInterface(devPath=found_devices[0])
-                else:
-                    self.interface = bootstrap.meshtastic.serial_interface.SerialInterface()
+                # Always the chosen port by name: the library's auto-detection could open an unrelated device.
+                self.interface = bootstrap.meshtastic.serial_interface.SerialInterface(devPath=port)
                 self.active = True
-                self.connection_status = "Connected"
+                self.connection_status = f"Connected (serial: {why})"
             debug("LoRa: Meshtastic connected successfully")
             log("LoRa: Meshtastic mesh connected")
             self._listen()
@@ -979,7 +1056,7 @@ class LoRa:
         except Exception as e:
             debug(f"LoRa: connection failed: {e}")
             log(f"LoRa: Connection failed - {str(e)[:40]}")
-            self.connection_status = f"Failed: {str(e)[:50]}"
+            self.connection_status = f"Failed ({port.split('/')[-1]}): {str(e)[:50]}"
             with self.lock:
                 self.interface = None
                 self.active = False
