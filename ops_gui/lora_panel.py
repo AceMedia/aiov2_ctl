@@ -523,6 +523,34 @@ def node_details(info, node_id, now=None, self_id=None):
     return lines
 
 
+def channel_busy_text(node_info, self_id, now=None):
+    """How busy the channel is, as this radio's own report of itself (its device telemetry: channelUtilization and
+    airUtilTx), with the report's age: "This radio reports the channel 12% busy and has been transmitting 0.4% of the
+    time, as of 2m ago". "-" when it has not reported them."""
+    info = None
+    if self_id is not None:
+        for key, value in (node_info or {}).items():
+            if nodeid.same(key, self_id) and isinstance(value, dict):
+                info = value
+    metrics = (info or {}).get("deviceMetrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    use, air = _number(metrics.get("channelUtilization")), _number(metrics.get("airUtilTx"))
+    if use is None and air is None:
+        return "-"
+    bits = []
+    if use is not None:
+        bits.append(f"the channel {_pct(use)} busy")
+    if air is not None:
+        bits.append(f"{'has been' if use is not None else 'it has been'} transmitting {_pct(air)} of the time")
+    text = "This radio reports " + " and ".join(bits) if use is not None else \
+        "This radio reports that " + bits[0]
+    got = _when(info.get("telemetryReceived"))
+    if got:
+        age = age_text(got, now)
+        return text + (", as of just now" if age == "now" else f", as of {age}")
+    return text + " (when it reported this is not known)"
+
+
 def picked_node(row_ids, current_row):
     """The node chosen in the table: the id on the current row, or None when no row is current."""
     if isinstance(current_row, int) and 0 <= current_row < len(row_ids or []):
@@ -705,7 +733,11 @@ def build_panel(win, Switch):
             self.note = QLabel("")
             self.note.setStyleSheet("font-size: 12pt; color: #9e9e9e;")
             self.note.setWordWrap(True)
+            self.busy = QLabel("Channel use: -")
+            self.busy.setStyleSheet("font-size: 12pt;")
+            self.busy.setWordWrap(True)
             hl.addWidget(self.status)
+            hl.addWidget(self.busy)
             hl.addWidget(self.note)
             root.addWidget(head)
 
@@ -855,6 +887,7 @@ def build_panel(win, Switch):
             if time.time() >= self.note_until:          # hold a just-set status (Sent, Exported to...) a moment,
                 self.note.setText(f"Sending goes to channel {snap.get('selected_channel', 0)}." +  # rather than
                                   (f"  Last send: {tx}" if tx else ""))                             # overwrite it at once
+            self.busy.setText("Channel use: " + channel_busy_text(snap["node_info"], snap.get("self_id")))
             own = own_position(snap["node_info"], snap.get("self_id"))
             rows = node_rows(snap["node_info"], snap.get("self_id"), own=own)
             sig = rows_signature(rows)
