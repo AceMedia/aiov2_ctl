@@ -54,6 +54,13 @@ class RowTests(unittest.TestCase):
         self.assertEqual(sv.channel_shares(SNAP), [(1, 0.25), (6, 1.0), (36, 0.0)])
         self.assertEqual(sv.channel_shares({"channels": {}}), [])
 
+    def test_channel_bars_use_the_rate_of_listening(self):
+        snap = {"channels": {"1": {"frames": 100, "bytes": 1, "seconds": 10.0, "per_second": 10.0},
+                             "6": {"frames": 20, "bytes": 1, "seconds": 1.0, "per_second": 20.0},
+                             "11": {"frames": 0, "bytes": 0, "seconds": 0.0, "per_second": None,
+                                    "note": "not listened to"}}}
+        self.assertEqual(sv.channel_shares(snap), [(1, 0.5), (6, 1.0), (11, None)])
+
     def test_summary(self):
         self.assertIn("2 access points, 3 devices", sv.summary(SNAP))
         self.assertIn("1 deauthentication burst now", sv.summary(SNAP))

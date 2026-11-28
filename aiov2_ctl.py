@@ -5174,11 +5174,38 @@ def parse_dot11(raw, off):
     return None
 
 
+def channel_activity(counts, dwell):
+    """{channel: activity} from frame counts and the seconds each channel was actually listened to.
+
+    Channels are listened to for different lengths of time (a failed channel change, or the report cycle, can
+    leave one tuned longer), so raw counts are not comparable. Each entry keeps the raw "frames" and "bytes",
+    adds "seconds" listened and "per_second" (frames per second of listening: a frame rate, not airtime), and
+    a channel never listened to has "per_second" None and "note" "not listened to" rather than a zero."""
+    out = {}
+    for ch in sorted(set(counts) | set(dwell)):
+        got = counts.get(ch, {})
+        frames, seconds = got.get("frames", 0), max(0.0, float(dwell.get(ch, 0.0)))
+        entry = {"frames": frames, "bytes": got.get("bytes", 0), "seconds": round(seconds, 2)}
+        if seconds > 0:
+            entry["per_second"] = round(frames / seconds, 2)
+        else:
+            entry["per_second"], entry["note"] = None, "not listened to"
+        out[ch] = entry
+    return out
+
+
 class Survey:
-    """The tables a survey fills in. Feed it frames with see(); read it with snapshot()."""
+    """The tables a survey fills in. Feed it frames with see(); say how long each channel was listened to with
+    listened(); read it with snapshot()."""
 
     def __init__(self):
         self.aps, self.stations, self.probes, self.deauth, self.channels = {}, {}, {}, {}, {}
+        self.dwell = {}
+
+    def listened(self, channel, seconds):
+        """Add `seconds` of actual listening on `channel` (only time the radio was really tuned there)."""
+        if channel is not None and seconds > 0:
+            self.dwell[channel] = self.dwell.get(channel, 0.0) + seconds
 
     def see(self, raw, now):
         fields = radiotap_fields(raw)
@@ -5258,7 +5285,7 @@ class Survey:
             "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1),
                         "last": round(p["last"], 1)} for m, p in probes],
             "deauth": sorted(floods, key=lambda f: -f["frames"]),
-            "channels": {str(c): v for c, v in sorted(self.channels.items())},
+            "channels": {str(c): v for c, v in channel_activity(self.channels, self.dwell).items()},
         }
 
 
@@ -5399,6 +5426,9 @@ def survey_run(iface, band, seconds, emit, pcap=False):
     try:
         sock = monitor_setup(iface, channels[0])
         iw = _tool("iw")
+        # The channel the radio is really on, and since when. Time is credited to it only: a channel change
+        # that fails leaves the radio where it was, so that time belongs to the old channel.
+        tuned, tuned_at = channels[0], time.monotonic()
         index, hop_at, report_at = 0, time.monotonic() + SURVEY_DWELL, time.monotonic() + SURVEY_EVERY
         end = time.monotonic() + seconds
         while time.monotonic() < end:
@@ -5411,10 +5441,13 @@ def survey_run(iface, band, seconds, emit, pcap=False):
                 pass
             now = time.monotonic()
             if now >= hop_at and len(channels) > 1:
+                survey.listened(tuned, now - tuned_at)
+                tuned_at = now
                 for _ in range(len(channels)):
                     index = (index + 1) % len(channels)
                     try:
                         _monitor_cmd(iw, "dev", iface, "set", "channel", str(channels[index]))
+                        tuned, tuned_at = channels[index], time.monotonic()
                         break
                     except subprocess.CalledProcessError:
                         channels.pop(index)         # this radio or region cannot use it
@@ -5423,6 +5456,9 @@ def survey_run(iface, band, seconds, emit, pcap=False):
                         index %= len(channels)
                 hop_at = now + SURVEY_DWELL
             if now >= report_at:
+                now = time.monotonic()
+                survey.listened(tuned, now - tuned_at)
+                tuned_at = now
                 emit(survey.snapshot(time.time(), channels[index] if channels else None))
                 report_at = now + SURVEY_EVERY
     except KeyboardInterrupt:
