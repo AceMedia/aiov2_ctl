@@ -277,3 +277,22 @@ class ScrollTests(unittest.TestCase):
         self.assertFalse(lp.stick_to_bottom(200, 500))           # reading older messages: stay put
         self.assertTrue(lp.stick_to_bottom(0, 0))                # nothing to scroll yet
         self.assertTrue(lp.stick_to_bottom(None, 10))
+
+
+class RowsSignatureTests(unittest.TestCase):
+    INFO = {"1": {"user": {"longName": "Hill"}, "lastHeard": 900, "snr": 2.0},
+            "2": {"user": {"longName": "Vale"}, "lastHeard": 800}}
+
+    def test_same_rows_same_signature(self):
+        a = lp.rows_signature(lp.node_rows(self.INFO, now=1000))
+        b = lp.rows_signature(lp.node_rows(dict(self.INFO), now=1010))
+        self.assertEqual(a, b)
+        self.assertEqual(lp.rows_signature([]), lp.rows_signature(None))
+
+    def test_a_change_that_is_shown_changes_it(self):
+        a = lp.rows_signature(lp.node_rows(self.INFO, now=1000))
+        changed = dict(self.INFO, **{"2": {"user": {"longName": "Vale"}, "lastHeard": 800,
+                                           "deviceMetrics": {"batteryLevel": 40}}})
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(changed, now=1000)))
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(self.INFO, now=1200)))   # an age moved on
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(self.INFO, "1", now=1000)))

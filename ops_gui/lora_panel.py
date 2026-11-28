@@ -319,6 +319,14 @@ def node_rows(node_info, self_id=None, now=None, own=None):
     return rows
 
 
+NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
+
+
+def rows_signature(rows):
+    """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
+    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (bool(r.get("self")),) for r in rows or [])
+
+
 def activity_line(a):
     sig = ""
     if a.get("rx_snr") is not None:
@@ -425,6 +433,7 @@ def build_panel(win, Switch):
             super().__init__()
             self.on_snap = None
             self.lora = None
+            self.rows_sig = None
             self.starting = False
             self.signals = Signals()
             self.signals.ready.connect(self.started)
@@ -575,12 +584,15 @@ def build_panel(win, Switch):
                                   (f"  Last send: {tx}" if tx else ""))                             # overwrite it at once
             own = own_position(snap["node_info"], snap.get("self_id"))
             rows = node_rows(snap["node_info"], snap.get("self_id"), own=own)
-            self.table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                for c, key in enumerate(("name", "signal", "distance", "heard", "battery", "hops")):
-                    text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
-                    self.table.setItem(r, c, QTableWidgetItem(text))
-            self.table.fit_columns()
+            sig = rows_signature(rows)
+            if sig != self.rows_sig:                     # rebuild only when what is shown has changed
+                self.rows_sig = sig
+                self.table.setRowCount(len(rows))
+                for r, row in enumerate(rows):
+                    for c, key in enumerate(NODE_COLUMNS):
+                        text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
+                        self.table.setItem(r, c, QTableWidgetItem(text))
+                self.table.fit_columns()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
