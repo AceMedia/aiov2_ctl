@@ -114,6 +114,9 @@ def usable_fix(tpv, max_error=MAX_FIX_ERROR):
     """True for a fix good enough to call a place: a real fix whose stated error, if it gives one, is modest."""
     if not position.good_fix(tpv):
         return False
+    lat, lon = tpv.get("lat"), tpv.get("lon")
+    if not (_number(lat) and _number(lon)) or (lat == 0 and lon == 0):   # NaN, or a receiver's empty 0,0
+        return False
     errors = [e for e in (tpv.get("epx"), tpv.get("epy")) if isinstance(e, (int, float))]
     return not errors or max(errors) <= max_error
 
