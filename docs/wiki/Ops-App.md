@@ -183,7 +183,7 @@ The tabs with their number keys, the keys, each rail's key with whether that rai
 This wiki, inside the app, read from the copy that came with the install. It works with no network. The list of
 pages is on the left and the page on the right; a link to another site opens in your web browser.
 
-The pictures are a separate feature, "Wiki pictures": about 2.5 MB, downloaded once. Without them each picture
+The pictures are a separate feature, "Wiki pictures": about 3 MB, downloaded once. Without them each picture
 is replaced by a line saying what it shows. Add either in Settings > Features or with
 `sudo aiov2_ctl --install --only wikipics`.
 
@@ -217,9 +217,9 @@ The screensaver is off until you switch it on here. Choose which one and how lon
 
 [![Settings, General: the screensaver's options](img/app/settings-01-general-screensaver.webp)](img/app/settings-01-general-screensaver.webp)
 
-Mandelbrot is a slow dive into the set, coloured from the feature colour:
+Mandelbrot is a steady dive into the set, coloured from the feature colour. Here a minute and a half of it is played back in a few seconds; on the uConsole it glides:
 
-[![The Mandelbrot screensaver](img/app/saver-mandelbrot.webp)](img/app/saver-mandelbrot.webp)
+[![The Mandelbrot screensaver diving into the set](img/clips/screensaver.webp)](img/clips/screensaver.webp)
 
 System shows the processor, temperature, memory and disk, with the last three minutes of processor and temperature as graphs:
 

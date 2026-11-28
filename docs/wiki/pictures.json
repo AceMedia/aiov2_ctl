@@ -51,10 +51,6 @@
   "bytes": 2426,
   "sha256": "42598c6e09a481e5cfc9f3ac6d37590bba59c734dc153e88a44793d1ca6e16ab"
  },
- "img/app/saver-mandelbrot.webp": {
-  "bytes": 14836,
-  "sha256": "8a30ba0154eb3ce9ab2750461be3e82657c0e119926acaa13d3578f4b3d219f3"
- },
  "img/app/saver-rain.webp": {
   "bytes": 10732,
   "sha256": "1b01cabfcf6227314840cf586488ed00cbff962eaa2b84dc9556d0725c7ea590"
@@ -150,6 +146,10 @@
  "img/clips/looks.webp": {
   "bytes": 214684,
   "sha256": "832c7edca0600504de5f4beb91b2dc523eb57358d3ed9a7101e289214742b964"
+ },
+ "img/clips/screensaver.webp": {
+  "bytes": 225628,
+  "sha256": "9b46117d0ad7014fb3ba32281db3ad2b0ccb3395be02c01316aa4084008bd16e"
  },
  "img/install/cli-01-features.webp": {
   "bytes": 32018,
