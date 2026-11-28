@@ -153,6 +153,23 @@ def stick_to_bottom(position, maximum, slack=4):
         return True
 
 
+def scroll_after_fill(first_fill, position, maximum, slack=4):
+    """Where the Messages view goes after it is filled: "bottom" (the newest message) or "keep" (where the reader
+    was). The first time it is filled, and the first time after the channel filter changes, it always goes to the
+    newest message: the scroll position then belongs to an empty view or to other messages, and used to leave the
+    view at the oldest. After that stick_to_bottom() decides, so someone reading older messages keeps their place."""
+    if first_fill:
+        return "bottom"
+    return "bottom" if stick_to_bottom(position, maximum, slack) else "keep"
+
+
+def first_fill_done(has_rows, visible):
+    """Whether the first fill has really happened. Not while the view is empty, and not while it is hidden behind
+    another tab: the view is filled in the background, where it has no size and so no true end to scroll to, and
+    the newest message must still be shown when the reader first opens it."""
+    return bool(has_rows and visible)
+
+
 def unread_count(rows, read_mark):
     """Incoming messages after the row last marked as read. Our own messages never count.
 
@@ -678,6 +695,7 @@ def build_panel(win, Switch):
         def __init__(self):
             super().__init__()
             self.read_mark, self.last_sig, self.rows = None, None, []
+            self.first_fill = True               # the next fill shows the newest message (scroll_after_fill)
             root = QVBoxLayout(self)
             bar = QHBoxLayout()
             self.count = QLabel("No messages yet.")
@@ -685,7 +703,7 @@ def build_panel(win, Switch):
             self.channel = QComboBox()
             self.channel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self.channel.addItem("All channels", None)
-            self.channel.activated.connect(lambda _=0: setattr(self, "last_sig", None))
+            self.channel.activated.connect(self.filter_changed)
             reply = QPushButton("Reply on the Mesh tab")
             reply.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             reply.clicked.connect(self.reply)
@@ -705,6 +723,16 @@ def build_panel(win, Switch):
         def reply(self):
             if self.on_reply:
                 self.on_reply()
+
+        def filter_changed(self, _=0):
+            self.last_sig, self.first_fill = None, True
+
+        def shown(self):
+            """The reader has opened this view: if it has not yet been seen filled, show the newest message."""
+            if self.first_fill and self.rows:
+                bar = self.view.verticalScrollBar()
+                QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+                self.first_fill = False
 
         def update_from(self, snap):
             acts = chat_events(snap)
@@ -733,9 +761,14 @@ def build_panel(win, Switch):
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '
                                  f'<b style="color:{colour}">{who}</b>{tag}<br>{html.escape(r["text"])}</p>')
             bar = self.view.verticalScrollBar()
-            follow, keep = stick_to_bottom(bar.value(), bar.maximum()), bar.value()
+            where, keep = scroll_after_fill(self.first_fill, bar.value(), bar.maximum()), bar.value()
             self.view.setHtml("".join(html_rows) or "<p style='color:#9a90a6'>Nothing heard on the mesh yet.</p>")
-            bar.setValue(bar.maximum() if follow else keep)
+            bar.setValue(bar.maximum() if where == "bottom" else keep)
+            if where == "bottom":
+                # the page may not be laid out yet, so its true end is only known once Qt has done that
+                QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+            if first_fill_done(bool(self.rows), self.view.isVisible()):
+                self.first_fill = False
             incoming = sum(1 for r in self.rows if not r["sent"])
             self.count.setText(f"{len(self.rows)} messages, {incoming} heard" if self.rows else "No messages yet.")
 
@@ -818,6 +851,8 @@ def build_panel(win, Switch):
             self.setTabText(1, f"Messages ({unread})" if unread else "Messages")
 
         def tab_changed(self, _=0):
+            if self.currentWidget() is self.messages:
+                self.messages.shown()
             if self.currentWidget() is self.messages and self.messages.rows:
                 self.messages.read_mark = row_signature(self.messages.rows[-1])
                 self.setTabText(1, "Messages")

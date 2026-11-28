@@ -291,6 +291,28 @@ class ScrollTests(unittest.TestCase):
         self.assertTrue(lp.stick_to_bottom(0, 0))                # nothing to scroll yet
         self.assertTrue(lp.stick_to_bottom(None, 10))
 
+    def test_the_first_fill_shows_the_newest_message(self):
+        # 30 messages filled into a fresh view: the bar is still at the top (0) of a long page. It used to stay
+        # there, showing messages 1 to 10 and not the newest.
+        self.assertEqual(lp.scroll_after_fill(True, 0, 900), "bottom")
+        self.assertEqual(lp.scroll_after_fill(True, 300, 900), "bottom", "after the filter changes, too")
+
+    def test_after_the_first_fill_the_reader_keeps_their_place(self):
+        self.assertEqual(lp.scroll_after_fill(False, 200, 900), "keep")
+        self.assertEqual(lp.scroll_after_fill(False, 898, 900), "bottom")
+        self.assertEqual(lp.scroll_after_fill(False, 0, 0), "bottom")
+
+    def test_a_fill_behind_another_tab_or_of_nothing_is_not_the_first_fill(self):
+        self.assertFalse(lp.first_fill_done(True, False))
+        self.assertFalse(lp.first_fill_done(False, True))
+        self.assertTrue(lp.first_fill_done(True, True))
+
+    def test_the_view_uses_the_rule_and_resets_it_when_the_filter_changes(self):
+        import inspect
+        src = inspect.getsource(lp.build_panel)
+        self.assertIn("scroll_after_fill(self.first_fill", src)
+        self.assertIn("self.last_sig, self.first_fill = None, True", src)
+
 
 class RowsSignatureTests(unittest.TestCase):
     INFO = {"1": {"user": {"longName": "Hill"}, "lastHeard": 900, "snr": 2.0},
