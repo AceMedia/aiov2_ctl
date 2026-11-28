@@ -1266,6 +1266,25 @@ def build_window():
                         self.saver_stop()
                     return True
                 self.last_input = time.monotonic()
+            if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and getattr(self, "iga_on", False) and \
+                    int(event.key()) in (int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)) and \
+                    self.tabs.count() and self.current_name() == "IGA":
+                # Ctrl+Tab and Ctrl+Shift+Tab are IGA's own (its pages) while its tab shows, except from the row of
+                # tabs; the main window's tab switching would otherwise take them (iga.tab_key_owner).
+                from . import iga
+                focus = QApplication.focusWidget()
+                where = "app_tabs" if focus is self.tabs.tabBar() else ("page" if self.in_typing_zone() else "")
+                mods = event.modifiers()
+                owner = iga.tab_key_owner(True, where, "Backtab" if int(event.key()) == int(Qt.Key.Key_Backtab)
+                                          else "Tab", bool(mods & Qt.KeyboardModifier.ControlModifier),
+                                          bool(mods & Qt.KeyboardModifier.ShiftModifier))
+                if owner in ("next", "previous"):
+                    event.accept()
+                    if kind == QEvent.Type.KeyPress:
+                        page = self.pages.get("IGA")
+                        if page is not None and hasattr(page, "key_act"):
+                            page.key_act(owner)
+                    return True
             if kind == QEvent.Type.ShortcutOverride and getattr(self, "iga_on", False) and self.in_typing_zone():
                 # A web page has the keyboard: letters, numbers and Tab are the page's, so claim them from the app's
                 # shortcuts and they arrive as ordinary key presses. Escape, F-keys and Ctrl or Alt keys still work.

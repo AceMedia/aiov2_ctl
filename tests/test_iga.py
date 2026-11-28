@@ -142,6 +142,22 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(iga.escape_step(False, False, "address"), "tabs")
         self.assertIsNone(iga.escape_step(False, False, "elsewhere"))
 
+    def test_ctrl_tab_moves_between_igas_pages_while_its_tab_shows(self):
+        for where in ("page", "address", ""):
+            self.assertEqual(iga.tab_key_owner(True, where, "Tab", True, False), "next", where)
+            self.assertEqual(iga.tab_key_owner(True, where, "Tab", True, True), "previous", where)
+            self.assertEqual(iga.tab_key_owner(True, where, "Backtab", True, True), "previous", where)
+
+    def test_the_apps_own_switching_stays_from_the_row_of_tabs_and_on_other_tabs(self):
+        self.assertIsNone(iga.tab_key_owner(True, "app_tabs", "Tab", True, False))
+        self.assertIsNone(iga.tab_key_owner(False, "page", "Tab", True, False))
+        self.assertIsNone(iga.tab_key_owner(True, "address", "Tab", False, False))
+        self.assertIsNone(iga.tab_key_owner(True, "page", "Escape", True, False))
+
+    def test_a_plain_tab_in_a_web_page_is_the_pages(self):
+        self.assertEqual(iga.tab_key_owner(True, "page", "Tab", False, False), "page")
+        self.assertEqual(iga.tab_key_owner(True, "page", "Backtab", False, True), "page")
+
     def test_a_page_keeps_letters_numbers_and_tab_but_not_the_way_out(self):
         self.assertTrue(iga.page_keeps(False, False, False, False, False))
         self.assertFalse(iga.page_keeps(True, False, False, False, False))

@@ -206,6 +206,20 @@ def escape_step(finding, loading, where):
     return None
 
 
+def tab_key_owner(iga_showing, where, key, ctrl, shift):
+    """Who a Tab key belongs to while the app runs. `where` is 'app_tabs' (the app's row of tabs has the keyboard),
+    'page' (a web page has it) or anything else. Returns 'next' or 'previous' (IGA's pages: Ctrl+Tab and
+    Ctrl+Shift+Tab whenever the IGA tab is showing, except from the app's row of tabs, where the app's own
+    switching stays), 'page' (a plain Tab inside a web page goes to the page, for its form fields), or None (the
+    app's usual handling)."""
+    if key not in ("Tab", "Backtab") or not iga_showing:
+        return None
+    backwards = key == "Backtab" or shift
+    if ctrl:
+        return None if where == "app_tabs" else ("previous" if backwards else "next")
+    return "page" if where == "page" else None
+
+
 def page_keeps(escape, function_key, ctrl, alt, meta):
     """Whether a key pressed while a web page has the keyboard belongs to the page rather than to one of the
     app's own shortcuts: letters, numbers and Tab do; Escape, F-keys and Ctrl or Alt combinations do not."""
@@ -637,6 +651,7 @@ def build(win):
     outer.addWidget(waiting, 1, Qt.AlignmentFlag.AlignTop)
     st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False,
           "actions": {}}
+    page.key_act = lambda what: st["actions"].get(what, lambda: None)()
     page.escape_plan = lambda: None            # until the engine is there, Escape is the app's as on any tab
     page.escape_do = lambda _step: None
     page.recolour = lambda: None
