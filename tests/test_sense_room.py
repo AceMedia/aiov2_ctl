@@ -42,51 +42,53 @@ class WordsTests(unittest.TestCase):
 
     def test_where_is_only_ever_the_path_to_a_sender(self):
         for text in every_room_line():
-            if "moving" in text and "whether anything" not in text:
-                self.assertRegex(text, r"moving on or near the paths? to ", text)
+            if "varying more than" in text:
+                self.assertRegex(text, r"signal on the paths? to ", text)
+                self.assertIn("is one cause", text)
+            self.assertNotRegex(text.lower(), r"something is moving|someone|a person", text)
 
     def test_one_link_moving_names_its_path_and_how_long(self):
         self.assertEqual(s.room_line("movement", {"a": 9.0}, None, 5.0, moving_for=14.2),
-                         "Something is moving on or near the path to a, for 14 s.")
+                         "The signal on the path to a is varying more than its baseline, for 14 s. Movement near a path is one cause; interference and the transmitter changing power are others.")
 
     def test_the_connected_link_is_named_by_its_access_point(self):
         self.assertEqual(s.room_line("movement", {"wlan0": 9.0}, {"wlan0": "the wlan0 access point"}, 5.0, 3.0),
-                         "Something is moving on or near the path to the wlan0 access point, for 3 s.")
+                         "The signal on the path to the wlan0 access point is varying more than its baseline, for 3 s. Movement near a path is one cause; interference and the transmitter changing power are others.")
 
     def test_several_links_are_counted_and_the_strongest_named(self):
         text = s.room_line("movement", {"a": 7.0, "b": 12.0, "c": 1.0}, None, 5.0, moving_for=14.0)
-        self.assertEqual(text, "Movement on 2 of 3 links, strongest on the path to b, for 14 s. "
-                               "Something is moving on or near the paths to a and b.")
+        self.assertEqual(text, "Varying on 2 of 3 links, strongest on the path to b, for 14 s. "
+                               "The signal on the paths to a and b is varying more than its baseline. Movement near a path is one cause; interference and the transmitter changing power are others.")
 
     def test_one_of_several_links_is_counted_too(self):
         text = s.room_line("movement", {"a": 7.0, "b": 1.0, "c": 1.0}, None, 5.0, moving_for=100.0)
-        self.assertEqual(text, "Movement on 1 of 3 links, for 1 min. Something is moving on or near the path to a.")
+        self.assertEqual(text, "Varying on 1 of 3 links, for 1 min. The signal on the path to a is varying more than its baseline. Movement near a path is one cause; interference and the transmitter changing power are others.")
 
     def test_movement_with_no_link_over_the_line_still_names_the_strongest(self):
         text = s.room_line("movement", {"a": 4.0, "b": 2.0}, None, 5.0, moving_for=5.0)
-        self.assertIn("Movement on 1 of 2 links", text)
-        self.assertIn("the path to a.", text)
+        self.assertIn("Varying on 1 of 2 links", text)
+        self.assertIn("the path to a is varying", text)
 
     def test_a_still_room_says_for_how_long(self):
-        self.assertEqual(s.room_line("quiet", {"a": 0.0}, still_for=200.0), "Still for 3 min.")
-        self.assertEqual(s.room_line("quiet", {"a": 0.0}), "Still since the room was learned.")
+        self.assertEqual(s.room_line("quiet", {"a": 0.0}, still_for=200.0), "Steady for 3 min.")
+        self.assertEqual(s.room_line("quiet", {"a": 0.0}), "Steady since the room was learned.")
         self.assertEqual(s.room_line("recent", {"a": 0.0}, still_for=8.0),
-                         "Still now. The last movement stopped 8 s ago.")
+                         "Steady now. The signal last varied above its baseline 8 s ago.")
 
     def test_learning_says_nothing_about_movement(self):
         self.assertEqual(s.room_line("calibrating", {"a": 30.0}, moving_for=5.0),
-                         "Learning the room. Nothing can be said about movement yet.")
+                         "Learning the room. Nothing can be said about the signal yet.")
 
     def test_a_link_with_too_few_readings_is_never_called_quiet(self):
         text = s.room_line("quiet", {"a": 0.0, "b": 0.0}, still_for=60.0, unsure=["b"])
-        self.assertEqual(text, "Still for 60 s. Too few readings on the path to b to say whether it is quiet.")
+        self.assertEqual(text, "Steady for 60 s. Too few readings on the path to b to say whether it is quiet.")
         self.assertEqual(s.room_line("quiet", {"a": 0.0, "b": 0.0}, still_for=60.0, unsure=["a", "b"]),
-                         "Too few readings to say whether anything is moving.")
+                         "Too few readings to say whether the signal is varying.")
 
     def test_a_link_with_too_few_readings_is_not_counted_as_moving(self):
         text = s.room_line("movement", {"a": 20.0, "b": 8.0}, None, 5.0, moving_for=4.0, unsure=["a"])
-        self.assertIn("Movement on 1 of 2 links", text)
-        self.assertIn("near the path to b.", text)
+        self.assertIn("Varying on 1 of 2 links", text)
+        self.assertIn("the path to b is varying", text)
         self.assertIn("Too few readings on the path to a", text)
 
     def test_spans_are_seconds_then_minutes(self):
@@ -110,7 +112,7 @@ class WordsTests(unittest.TestCase):
         self.assertEqual(log.history_text(0.0), "")
         log.update("movement", 10.0)
         log.update("quiet", 20.0)
-        self.assertEqual(log.history_text(30.0), "Last 10 minutes: 1 stretch of movement, 10s in all.")
+        self.assertEqual(log.history_text(30.0), "Last 10 minutes: 1 stretch of variation, 10s in all.")
         self.assertIn(log.history_text(30.0), log.text(30.0))
 
 
@@ -376,7 +378,7 @@ class WholePageTests(unittest.TestCase):
         strings = page_strings()
         self.assertIn("nearer = stronger signal, direction unknown", strings)
         self.assertIn("Start watching", strings)
-        self.assertTrue(any("on or near a path it takes" in t for t in strings))
+        self.assertTrue(any("on a path it takes is varying more than its baseline" in t for t in strings))
         self.assertIsNotNone(self.BANNED.search("Possible fall"))
         self.assertIsNotNone(self.BANNED.search("moving between you and the access point"))
 

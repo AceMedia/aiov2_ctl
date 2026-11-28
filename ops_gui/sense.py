@@ -6,7 +6,8 @@ is in sense_dsp.py (a motion score in dB over a self measured noise floor, gates
 multi-link shared-wobble measure and a note of a sharp change followed by stillness), borrowed from the ideas in wifisense-pi
 and WiFi-Sense. This module is the glue: reading sources, the state machine, and the page.
 
-It is a coarse "is something moving" sensor, not a camera. It cannot see who or what or where, and signal strength
+It is a coarse sensor of how much the signal varies, not a camera. Movement is one cause of that variation;
+interference and a transmitter changing power are others. It cannot see who or what or where, and signal strength
 alone cannot do pose or heart rate (the pose and heart rate claims of RuView are not used).
 The helpers at the top are pure so they can be tested without a radio.
 """
@@ -26,8 +27,8 @@ CALIBRATE_SECONDS = 30
 CHART_SECONDS = 60
 WATERFALL_COLUMNS = 120                 # one column a second, two minutes
 SENSITIVITY = {"Low": 2.0, "Medium": 0.0, "High": -2.0}       # dB added to the on and off lines
-STATE_WORDS = {"calibrating": "LEARNING THE ROOM", "quiet": "ALL QUIET", "recent": "RECENT ACTIVITY",
-               "movement": "MOVEMENT"}
+STATE_WORDS = {"calibrating": "LEARNING THE ROOM", "quiet": "ALL QUIET", "recent": "RECENTLY VARIED",
+               "movement": "SIGNAL VARYING"}
 STATE_LEVEL = {"quiet": "good", "recent": "warn", "movement": "hot", "calibrating": "dim"}
 HEAT_STOPS = ((0.0, "#1d1724"), (4.0, "#2b5f8a"), (8.0, "#3fe0d0"), (13.0, "#ffd23f"), (20.0, "#ff3b3b"))
 STRIP_SECONDS = 180.0                   # how far back each link's history strip goes
@@ -384,7 +385,7 @@ def room_line(state, dbs, labels=None, on_db=dsp.PRESENCE_ON_DB, moving_for=None
     def lab(name):
         return labels.get(name, name)
     if state == "calibrating" or not dbs:
-        return "Learning the room. Nothing can be said about movement yet."
+        return "Learning the room. Nothing can be said about the signal yet."
     doubt = sorted((n for n in unsure if n in dbs), key=str)
     tail = ""
     if doubt:
@@ -395,19 +396,20 @@ def room_line(state, dbs, labels=None, on_db=dsp.PRESENCE_ON_DB, moving_for=None
         ranked = sorted(trusted, key=lambda n: (-(trusted[n] or 0.0), str(n)))
         hot = [n for n in ranked if (trusted[n] or 0.0) >= on_db] or ranked[:1]
         span = f", for {span_text(moving_for)}" if moving_for is not None else ""
-        near = f"Something is moving on or near {paths_to(lab(n) for n in sorted(hot, key=str))}"
+        near = f"The signal on {paths_to(lab(n) for n in sorted(hot, key=str))} is varying more than its baseline"
+        cause = " Movement near a path is one cause; interference and the transmitter changing power are others."
         if len(dbs) == 1:
-            return f"{near}{span}.{tail}"
+            return f"{near}{span}.{cause}{tail}"
         if len(hot) == 1:
-            return f"Movement on 1 of {len(dbs)} links{span}. {near}.{tail}"
-        return (f"Movement on {len(hot)} of {len(dbs)} links, strongest on {paths_to([lab(hot[0])])}{span}. "
-                f"{near}.{tail}")
+            return f"Varying on 1 of {len(dbs)} links{span}. {near}.{cause}{tail}"
+        return (f"Varying on {len(hot)} of {len(dbs)} links, strongest on {paths_to([lab(hot[0])])}{span}. "
+                f"{near}.{cause}{tail}")
     if len(doubt) == len(dbs):
-        return "Too few readings to say whether anything is moving."
+        return "Too few readings to say whether the signal is varying."
     if state == "recent":
-        ago = f" The last movement stopped {span_text(still_for)} ago." if still_for is not None else ""
-        return f"Still now.{ago}{tail}"
-    still = f"Still for {span_text(still_for)}." if still_for is not None else "Still since the room was learned."
+        ago = f" The signal last varied above its baseline {span_text(still_for)} ago." if still_for is not None else ""
+        return f"Steady now.{ago}{tail}"
+    still = f"Steady for {span_text(still_for)}." if still_for is not None else "Steady since the room was learned."
     return still + tail
 
 
@@ -445,8 +447,8 @@ class LinkHistory:
 
 def event_text(kind, when=None):
     stamp = time.strftime("%H:%M:%S", time.localtime(when))
-    words = {"movement_start": "movement started", "movement_end": "movement stopped",
-             "presence_start": "activity in the room", "presence_end": "room quiet again",
+    words = {"movement_start": "signal started varying", "movement_end": "signal steady again",
+             "presence_start": "signal disturbed", "presence_end": "signal settled",
              "learned": "room learned, now watching",
              "sharp_then_still": "a sharp change, then still"}
     return f"{stamp}  {words.get(kind, kind)}"
@@ -490,12 +492,12 @@ class ActivityLog:
         if self.last_state in (None, "calibrating"):
             return "Still learning the room."
         if self.last_state == "movement":
-            first = "Moving now."
+            first = "Varying now."
         elif self.last_moved is None:
-            first = "Nothing has moved since the room was learned."
+            first = "No variation above the baseline since the room was learned."
         else:
             gap = int(now - self.last_moved)
-            first = f"Nothing moving for {gap}s." if gap < 90 else f"Nothing moving for {gap // 60} min."
+            first = f"Steady for {gap}s." if gap < 90 else f"Steady for {gap // 60} min."
         second = self.history_text(now)
         hot = max((link_dbs or {}).items(), key=lambda kv: kv[1], default=None)
         third = f"Most disturbed: {hot[0]} ({hot[1]:+.0f} dB)." if hot and len(link_dbs) > 1 and hot[1] > 3 else ""
@@ -507,7 +509,7 @@ class ActivityLog:
         if self.last_state in (None, "calibrating"):
             return ""
         n = len(self.episodes) + (1 if self.moving_since is not None else 0)
-        return (f"Last 10 minutes: {n} stretch{'es' if n != 1 else ''} of movement, "
+        return (f"Last 10 minutes: {n} stretch{'es' if n != 1 else ''} of variation, "
                 f"{int(self.moved_seconds(now))}s in all.")
 
 
@@ -1308,7 +1310,7 @@ def build_page(win):
                 win.activity.add("Wi-Fi sense: " + event_text(kind, now).split("  ", 1)[1])
                 if kind == "movement_start":
                     on = source_title(self.source, win.bssid_registry.label)
-                    win.notify_user("sense", "Movement sensed", f"Wi-Fi signal on {on} is wobbling", "warn")
+                    win.notify_user("sense", "Signal varying", f"Wi-Fi signal on {on} is varying more than its baseline", "warn")
             e = self.engine
             if self.recording:
                 self.recording.write(csv_line(now, e.state, e.db, {self.source: level}) + "\n")
@@ -1347,9 +1349,9 @@ def build_page(win):
                                f"Readings {int(e.reliability() * 100)}% of expected")
             self.detail.setText({
                 "calibrating": "Learning what a still room looks like. Keep the uConsole still and stay out of the way.",
-                "quiet": "The signal is steady. Anything moving nearby will make it wobble.",
-                "recent": "There was activity a moment ago, nothing moving right now.",
-                "movement": "The signal is being disturbed: something is moving on or near a path it takes."}[e.state])
+                "quiet": "The signal is steady. Movement nearby, interference or a change in transmit power would make it vary.",
+                "recent": "The signal varied a moment ago and is steady now.",
+                "movement": "The signal on a path it takes is varying more than its baseline. Movement near a path is one cause; interference and the transmitter changing power are others."}[e.state])
             self.vitals.setText(e.activity.history_text(now))
 
     return Page()
