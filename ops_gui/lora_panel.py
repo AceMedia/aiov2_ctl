@@ -440,7 +440,28 @@ def node_rows(node_info, self_id=None, now=None, own=None):
 
 NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
 
-DETAILS_PROMPT = "Move to a node in the list with the arrow keys or the D-pad to see its details here."
+DETAILS_PROMPT = "Move to a node in the list with the arrow keys or the D-pad to see its details."
+
+
+def right_card(picked, info):
+    """What the right-hand card of the Mesh sub-tab shows, as (title, "details" or "activity"): the chosen node's
+    details while a node is chosen and its record is there, otherwise Activity as before. The nodes table keeps its
+    full height either way."""
+    if picked and isinstance(info, dict):
+        return "Node details", "details"
+    return "Activity", "activity"
+
+
+def pick_again(picked, chosen):
+    """The node chosen after a row is chosen: choosing the row already chosen clears the choice (back to Activity),
+    any other row chooses that node."""
+    return None if chosen is not None and chosen == picked else chosen
+
+
+def escape_clears(picked):
+    """Whether Escape in the nodes table clears the choice. Only while a node is chosen: otherwise Escape is left
+    to the window's own Escape/Back handling."""
+    return bool(picked)
 
 
 def _when(value):
@@ -661,7 +682,7 @@ def build_panel(win, Switch):
     from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, QObject, pyqtSignal
     from PyQt6.QtGui import QColor, QPainter, QPalette, QPen
     from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                                 QLineEdit, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
+                                 QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
                                  QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
     from .foldertabs import FolderTabWidget
     from . import pixel
@@ -741,7 +762,28 @@ def build_panel(win, Switch):
 
     class NodeTable(QTableWidget):
         """The nodes table. The name column takes the spare width and the others only what they need
-        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters."""
+        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters.
+        Escape clears a chosen node, and Enter on the chosen row does too; with nothing chosen Escape is not taken,
+        so the window's own Escape/Back still works."""
+        on_escape = on_enter = None
+        is_picked = staticmethod(lambda: False)
+
+        def event(self, event):
+            from PyQt6.QtCore import QEvent
+            if event.type() == QEvent.Type.ShortcutOverride and event.key() == Qt.Key.Key_Escape \
+                    and escape_clears(self.is_picked()):
+                event.accept()                   # take Escape before the window's shortcut does
+                return True
+            return super().event(event)
+
+        def keyPressEvent(self, event):
+            if event.key() == Qt.Key.Key_Escape and escape_clears(self.is_picked()) and self.on_escape:
+                self.on_escape()
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.on_enter:
+                self.on_enter()
+                return
+            super().keyPressEvent(event)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -823,7 +865,11 @@ def build_panel(win, Switch):
             self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             self.table.itemSelectionChanged.connect(self.pick_node)
-            self.table.cellActivated.connect(lambda *_: self.pick_node())
+            self.table.cellClicked.connect(lambda *_: self.clicked_row())
+            self.table.on_escape = self.clear_pick
+            self.table.on_enter = self.chosen_again
+            self.table.is_picked = lambda: self.picked
+            self.just_picked = False
             self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
             self.table.horizontalHeader().setStretchLastSection(False)
             self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -831,30 +877,42 @@ def build_panel(win, Switch):
             self.details = QLabel(DETAILS_PROMPT)
             self.details.setWordWrap(True)
             self.details.setStyleSheet("font-size: 11pt;")
+            self.details.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             nl.addWidget(cap)
             nl.addWidget(self.table, 1)
-            nl.addWidget(self.details)
+            detail_box = QWidget()
+            dl = QVBoxLayout(detail_box)
+            dl.setContentsMargins(0, 0, 0, 0)
+            dl.addWidget(self.details)
             self.sparks = {}
             for name in ("battery", "snr"):
                 caption = QLabel("")
                 caption.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
                 chart = Spark(name)
                 self.sparks[name] = (caption, chart)
-                nl.addWidget(caption)
-                nl.addWidget(chart)
+                dl.addWidget(caption)
+                dl.addWidget(chart)
                 caption.hide()
                 chart.hide()
             mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
             fl = QVBoxLayout(feed)
-            cap = QLabel("Activity")
-            cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
+            self.feed_cap = QLabel("Activity")
+            self.feed_cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
             self.feed = QPlainTextEdit()
             self.feed.setReadOnly(True)
             self.feed.setStyleSheet("font-size: 11pt;")
-            fl.addWidget(cap)
-            fl.addWidget(self.feed)
+            dl.addStretch(1)
+            self.detail_scroll = QScrollArea()          # the chosen node's details, in the place of Activity
+            self.detail_scroll.setWidgetResizable(True)
+            self.detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.detail_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.detail_scroll.setWidget(detail_box)
+            self.detail_scroll.hide()
+            fl.addWidget(self.feed_cap)
+            fl.addWidget(self.feed, 1)
+            fl.addWidget(self.detail_scroll, 1)
             mid.addWidget(feed, 2)
             root.addLayout(mid, 1)
 
@@ -978,13 +1036,42 @@ def build_panel(win, Switch):
 
         # ---- the chosen node
         def pick_node(self):
-            self.picked = picked_node(self.row_ids, self.table.currentRow()) or self.picked
+            chosen = picked_node(self.row_ids, self.table.currentRow())
+            if chosen is not None and chosen != self.picked:
+                self.picked, self.just_picked = chosen, True
+            self.show_details()
+
+        def clicked_row(self):
+            """A click on a row: the press that chose it is not a second choice; a click on the chosen row is."""
+            if self.just_picked:
+                self.just_picked = False
+                return
+            self.chosen_again()
+
+        def chosen_again(self):
+            self.just_picked = False
+            self.picked = pick_again(self.picked, picked_node(self.row_ids, self.table.currentRow()))
+            if self.picked is None:
+                self.clear_pick()
+            else:
+                self.show_details()
+
+        def clear_pick(self):
+            """Back to Activity, the way the other tables clear a choice: the selection is cleared quietly."""
+            self.picked, self.just_picked = None, False
+            self.table.blockSignals(True)
+            self.table.clearSelection()
+            self.table.blockSignals(False)
             self.show_details()
 
         def show_details(self):
             snap = self.last_snap or {}
             info = (snap.get("node_info") or {}).get(self.picked) if self.picked else None
             text = "\n".join(node_details(info, self.picked, self_id=snap.get("self_id"))) if info else DETAILS_PROMPT
+            title, shows = right_card(self.picked, info)
+            self.feed_cap.setText(title)
+            self.feed.setVisible(shows == "activity")
+            self.detail_scroll.setVisible(shows == "details")
             if text != self.details.text():
                 self.details.setText(text)
             series = ((snap.get("node_series") or {}).get(self.picked) or {}) if info else None

@@ -77,3 +77,22 @@ class NodeDetailsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RightCardTests(unittest.TestCase):
+    def test_details_take_the_place_of_activity_only_while_a_node_is_chosen(self):
+        self.assertEqual(lp.right_card("!a", {"user": {}}), ("Node details", "details"))
+        self.assertEqual(lp.right_card(None, {"user": {}}), ("Activity", "activity"))
+        self.assertEqual(lp.right_card("!a", None), ("Activity", "activity"))
+        self.assertEqual(lp.right_card("", {}), ("Activity", "activity"))
+
+    def test_choosing_the_same_row_again_clears_and_another_row_chooses(self):
+        self.assertIsNone(lp.pick_again("!a", "!a"))
+        self.assertEqual(lp.pick_again("!a", "!b"), "!b")
+        self.assertEqual(lp.pick_again(None, "!b"), "!b")
+        self.assertIsNone(lp.pick_again(None, None))
+
+    def test_escape_is_taken_only_while_a_node_is_chosen(self):
+        self.assertTrue(lp.escape_clears("!a"))
+        self.assertFalse(lp.escape_clears(None))
+        self.assertFalse(lp.escape_clears(""))
