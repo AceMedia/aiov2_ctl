@@ -42,20 +42,30 @@ class WhenTests(unittest.TestCase):
 
 class MandelbrotTests(unittest.TestCase):
     def test_points_in_the_set_never_leave_and_points_far_outside_leave_at_once(self):
-        self.assertEqual(ss.escape(0.0, 0.0, 50), 50)
-        self.assertEqual(ss.escape(-1.0, 0.0, 50), 50)
-        self.assertEqual(ss.escape(2.5, 2.5, 50), 1)
-        self.assertLess(ss.escape(0.5, 0.5, 50), 10)
+        self.assertEqual(ss.smooth(0.0, 0.0, 50), -1.0)
+        self.assertEqual(ss.smooth(-1.0, 0.0, 50), -1.0)
+        self.assertLess(ss.smooth(2.5, 2.5, 50), 4)
+        self.assertGreaterEqual(ss.smooth(2.5, 2.5, 50), 0.0)
+        self.assertLess(ss.smooth(0.5, 0.5, 50), 10)
+
+    def test_the_count_changes_evenly_so_there_are_no_bands(self):
+        # along a line running away from the set the whole-number count falls in steps; this one falls evenly
+        values = [ss.smooth(0.30 + i * 0.002, 0.0, 400) for i in range(200)]
+        self.assertTrue(all(v >= 0 for v in values))
+        self.assertTrue(any(v != int(v) for v in values), "it has a fraction")
+        steps = [a - b for a, b in zip(values, values[1:])]
+        self.assertTrue(all(step > 0 for step in steps), "always falling, never flat then a jump")
+        self.assertLess(max(steps[100:]), 0.5)
 
     def test_the_dive_starts_from_the_whole_set_and_ends_on_its_target(self):
-        target = ss.TARGETS[0]
-        cx, cy, span = ss.view(0, target)
-        self.assertEqual((cx, cy), (-0.6, 0.0))
-        self.assertAlmostEqual(span, ss.START_SPAN)
-        cx, cy, span = ss.view(10, target)
-        self.assertAlmostEqual(cx, target[0])
-        self.assertAlmostEqual(cy, target[1])
-        self.assertLess(span, ss.START_SPAN / 50)
+        for target in ss.TARGETS:
+            cx, cy, span = ss.view(0, target)
+            self.assertAlmostEqual(span, ss.START_SPAN)
+            self.assertLess(cx - span / 2, -1.9, "all but the very tip of the set is in the first picture")
+            self.assertGreater(cx + span / 2, 0.47, "and so is its right edge")
+            cx, cy, span = ss.view(ss.LEVELS - 1, target)
+            self.assertLess(abs(cx - target[0]), span / 2, "the target is still in the last picture")
+            self.assertLess(abs(cy - target[1]), span * 9 / 16 / 2)
 
     def test_each_level_is_closer_and_looks_harder(self):
         spans = [ss.view(n, ss.TARGETS[0])[2] for n in range(ss.LEVELS)]
@@ -63,28 +73,88 @@ class MandelbrotTests(unittest.TestCase):
         self.assertGreater(ss.limit_for(20), ss.limit_for(0))
         self.assertGreater(spans[-1], 1e-9, "still far wider than a float can no longer tell apart")
 
+    def test_every_picture_lies_inside_the_one_before_so_magnifying_never_shows_an_edge(self):
+        cols, rows = 640, 360
+        for target in ss.TARGETS:
+            for level in range(ss.LEVELS - 1):
+                for part in (0.0, 0.25, 0.5, 0.75, 1.0):
+                    x, y, w, h = ss.window_in(ss.view(level, target), ss.view(level + part, target), cols, rows)
+                    self.assertGreaterEqual(x, -1e-6, (target, level, part))
+                    self.assertGreaterEqual(y, -1e-6, (target, level, part))
+                    self.assertLessEqual(x + w, cols + 1e-6, (target, level, part))
+                    self.assertLessEqual(y + h, rows + 1e-6, (target, level, part))
+
+    def test_a_picture_seen_from_its_own_view_is_the_whole_picture(self):
+        v = ss.view(7, ss.TARGETS[1])
+        self.assertEqual(ss.window_in(v, v, 640, 360), (0.0, 0.0, 640.0, 360.0))
+        self.assertEqual(ss.placed((0.0, 0.0, 640.0, 360.0), 640, 360, 1280, 720),
+                         ((0.0, 0.0, 640.0, 360.0), (0.0, 0.0, 1280.0, 720.0)))
+
+    def test_a_window_that_runs_off_the_picture_is_cut_down_and_so_is_its_place_on_screen(self):
+        take, put = ss.placed((-64.0, 0.0, 640.0, 360.0), 640, 360, 1280, 720)
+        self.assertEqual(take, (0.0, 0.0, 576.0, 360.0))
+        self.assertEqual(put, (128.0, 0.0, 1152.0, 720.0))
+        self.assertIsNone(ss.placed((700.0, 0.0, 100.0, 50.0), 640, 360, 1280, 720))
+        self.assertIsNone(ss.placed((0.0, 0.0, 0.0, 0.0), 640, 360, 1280, 720))
+
+    def test_the_zoom_is_steady_and_waits_one_step_past_the_newest_picture(self):
+        self.assertAlmostEqual(ss.glide(3.0, ss.SECONDS_PER_LEVEL / 2, 3), 3.5)
+        self.assertEqual(ss.glide(3.9, ss.SECONDS_PER_LEVEL, 3), 4.0, "it waits there for the next picture")
+        self.assertEqual(ss.glide(4.0, 1.0, 3), 4.0)
+
     def test_every_target_is_on_the_edge_where_there_is_something_to_see(self):
         for target in ss.TARGETS:
             cx, cy, span = ss.view(12, target)
-            counts = {n for y in range(0, 24, 3) for n in ss.row(y, 32, 24, cx, cy, span, ss.limit_for(12))}
+            counts = {int(n) for y in range(0, 24, 3) for n in ss.smooth_row(y, 32, 24, cx, cy, span, ss.limit_for(12))}
             self.assertGreater(len(counts), 6, target)
 
-    def test_a_row_is_one_count_per_block_and_the_picture_is_symmetrical_on_the_real_axis(self):
-        top = ss.row(2, 40, 30, -0.6, 0.0, 3.4, 60)
-        bottom = ss.row(27, 40, 30, -0.6, 0.0, 3.4, 60)
+    def test_a_row_is_one_number_per_point_and_the_picture_is_symmetrical_on_the_real_axis(self):
+        top = ss.smooth_row(2, 40, 30, -0.6, 0.0, 3.4, 60)
+        bottom = ss.smooth_row(27, 40, 30, -0.6, 0.0, 3.4, 60)
         self.assertEqual(len(top), 40)
         self.assertEqual(top, bottom)
+
+    def test_numpy_works_out_the_same_picture(self):
+        np = ss.numpy_or_none()
+        if np is None:
+            self.skipTest("numpy is not installed")
+        cx, cy, span = ss.view(9, ss.TARGETS[0])
+        fast = ss.smooth_rows_np(np, 3, 9, 48, 27, cx, cy, span, 120)
+        self.assertEqual(fast.shape, (6, 48))
+        for i, y in enumerate(range(3, 9)):
+            for got, want in zip(fast[i].tolist(), ss.smooth_row(y, 48, 27, cx, cy, span, 120)):
+                self.assertAlmostEqual(got, want, places=9)
+
+    def test_working_a_picture_out_covers_every_row_rests_between_strips_and_stops_when_told(self):
+        np = ss.numpy_or_none()
+        if np is None:
+            self.skipTest("numpy is not installed")
+        got, rests, clock = [], [], iter(range(1000))
+        job = (16, 10, ss.view(2, ss.TARGETS[0]), 30)
+        done = ss.work_rows(np, job, lambda y, numbers: got.append((y, len(numbers))), lambda: True, duty=0.25,
+                            strip=4, clock=lambda: float(next(clock)), sleep=rests.append)
+        self.assertTrue(done)
+        self.assertEqual(got, [(0, 4), (4, 4), (8, 2)])
+        self.assertEqual(rests, [3.0, 3.0], "each strip took 1 on this clock, so it rests 3: a quarter of the time")
+        got = []
+        done = ss.work_rows(np, job, lambda y, numbers: got.append(y), lambda: len(got) < 1, strip=4, sleep=lambda s: None)
+        self.assertFalse(done)
+        self.assertEqual(got, [0])
 
     def test_the_set_is_the_background_colour_and_the_rest_cycles_through_the_ramp(self):
         colours = ss.ramp("#000000", "#4c8dff", "#ff8a00")
         self.assertEqual(colours[0], "#000000")
         self.assertIn("#4c8dff", colours)
         self.assertIn("#ff8a00", colours)
-        self.assertEqual(ss.shade(60, 60, colours), colours[0])
-        self.assertEqual(ss.shade(0, 60, colours), colours[1])
-        self.assertEqual(ss.shade(len(colours) - 1, 600, colours), colours[1], "it wraps round")
         for colour in colours:
             self.assertRegex(colour, r"^#[0-9a-f]{6}$")
+        size = len(ss.ramp("#000000", "#4c8dff", "#ff8a00", ss.PALETTE))
+        self.assertEqual(size, ss.PALETTE + 1)
+        self.assertEqual(ss.colour_index(-1.0, size), 0, "the set")
+        self.assertEqual(ss.colour_index(0.0, size), 1)
+        self.assertEqual(ss.colour_index((size - 1) / ss.DENSITY, size), 1, "it wraps round")
+        self.assertTrue(all(1 <= ss.colour_index(n / 7.0, size) < size for n in range(5000)))
+        self.assertEqual(ss.colour_words(["#000000", "#4c8dff"]), [0xff000000, 0xff4c8dff])
 
     def test_after_the_deepest_picture_it_starts_again_somewhere_else(self):
         self.assertEqual(ss.next_dive(3, 1), (4, 1))
