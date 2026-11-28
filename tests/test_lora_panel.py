@@ -196,3 +196,103 @@ class MessageTests(unittest.TestCase):
         mark = lp.row_signature(lp.message_rows(acts, limit=5)[0])          # read up to the very first message
         rows = lp.message_rows(acts, limit=3)                               # a window that no longer contains it
         self.assertEqual(lp.unread_count(rows, mark), len(rows))            # safer than getting stuck at 0
+
+
+class ColumnWidthTests(unittest.TestCase):
+    NEEDS = [0, 90, 70, 80, 80, 50]                   # name, signal, distance, heard, battery, hops
+
+    def test_the_name_gets_the_spare_width(self):
+        widths = lp.column_widths(800, self.NEEDS)
+        self.assertEqual(widths[1:], self.NEEDS[1:])
+        self.assertEqual(widths[0], 800 - sum(self.NEEDS[1:]))
+        self.assertEqual(sum(widths), 800)
+
+    def test_a_narrow_table_keeps_the_name_readable(self):
+        widths = lp.column_widths(400, self.NEEDS)
+        self.assertGreaterEqual(widths[0], lp.NAME_MIN_PX)
+        self.assertEqual(sum(widths), 400)
+        self.assertTrue(all(w < n for w, n in zip(widths[1:], self.NEEDS[1:])))
+
+    def test_odd_input(self):
+        self.assertEqual(lp.column_widths(500, []), [])
+        self.assertEqual(lp.column_widths(-5, [0, 10]), [0, 0])
+        self.assertEqual(lp.column_widths(100, [0, 0]), [100, 0])
+
+
+class RowIdentityTests(unittest.TestCase):
+    def test_two_messages_that_differ_only_by_channel_differ(self):
+        acts = [{"kind": "text", "time": "09:00:00", "from": "Ann", "from_id": "!a", "summary": "hi", "channel": c}
+                for c in (0, 1)]
+        rows = lp.message_rows(acts)
+        self.assertNotEqual(lp.row_signature(rows[0]), lp.row_signature(rows[1]))
+        self.assertEqual(lp.unread_count(rows, lp.row_signature(rows[0])), 1)
+
+    def test_packet_id_and_exact_time_are_used(self):
+        base = {"kind": "text", "time": "09:00:00", "from": "Ann", "from_id": "!a", "summary": "hi", "channel": 0}
+        rows = lp.message_rows([dict(base, packet_id=1, stamp=10.1), dict(base, packet_id=2, stamp=10.1),
+                                dict(base, stamp=10.2), dict(base, stamp=10.3)])
+        self.assertEqual(len({lp.row_signature(r) for r in rows}), 4)
+        self.assertEqual(lp.row_signature(rows[0]), lp.row_signature(lp.message_rows([dict(base, packet_id=1, stamp=10.1)])[0]))
+        self.assertIsNone(lp.row_signature(None))
+
+    def test_the_engine_records_the_packet_id(self):
+        from ops_agent import lora
+        engine = lora.LoRa()
+        engine._handle_packet({"fromId": "!0000abcd", "id": 4242, "channel": 2,
+                               "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "hello"}})
+        act = engine.snapshot()["activities"][-1]
+        self.assertEqual(act["packet_id"], 4242)
+        self.assertIsInstance(act["stamp"], float)
+
+
+class SignalFigureTests(unittest.TestCase):
+    def test_link_metrics_come_first_with_their_time(self):
+        info = {"snr": 1.0, "lastHeard": 500, "linkMetrics": {"rxSnr": 6.25, "rxRssi": -91, "time": 880}}
+        self.assertEqual(lp.link_reading(info), (6.25, -91.0, 880))
+        self.assertEqual(lp.signal_cell(*lp.link_reading(info), now=1000), "SNR +6.2 dB  RSSI -91 dBm  2m ago")
+
+    def test_only_the_service_snr(self):
+        info = {"snr": -3.5, "lastHeard": 990}
+        self.assertEqual(lp.link_reading(info), (-3.5, None, 990))
+        self.assertEqual(lp.signal_cell(*lp.link_reading(info), now=1000), "SNR -3.5 dB  now")
+
+    def test_nothing_known(self):
+        self.assertEqual(lp.link_reading({}), (None, None, None))
+        self.assertEqual(lp.link_reading(None), (None, None, None))
+        self.assertEqual(lp.signal_cell(None, None, 100), "-")
+        self.assertEqual(lp.link_reading({"snr": float("nan")}), (None, None, None))
+
+    def test_the_table_row_shows_the_labelled_figures(self):
+        info = {"1": {"user": {"longName": "Hill"}, "lastHeard": 900,
+                      "linkMetrics": {"rxSnr": 2.0, "rxRssi": -100, "time": 940}}}
+        row = lp.node_rows(info, now=1000)[0]
+        self.assertEqual(row["signal"], "SNR +2.0 dB  RSSI -100 dBm  1m ago")
+        self.assertNotIn("km", row["signal"])
+
+
+class ScrollTests(unittest.TestCase):
+    def test_stick_to_bottom(self):
+        self.assertTrue(lp.stick_to_bottom(500, 500))            # at the bottom: follow new messages
+        self.assertTrue(lp.stick_to_bottom(497, 500, slack=4))   # near enough
+        self.assertFalse(lp.stick_to_bottom(200, 500))           # reading older messages: stay put
+        self.assertTrue(lp.stick_to_bottom(0, 0))                # nothing to scroll yet
+        self.assertTrue(lp.stick_to_bottom(None, 10))
+
+
+class RowsSignatureTests(unittest.TestCase):
+    INFO = {"1": {"user": {"longName": "Hill"}, "lastHeard": 900, "snr": 2.0},
+            "2": {"user": {"longName": "Vale"}, "lastHeard": 800}}
+
+    def test_same_rows_same_signature(self):
+        a = lp.rows_signature(lp.node_rows(self.INFO, now=1000))
+        b = lp.rows_signature(lp.node_rows(dict(self.INFO), now=1010))
+        self.assertEqual(a, b)
+        self.assertEqual(lp.rows_signature([]), lp.rows_signature(None))
+
+    def test_a_change_that_is_shown_changes_it(self):
+        a = lp.rows_signature(lp.node_rows(self.INFO, now=1000))
+        changed = dict(self.INFO, **{"2": {"user": {"longName": "Vale"}, "lastHeard": 800,
+                                           "deviceMetrics": {"batteryLevel": 40}}})
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(changed, now=1000)))
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(self.INFO, now=1200)))   # an age moved on
+        self.assertNotEqual(a, lp.rows_signature(lp.node_rows(self.INFO, "1", now=1000)))

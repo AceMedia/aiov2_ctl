@@ -8,7 +8,7 @@ from datetime import datetime
 
 from . import bootstrap, companions
 from .power import debug, log
-from . import nodeid
+from . import geo, nodeid
 
 
 def _pubsub():
@@ -46,6 +46,10 @@ class LoRa:
         self.max_messages = 20
         self.activities = []
         self.max_activities = 40
+        # Chat (text messages and check-ins) is also kept on its own, so a burst of telemetry or position
+        # packets cannot push it out of `activities`. Memory only: nothing here is written to disk.
+        self.chat = []
+        self.max_chat = 300
         self.node_info = {}
         self.node_history = {}
         self.max_track_points = 8
@@ -93,6 +97,7 @@ class LoRa:
                 "connection_status": self.connection_status,
                 "messages": copy.deepcopy(self.messages),
                 "activities": copy.deepcopy(self.activities),
+                "chat": copy.deepcopy(self.chat),
                 "node_info": copy.deepcopy(self.node_info),
                 "node_history": copy.deepcopy(self.node_history),
                 "recent_alerts": copy.deepcopy(self.recent_alerts),
@@ -205,6 +210,8 @@ class LoRa:
 
     def _append_activity(self, item):
         self._append_bounded(self.activities, item, self.max_activities)
+        if isinstance(item, dict) and item.get("kind") in ("text", "checkin"):
+            self._append_bounded(self.chat, item, self.max_chat)
 
     def _normalize_channel(self, channel):
         try:
@@ -505,15 +512,10 @@ class LoRa:
     def _remember_node_position(self, node_id, position):
         if not isinstance(position, dict):
             return
-        lat = position.get("latitude")
-        lon = position.get("longitude")
-        if lat is None or lon is None:
+        where = geo.latlon(position)
+        if where is None:
             return
-        try:
-            lat = float(lat)
-            lon = float(lon)
-        except (TypeError, ValueError):
-            return
+        lat, lon = where
 
         point = {
             "time": self._position_timestamp(position),
@@ -660,7 +662,8 @@ class LoRa:
             return
         lat = local_position.get("lat")
         lon = local_position.get("lon")
-        if lat is None or lon is None:
+        own = geo.latlon({"latitude": lat, "longitude": lon})
+        if own is None:
             return
         with self.lock:
             node_items = list(self.node_info.items())
@@ -668,12 +671,11 @@ class LoRa:
             pos = info.get("position") if isinstance(info, dict) else None
             if not isinstance(pos, dict):
                 continue
-            node_lat = pos.get("latitude")
-            node_lon = pos.get("longitude")
-            if node_lat is None or node_lon is None:
+            where = geo.latlon(pos)
+            if where is None:
                 continue
             try:
-                distance_km = distance_fn(float(lat), float(lon), float(node_lat), float(node_lon))
+                distance_km = distance_fn(own[0], own[1], where[0], where[1])
             except (TypeError, ValueError):
                 continue
             inside = distance_km <= self.proximity_radius_km
@@ -797,6 +799,8 @@ class LoRa:
             "rx_rssi": packet.get("rxRssi"),
             "hop_limit": packet.get("hopLimit"),
             "hop_start": packet.get("hopStart"),
+            "packet_id": packet.get("id"),          # the radio's id for this packet, when it gave one
+            "stamp": time.time(),                   # exact time, so two events in one second differ
         }
         return activity
 

@@ -12,7 +12,7 @@ import html
 import math
 import time
 
-from ops_agent import nodeid
+from ops_agent import geo, nodeid
 
 TICK_MS = 1000
 
@@ -54,7 +54,54 @@ def signal_text(snr, rssi=None):
     return "  ".join(bits) or "-"
 
 
-def message_rows(activities, channel=None, limit=200):
+CHAT_LIMIT = 300                     # as many as the engine keeps (LoRa.max_chat)
+
+
+def chat_events(snapshot):
+    """The events the Messages view is built from: the engine's own chat list, which telemetry cannot push out,
+    or the activity list from an engine too old to keep one."""
+    snap = snapshot or {}
+    chat = snap.get("chat")
+    return chat if isinstance(chat, list) else snap.get("activities") or []
+
+
+def _number(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def link_reading(info):
+    """(SNR in dB, RSSI in dBm, when) for the last reading of a node's signal, each None where unknown. The
+    engine's own reading of the last packet heard from the node (linkMetrics, which carries RSSI and its time)
+    comes first; otherwise the mesh service's SNR, as of when the node was last heard."""
+    info = info if isinstance(info, dict) else {}
+    link = info.get("linkMetrics") if isinstance(info.get("linkMetrics"), dict) else {}
+    snr, rssi = _number(link.get("rxSnr")), _number(link.get("rxRssi"))
+    if snr is not None or rssi is not None:
+        return snr, rssi, link.get("time")
+    snr = _number(info.get("snr"))
+    return snr, None, info.get("lastHeard") if snr is not None else None
+
+
+def signal_cell(snr, rssi, when=None, now=None):
+    """The figures as figures, saying what each is, and how old the reading is: "SNR +6.2 dB  RSSI -91 dBm  2m ago".
+    Never bars, and never a distance: signal strength does not say how far away a node is."""
+    bits = []
+    if snr is not None:
+        bits.append(f"SNR {snr:+.1f} dB")
+    if rssi is not None:
+        bits.append(f"RSSI {rssi:.0f} dBm")
+    if not bits:
+        return "-"
+    if when:
+        bits.append(age_text(when, now))
+    return "  ".join(bits)
+
+
+def message_rows(activities, channel=None, limit=CHAT_LIMIT):
     """Text messages and check-ins from the activity list, oldest first, optionally for one channel."""
     rows = []
     for a in activities or []:
@@ -65,13 +112,32 @@ def message_rows(activities, channel=None, limit=200):
         rows.append({"time": a.get("time", ""), "who": "Me" if a.get("sent") else a.get("from") or "Unknown",
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
-                     "snr": a.get("rx_snr")})
+                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
+                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp")})
     return rows[-limit:]
 
 
 def row_signature(row):
-    """A row's identity, stable across refreshes, for marking how far the user has read."""
-    return (row["time"], row["who"], row["text"]) if row else None
+    """A row's identity, stable across refreshes, for marking how far the user has read: the sender (node id when
+    known), the radio's packet id when it gave one, the channel and the time (exact when known, else the clock
+    text). Without a packet id the text is part of it too. The channel matters: the same words on two channels in
+    the same second are two messages."""
+    if not row:
+        return None
+    sender = row.get("from_id") or row.get("who")
+    when = row.get("stamp") or row.get("time")
+    if row.get("packet_id") is not None:
+        return (sender, row["packet_id"], row.get("channel", 0), when)
+    return (sender, None, row.get("channel", 0), when, row.get("text"))
+
+
+def stick_to_bottom(position, maximum, slack=4):
+    """Whether a refresh should scroll to the newest message: only when the reader was already at the bottom
+    (within `slack` pixels). Someone reading older messages keeps their place."""
+    try:
+        return position >= maximum - slack
+    except TypeError:
+        return True
 
 
 def unread_count(rows, read_mark):
@@ -110,22 +176,8 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 
 
 def node_latlon(info):
-    """(lat, lon) from a node's position, or None. Accepts float and 1e-7 integer forms."""
-    pos = (info or {}).get("position") if isinstance(info, dict) else None
-    if not isinstance(pos, dict):
-        return None
-    lat, lon = pos.get("latitude"), pos.get("longitude")
-    if lat is None and pos.get("latitudeI") is not None:
-        lat = pos["latitudeI"] / 1e7
-    if lon is None and pos.get("longitudeI") is not None:
-        lon = pos["longitudeI"] / 1e7
-    try:
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return lat, lon
+    """(lat, lon) from a node's position, or None. The one checked converter, ops_agent.geo.latlon()."""
+    return geo.latlon(info.get("position")) if isinstance(info, dict) else None
 
 
 def own_position(node_info, self_id):
@@ -207,6 +259,28 @@ def _row_distance(info, node_id, self_id, own):
     return distance_text(haversine_km(own[0], own[1], where[0], where[1]))
 
 
+NAME_MIN_PX = 160                    # the name column never gets less than this, so names stay readable
+
+
+def column_widths(total, needs, stretch=0, minimum=NAME_MIN_PX):
+    """Pixel widths for the node table's columns. Every column but `stretch` (the name) gets what its header and
+    cells need, and the name gets all the rest, never less than `minimum`. When the table is too narrow for that,
+    the other columns give up width in proportion to what they need, so the name is the last to be cut."""
+    total = max(0, int(total))
+    needs = [max(0, int(n)) for n in needs]
+    if not needs:
+        return []
+    others = sum(n for i, n in enumerate(needs) if i != stretch)
+    if total - others >= minimum:
+        widths = list(needs)
+    else:
+        room = max(0, total - minimum)
+        scale = room / others if others else 0.0
+        widths = [int(n * scale) for n in needs]
+    widths[stretch] = max(0, total - sum(w for i, w in enumerate(widths) if i != stretch))
+    return widths
+
+
 def node_rows(node_info, self_id=None, now=None, own=None):
     """Rows for the node table: this node first, then the rest by when they were last heard."""
     rows = []
@@ -219,7 +293,7 @@ def node_rows(node_info, self_id=None, now=None, own=None):
         rows.append({
             "id": str(node_id),
             "name": node_name(info, node_id),
-            "signal": signal_text(info.get("snr")),
+            "signal": signal_cell(*link_reading(info), now=now),
             "heard": age_text(info.get("lastHeard"), now),
             "battery": "-" if battery is None else ("plugged in" if battery > 100 else f"{battery}%"),
             "hops": "-" if hops is None else str(hops),
@@ -229,6 +303,14 @@ def node_rows(node_info, self_id=None, now=None, own=None):
         })
     rows.sort(key=lambda r: (not r["self"], -r["_heard"]))
     return rows
+
+
+NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
+
+
+def rows_signature(rows):
+    """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
+    return tuple(tuple(r.get(k) for k in NODE_COLUMNS) + (bool(r.get("self")),) for r in rows or [])
 
 
 def activity_line(a):
@@ -317,11 +399,27 @@ def build_panel(win, Switch):
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
             p.end()
 
+    class NodeTable(QTableWidget):
+        """The nodes table. The name column takes the spare width and the others only what they need
+        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters."""
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            self.fit_columns()
+
+        def fit_columns(self):
+            head = self.horizontalHeader()
+            needs = [0] + [max(self.sizeHintForColumn(c), head.sectionSizeHint(c)) + 12
+                           for c in range(1, self.columnCount())]
+            for c, w in enumerate(column_widths(self.viewport().width(), needs)):
+                head.resizeSection(c, w)
+
     class MeshPage(QWidget):
         def __init__(self):
             super().__init__()
             self.on_snap = None
             self.lora = None
+            self.rows_sig = None
             self.starting = False
             self.signals = Signals()
             self.signals.ready.connect(self.started)
@@ -373,17 +471,17 @@ def build_panel(win, Switch):
             nl = QVBoxLayout(nodes)
             cap = QLabel("Nodes heard")
             cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
-            self.table = QTableWidget(0, 6)
-            self.table.setHorizontalHeaderLabels(["Name", "Signal", "Distance", "Heard", "Battery", "Hops"])
+            self.table = NodeTable(0, 6)
+            self.table.setHorizontalHeaderLabels(["Name", "Last signal", "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-            self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            for c in range(1, 6):
-                self.table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            self.table.horizontalHeader().setStretchLastSection(False)
+            self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
             nl.addWidget(cap)
             nl.addWidget(self.table)
-            mid.addWidget(nodes, 3)
+            mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
             fl = QVBoxLayout(feed)
@@ -394,7 +492,7 @@ def build_panel(win, Switch):
             self.feed.setStyleSheet("font-size: 11pt;")
             fl.addWidget(cap)
             fl.addWidget(self.feed)
-            mid.addWidget(feed, 4)
+            mid.addWidget(feed, 2)
             root.addLayout(mid, 1)
 
             row = QHBoxLayout()
@@ -472,11 +570,15 @@ def build_panel(win, Switch):
                                   (f"  Last send: {tx}" if tx else ""))                             # overwrite it at once
             own = own_position(snap["node_info"], snap.get("self_id"))
             rows = node_rows(snap["node_info"], snap.get("self_id"), own=own)
-            self.table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                for c, key in enumerate(("name", "signal", "distance", "heard", "battery", "hops")):
-                    text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
-                    self.table.setItem(r, c, QTableWidgetItem(text))
+            sig = rows_signature(rows)
+            if sig != self.rows_sig:                     # rebuild only when what is shown has changed
+                self.rows_sig = sig
+                self.table.setRowCount(len(rows))
+                for r, row in enumerate(rows):
+                    for c, key in enumerate(NODE_COLUMNS):
+                        text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
+                        self.table.setItem(r, c, QTableWidgetItem(text))
+                self.table.fit_columns()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
@@ -586,7 +688,7 @@ def build_panel(win, Switch):
                 self.on_reply()
 
         def update_from(self, snap):
-            acts = snap.get("activities")
+            acts = chat_events(snap)
             chans = message_channels(acts)
             have = [self.channel.itemData(i) for i in range(1, self.channel.count())]
             if have != chans:
@@ -600,7 +702,7 @@ def build_panel(win, Switch):
                 self.channel.setCurrentIndex(max(0, idx))
                 self.channel.blockSignals(False)
             self.rows = message_rows(acts, self.channel.currentData())
-            sig = tuple((r["time"], r["who"], r["text"]) for r in self.rows)
+            sig = tuple(row_signature(r) for r in self.rows)
             if sig == self.last_sig:
                 return
             self.last_sig = sig
@@ -611,8 +713,10 @@ def build_panel(win, Switch):
                 tag = " checked in" if r["checkin"] else ""
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '
                                  f'<b style="color:{colour}">{who}</b>{tag}<br>{html.escape(r["text"])}</p>')
+            bar = self.view.verticalScrollBar()
+            follow, keep = stick_to_bottom(bar.value(), bar.maximum()), bar.value()
             self.view.setHtml("".join(html_rows) or "<p style='color:#9a90a6'>Nothing heard on the mesh yet.</p>")
-            self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().maximum())
+            bar.setValue(bar.maximum() if follow else keep)
             incoming = sum(1 for r in self.rows if not r["sent"])
             self.count.setText(f"{len(self.rows)} messages, {incoming} heard" if self.rows else "No messages yet.")
 
@@ -688,7 +792,7 @@ def build_panel(win, Switch):
         def fan_out(self, engine, snap, own):
             self.radar_page.update_from(engine, snap, own)
             self.messages.update_from(snap)
-            rows = message_rows(snap.get("activities"))
+            rows = message_rows(chat_events(snap))
             if self.currentWidget() is self.messages:
                 self.messages.read_mark = row_signature(rows[-1]) if rows else self.messages.read_mark
             unread = unread_count(rows, self.messages.read_mark)

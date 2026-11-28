@@ -10,6 +10,7 @@ from .bootstrap import App, ComposeResult, Container, Footer, Header, Horizontal
 from .gps import GPS
 from .lora import LoRa
 from .preferences import export_telemetry_snapshot, load_preferences, save_preferences
+from .geo import latlon as checked_latlon
 from .power import debug, log
 from .sdr import SDR, level_bar
 
@@ -322,15 +323,7 @@ class LoRaWidget(Static):
     def _get_position(self, info):
         if not isinstance(info, dict):
             return None
-        pos = info.get("position") or {}
-        lat = pos.get("latitude")
-        lon = pos.get("longitude")
-        if lat is None or lon is None:
-            return None
-        try:
-            return (float(lat), float(lon))
-        except (TypeError, ValueError):
-            return None
+        return checked_latlon(info.get("position"))
 
     def _haversine_km(self, lat1, lon1, lat2, lon2):
         from math import radians, sin, cos, sqrt, asin
@@ -1568,12 +1561,11 @@ class OpsApp(App):
                 info = snapshot["node_info"].get(self_id)
                 if isinstance(info, dict):
                     pos = info.get("position") or {}
-                    lat = pos.get("latitude")
-                    lon = pos.get("longitude")
-                    if lat is not None and lon is not None:
+                    where = checked_latlon(pos)
+                    if where is not None:
                         return {
-                            "lat": float(lat),
-                            "lon": float(lon),
+                            "lat": where[0],
+                            "lon": where[1],
                             "alt": pos.get("altitude"),
                             "track": None,
                             "speed": None,
