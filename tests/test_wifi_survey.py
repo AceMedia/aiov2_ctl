@@ -127,6 +127,14 @@ class FrameTests(unittest.TestCase):
             self.assertEqual(list(s.stations), ["02:11:22:33:44:55"], sub)
             self.assertEqual(s.stations["02:11:22:33:44:55"]["bssid"], "aa:bb:cc:00:11:22")
 
+    def test_management_frames_credit_the_signal_to_their_sender(self):
+        s = a.Survey()
+        s.see(frame(beacon(), signal=-40), 1.0)
+        s.see(frame(mgmt(11, STA, AP, AP, b"\x00" * 6), signal=-80), 2.0)    # access point to device
+        self.assertIsNone(s.stations["02:11:22:33:44:55"]["rssi"])
+        s.see(frame(mgmt(0, AP, STA, AP, b"\x00" * 6), signal=-75), 3.0)     # device to access point
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -75.0)
+
     def test_management_frames_between_two_strangers_name_nobody(self):
         other = bytes.fromhex("0a0b0c0d0e0f")
         s = a.Survey()
@@ -181,6 +189,79 @@ class FrameTests(unittest.TestCase):
     def test_frequency_to_channel(self):
         self.assertEqual([a.freq_to_channel(f) for f in (2412, 2437, 2484, 5180, 5745, 0, None, 9999)],
                          [1, 6, 14, 36, 149, None, None, None])
+
+
+class SignalOwnerTests(unittest.TestCase):
+    """A frame's signal belongs to its transmitter (address 2), never to the other end."""
+
+    OTHER = bytes.fromhex("0a0b0c0d0e0f")
+
+    def data_frame(self, to_ds, from_ds, a1, a2, a3, a4=b""):
+        fc1 = (1 if to_ds else 0) | (2 if from_ds else 0)
+        return bytes([0x08, fc1]) + b"\x00\x00" + a1 + a2 + a3 + b"\x00\x00" + a4 + b"payload"
+
+    def survey_with_ap(self, ap_signal=-40):
+        s = a.Survey()
+        s.see(frame(beacon(), signal=ap_signal), 1.0)
+        return s
+
+    def test_to_ds_credits_the_station(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(True, False, AP, STA, BROADCAST), signal=-70), 2.0)
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -70.0)
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_from_ds_credits_the_access_point_not_the_station(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(False, True, STA, AP, self.OTHER), signal=-60), 2.0)
+        sta = s.stations["02:11:22:33:44:55"]
+        self.assertEqual((sta["frames"], sta["rssi"]), (1, None))     # counted, but its strength is not known
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], 0.7 * -40 + 0.3 * -60)
+        snap = s.snapshot(3.0)
+        self.assertIsNone(snap["stations"][0]["rssi"])
+
+    def test_opposite_directions_keep_their_own_strengths(self):
+        s = self.survey_with_ap(-40)
+        for i in range(20):
+            s.see(frame(self.data_frame(True, False, AP, STA, BROADCAST), signal=-80), 2.0 + i)
+            s.see(frame(self.data_frame(False, True, STA, AP, self.OTHER), signal=-40), 2.5 + i)
+        self.assertAlmostEqual(s.stations["02:11:22:33:44:55"]["rssi"], -80.0)
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_neither_and_both_ds_bits_credit_nobody(self):
+        s = self.survey_with_ap()
+        s.see(frame(self.data_frame(False, False, STA, self.OTHER, AP), signal=-90), 2.0)
+        s.see(frame(self.data_frame(True, True, STA, AP, self.OTHER, STA), signal=-90), 3.0)
+        self.assertEqual(s.stations, {})
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_the_transmitter_is_address_two(self):
+        self.assertEqual(a.parse_dot11(self.data_frame(True, False, AP, STA, BROADCAST), 0)["tx"], "02:11:22:33:44:55")
+        self.assertEqual(a.parse_dot11(self.data_frame(False, True, STA, AP, BROADCAST), 0)["tx"], "aa:bb:cc:00:11:22")
+
+    def test_control_frames_credit_their_transmitter_only(self):
+        s = self.survey_with_ap()
+        s.see(frame(bytes([0xB4, 0, 0, 0]) + AP + STA, signal=-77), 2.0)        # request to send from the device
+        s.see(frame(bytes([0xB4, 0, 0, 0]) + STA + AP, signal=-30), 3.0)        # and from the access point
+        self.assertEqual(s.stations["02:11:22:33:44:55"]["rssi"], -77.0)
+        self.assertAlmostEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], 0.7 * -40 + 0.3 * -30)
+
+    def test_frames_without_a_transmitter_credit_nobody(self):
+        s = self.survey_with_ap()
+        ack = bytes([0xD4, 0, 0, 0]) + STA                 # acknowledgement: receiver only
+        cts = bytes([0xC4, 0, 0, 0]) + AP                  # clear to send: receiver only
+        for f in (ack, cts, ack + b"\x00" * 6, cts + b"\x00" * 6):
+            s.see(frame(f, signal=-20), 2.0)
+        self.assertEqual(s.stations, {})
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+
+    def test_a_beacon_sent_by_someone_else_does_not_move_the_access_point(self):
+        s = self.survey_with_ap()
+        s.see(frame(mgmt(8, BROADCAST, STA, AP, beacon()[24:]), signal=-20), 2.0)
+        self.assertEqual(s.aps["aa:bb:cc:00:11:22"]["rssi"], -40.0)
+        fresh = a.Survey()
+        fresh.see(frame(mgmt(8, BROADCAST, STA, AP, beacon()[24:]), signal=-20), 2.0)
+        self.assertEqual(fresh.aps, {})
 
 
 class CaptureKeepTests(unittest.TestCase):

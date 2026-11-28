@@ -5113,7 +5113,11 @@ def security_of(capability, ies):
 
 
 def parse_dot11(raw, off):
-    """What a frame says about who is around, or None. Never reads past the header unless it must."""
+    """What a frame says about who is around, or None. Never reads past the header unless it must.
+
+    Every result that names a sender carries "tx", the transmitter address (address 2). The signal strength in
+    the radiotap header was measured on that transmitter's frame, so it belongs to "tx" and to nobody else: an
+    access point's frame to a station says nothing about how strongly the station is heard."""
     if len(raw) < off + 16:
         return None
     fc0, fc1 = raw[off], raw[off + 1]
@@ -5123,7 +5127,7 @@ def parse_dot11(raw, off):
         # Request to send, block ack and block ack request name both ends. Which one is the access point is
         # decided later, from the access points already heard.
         if sub in (8, 9, 11) and not a1[0] & 1 and not a2[0] & 1:
-            return {"kind": "pair", "a": _mac(a1), "b": _mac(a2)}
+            return {"kind": "pair", "a": _mac(a1), "b": _mac(a2), "tx": _mac(a2)}
         return None
     if len(raw) < off + 24:
         return None
@@ -5138,30 +5142,35 @@ def parse_dot11(raw, off):
             ssid = ies.get(0, b"")
             ssid = "" if ssid and not any(ssid) else ssid.decode("utf-8", "replace")
             ch = ies.get(3)[0] if ies.get(3) else (ies.get(61)[0] if ies.get(61) else None)
-            return {"kind": kind, "bssid": _mac(a3), "ssid": ssid, "channel": ch, "security": security_of(cap, ies)}
+            return {"kind": kind, "bssid": _mac(a3), "ssid": ssid, "channel": ch, "security": security_of(cap, ies),
+                    "tx": _mac(a2)}
         if kind == "probereq":
             if a2[0] & 1:
                 return None
             ssid = _ies(raw[off + 24:]).get(0, b"")
-            return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else ""}
+            return {"kind": kind, "sta": _mac(a2), "ssid": ssid.decode("utf-8", "replace") if ssid and any(ssid) else "",
+                    "tx": _mac(a2)}
         if kind in ("deauth", "disassoc"):
             return {"kind": kind, "src": _mac(a2), "dst": _mac(a1), "bssid": _mac(a3)}
         if sub in (0, 1, 2, 3, 11, 13) and not a1[0] & 1 and not a2[0] & 1 and not a3[0] & 1:
             # Association, reassociation, authentication and action frames: whichever end is the BSSID is the
             # access point, the other is a device talking to it.
             if a3 == a2:
-                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a1)}
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a1), "tx": _mac(a2)}
             if a3 == a1:
-                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a2)}
+                return {"kind": "data", "bssid": _mac(a3), "sta": _mac(a2), "tx": _mac(a2)}
         return None
     if ftype == 2:
+        # To DS only: a1 = BSSID, a2 = station (the transmitter). From DS only: a1 = station, a2 = BSSID (the
+        # transmitter). Neither (a direct or ad hoc link) and both (a bridge between access points) do not say
+        # which end is a station of which network, so they name nobody.
         to_ds, from_ds = bool(fc1 & 1), bool(fc1 & 2)
         if to_ds == from_ds:
             return None
         bssid, sta = (a1, a2) if to_ds else (a2, a1)
         if sta[0] & 1 or bssid[0] & 1 or sta == bssid:
             return None
-        return {"kind": "data", "bssid": _mac(bssid), "sta": _mac(sta)}
+        return {"kind": "data", "bssid": _mac(bssid), "sta": _mac(sta), "tx": _mac(a2)}
     return None
 
 
@@ -5185,17 +5194,21 @@ class Survey:
         if not info or signal is None or not -120 <= signal < 0:
             return info
         kind = info["kind"]
+        tx = info.get("tx")
         if kind == "pair":
             if info["a"] in self.aps:
-                info = {"kind": "data", "bssid": info["a"], "sta": info["b"]}
+                info = {"kind": "data", "bssid": info["a"], "sta": info["b"], "tx": tx}
             elif info["b"] in self.aps:
-                info = {"kind": "data", "bssid": info["b"], "sta": info["a"]}
+                info = {"kind": "data", "bssid": info["b"], "sta": info["a"], "tx": tx}
             else:
                 return info
             kind = "data"
         if kind in ("beacon", "proberesp"):
+            if tx != info["bssid"] and info["bssid"] not in self.aps:
+                return info                      # sent by someone other than the access point it names
             ap = self.aps.setdefault(info["bssid"], {"first": now, "beacons": 0, "ssid": "", "rssi": float(signal)})
-            ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
+            if tx == info["bssid"]:
+                ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
             ap["last"], ap["security"] = now, info["security"]
             ap["channel"] = info["channel"] or ch or ap.get("channel")
             if info["ssid"]:
@@ -5203,10 +5216,15 @@ class Survey:
             if kind == "beacon":
                 ap["beacons"] += 1
         elif kind == "data":
-            sta = self.stations.setdefault(info["sta"], {"frames": 0, "rssi": float(signal)})
+            # The frame counts towards the station either way, but its signal goes to whichever end sent it.
+            sta = self.stations.setdefault(info["sta"], {"frames": 0, "rssi": None})
             sta.update(bssid=info["bssid"], last=now)
             sta["frames"] += 1
-            sta["rssi"] = 0.7 * sta["rssi"] + 0.3 * signal
+            if tx == info["sta"]:
+                sta["rssi"] = float(signal) if sta["rssi"] is None else 0.7 * sta["rssi"] + 0.3 * signal
+            elif tx == info["bssid"] and info["bssid"] in self.aps:
+                ap = self.aps[info["bssid"]]
+                ap["rssi"] = 0.7 * ap["rssi"] + 0.3 * signal
         elif kind == "probereq":
             pr = self.probes.setdefault(info["sta"], {"ssids": [], "count": 0, "rssi": float(signal)})
             pr["count"] += 1
@@ -5234,7 +5252,8 @@ class Survey:
             "aps": [{"bssid": b, "ssid": a["ssid"], "channel": a.get("channel"), "security": a.get("security", ""),
                      "rssi": round(a["rssi"], 1), "beacons": a["beacons"], "first": round(a["first"], 1),
                      "last": round(a["last"], 1)} for b, a in aps],
-            "stations": [{"mac": m, "bssid": s["bssid"], "rssi": round(s["rssi"], 1), "frames": s["frames"],
+            "stations": [{"mac": m, "bssid": s["bssid"],
+                          "rssi": None if s["rssi"] is None else round(s["rssi"], 1), "frames": s["frames"],
                           "last": round(s["last"], 1)} for m, s in stas],
             "probes": [{"mac": m, "ssids": p["ssids"], "count": p["count"], "rssi": round(p["rssi"], 1),
                         "last": round(p["last"], 1)} for m, p in probes],
