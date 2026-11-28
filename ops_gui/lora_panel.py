@@ -125,11 +125,51 @@ def message_rows(activities, channel=None, limit=CHAT_LIMIT):
         rows.append({"time": a.get("time", ""), "who": "Me" if a.get("sent") else a.get("from") or "Unknown",
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
-                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
+                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"), "to_id": a.get("to_id"),
                      "packet_id": a.get("packet_id"), "stamp": a.get("stamp"),
                      "state": delivery.delivery_text(a.get("delivery") or {"state": delivery.HANDED})
                      if a.get("sent") else ""})
     return rows[-limit:]
+
+
+BROADCAST_NUMBER = 0xFFFFFFFF          # the library's broadcast address, written "^all" in its packets
+
+
+def destination(to_id, self_id=None):
+    """Where a packet went: "everyone" (the broadcast address, "^all" or 0xFFFFFFFF), "me" (this radio), "other"
+    (another node: this radio only overheard it), or None when the packet did not say."""
+    if to_id is None or to_id == "":
+        return None
+    if str(to_id).strip() == "^all" or nodeid.canonical(to_id) == nodeid.canonical(BROADCAST_NUMBER):
+        return "everyone"
+    if nodeid.same(to_id, self_id):
+        return "me"
+    return "other"
+
+
+def destination_text(to_id, self_id=None, node_info=None, sent=False):
+    """The destination in words: "to everyone on the channel", "direct to this radio", "direct to Ann" (sent by
+    this radio) or "direct to Ann, overheard". "" when not known."""
+    kind = destination(to_id, self_id)
+    if kind == "everyone":
+        return "to everyone on the channel"
+    if kind == "me":
+        return "direct to this radio"
+    if kind == "other":
+        info = None
+        for key, value in (node_info or {}).items():
+            if nodeid.same(key, to_id):
+                info = value
+        name = node_name(info, nodeid.canonical(to_id)) if info else nodeid.canonical(to_id)
+        return f"direct to {name}" + ("" if sent else ", overheard")
+    return ""
+
+
+def unreadable_text(kind):
+    """What to say in place of an encrypted packet's content, which is never shown."""
+    if kind == "other":
+        return "a direct message to another node; its text is encrypted to them and cannot be read here"
+    return "encrypted with a key this radio does not have; its content cannot be read here"
 
 
 def view_signature(rows):
@@ -400,6 +440,173 @@ def node_rows(node_info, self_id=None, now=None, own=None):
 
 NODE_COLUMNS = ("name", "signal", "distance", "heard", "battery", "hops")
 
+DETAILS_PROMPT = "Move to a node in the list with the arrow keys or the D-pad to see its details."
+
+
+def right_card(picked, info):
+    """What the right-hand card of the Mesh sub-tab shows, as (title, "details" or "activity"): the chosen node's
+    details while a node is chosen and its record is there, otherwise Activity as before. The nodes table keeps its
+    full height either way."""
+    if picked and isinstance(info, dict):
+        return "Node details", "details"
+    return "Activity", "activity"
+
+
+def pick_again(picked, chosen):
+    """The node chosen after a row is chosen: choosing the row already chosen clears the choice (back to Activity),
+    any other row chooses that node."""
+    return None if chosen is not None and chosen == picked else chosen
+
+
+def escape_clears(picked):
+    """Whether Escape in the nodes table clears the choice. Only while a node is chosen: otherwise Escape is left
+    to the window's own Escape/Back handling."""
+    return bool(picked)
+
+
+def _when(value):
+    """A time in seconds since the epoch from a number the library or the engine gave, or None."""
+    value = _number(value)
+    if not value or value <= 0:
+        return None
+    return value / 1000.0 if value > 1_000_000_000_000 else value
+
+
+def precision_text(bits):
+    """What the precision a node sent its position with means, or None when it did not say. Meshtastic rounds a
+    shared position to `bits` bits; 32 is the exact position. The distances follow Meshtastic's own table (10 bits is
+    about 23.3 km, and each further bit halves it): an assumption from its documentation, not checked on a radio."""
+    bits = _number(bits)
+    if bits is None or bits <= 0:
+        return None
+    bits = int(bits)
+    if bits >= 32:
+        return "sent at full precision"
+    return f"sent rounded to {bits} bits, so only to within about {distance_text(23.3 / 2 ** (bits - 10))}"
+
+
+def _pct(value):
+    return f"{value:.0f}%" if value >= 10 else f"{value:.1f}%"
+
+
+def node_details(info, node_id, now=None, self_id=None):
+    """The lines of the details block for one node, from its record as the engine keeps it. Only what the node
+    reported is shown: anything missing is left out, never shown as zero. A position is shown only when the node sent
+    one, with its own age and the precision it was sent with; nothing here is worked out from signal strength."""
+    info = info if isinstance(info, dict) else {}
+    now = now or time.time()
+    user = info.get("user") if isinstance(info.get("user"), dict) else {}
+    lines = []
+    if user.get("longName"):
+        lines.append(f"Name: {user['longName']}")
+    if user.get("shortName"):
+        lines.append(f"Short name: {user['shortName']}")
+    ident = nodeid.canonical(user.get("id") or node_id)
+    if ident:
+        lines.append(f"Identity: {ident}" + (" (this radio)" if nodeid.same(node_id, self_id) else ""))
+    if user.get("hwModel") and str(user["hwModel"]) != "UNSET":
+        lines.append(f"Hardware: {user['hwModel']}")
+    if user.get("role"):
+        lines.append(f"Role: {user['role']}")
+    heard = _when(info.get("lastHeard"))
+    if heard:
+        lines.append(f"Last heard: {age_text(heard, now)}")
+    snr, rssi, when = link_reading(info)
+    if snr is not None or rssi is not None:
+        bits = ([f"SNR {snr:+.1f} dB"] if snr is not None else []) + ([f"RSSI {rssi:.0f} dBm"] if rssi is not None else [])
+        when = _when(when)
+        lines.append("Signal heard here: " + "  ".join(bits) + f" ({age_text(when, now) if when else 'age not known'})")
+    hops = _number(info.get("hopsAway"))
+    if hops is not None:
+        lines.append(f"Hops away: {hops:.0f}" + (" (heard directly)" if hops == 0 else ""))
+    metrics = info.get("deviceMetrics") if isinstance(info.get("deviceMetrics"), dict) else {}
+    battery, voltage = _number(metrics.get("batteryLevel")), _number(metrics.get("voltage"))
+    if battery is not None:
+        lines.append("Power: on external power" if battery > 100 else f"Battery: {battery:.0f}%")
+    if voltage is not None and voltage > 0:
+        lines.append(f"Voltage: {voltage:.2f} V")
+    use, air = _number(metrics.get("channelUtilization")), _number(metrics.get("airUtilTx"))
+    if use is not None or air is not None:
+        got = _when(info.get("telemetryReceived"))
+        bits = ([f"channel {_pct(use)} busy"] if use is not None else []) + \
+               ([f"transmitting {_pct(air)} of the time"] if air is not None else [])
+        lines.append("Its own report: " + ", ".join(bits) +
+                     f" ({age_text(got, now) if got else 'time of the report not known'})")
+    where = node_latlon(info)
+    if where:
+        position = info.get("position") if isinstance(info.get("position"), dict) else {}
+        alt = _number(position.get("altitude"))
+        text = f"Position it sent: {where[0]:.5f}, {where[1]:.5f}" + (f", {alt:.0f} m up" if alt is not None else "")
+        lines.append(f"{text} ({position_age_text(position_time(info), now)})")
+        precision = precision_text(position.get("precisionBits"))
+        if precision:
+            lines.append(f"Position precision: {precision}")
+    return lines
+
+
+def channel_busy_text(node_info, self_id, now=None):
+    """How busy the channel is, as this radio's own report of itself (its device telemetry: channelUtilization and
+    airUtilTx), with the report's age: "This radio reports the channel 12% busy and has been transmitting 0.4% of the
+    time, as of 2m ago". "-" when it has not reported them."""
+    info = None
+    if self_id is not None:
+        for key, value in (node_info or {}).items():
+            if nodeid.same(key, self_id) and isinstance(value, dict):
+                info = value
+    metrics = (info or {}).get("deviceMetrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    use, air = _number(metrics.get("channelUtilization")), _number(metrics.get("airUtilTx"))
+    if use is None and air is None:
+        return "-"
+    bits = []
+    if use is not None:
+        bits.append(f"the channel {_pct(use)} busy")
+    if air is not None:
+        bits.append(f"{'has been' if use is not None else 'it has been'} transmitting {_pct(air)} of the time")
+    text = "This radio reports " + " and ".join(bits) if use is not None else \
+        "This radio reports that " + bits[0]
+    got = _when(info.get("telemetryReceived"))
+    if got:
+        age = age_text(got, now)
+        return text + (", as of just now" if age == "now" else f", as of {age}")
+    return text + " (when it reported this is not known)"
+
+
+SPARK_RANGES = {"battery": (0.0, 100.0), "snr": (-20.0, 12.0)}   # what each small chart spans, top to bottom
+
+
+def series_values(points):
+    """The values of a node's history, oldest first, for pixel.spark_columns()."""
+    return [p[1] for p in points or [] if isinstance(p, (list, tuple)) and len(p) == 2]
+
+
+def series_caption(name, points, now=None):
+    """The words beside a small chart: "Battery heard here, 12 readings: 80% to 76%, latest 2m ago"."""
+    label, fmt = {"battery": ("Battery", lambda v: f"{v:.0f}%"),
+                  "snr": ("SNR", lambda v: f"{v:+.1f} dB")}[name]
+    values = series_values(points)
+    if not values:
+        return f"{label}: no readings heard here yet"
+    latest = age_text(points[-1][0], now)
+    if len(values) == 1:
+        return f"{label} heard here, 1 reading: {fmt(values[0])}, {latest}"
+    return f"{label} heard here, {len(values)} readings: {fmt(values[0])} to {fmt(values[-1])}, latest {latest}"
+
+
+def picked_node(row_ids, current_row):
+    """The node chosen in the table: the id on the current row, or None when no row is current."""
+    if isinstance(current_row, int) and 0 <= current_row < len(row_ids or []):
+        return row_ids[current_row]
+    return None
+
+
+def row_of(row_ids, node_id):
+    """The row a chosen node is on after the table is rebuilt, or -1 when it is no longer listed."""
+    try:
+        return list(row_ids or []).index(node_id)
+    except ValueError:
+        return -1
+
 
 def rows_signature(rows):
     """What the nodes table shows, as a tuple, so a refresh can tell whether anything changed at all."""
@@ -407,14 +614,49 @@ def rows_signature(rows):
                  for r in rows or [])
 
 
-def activity_line(a):
+def activity_line(a, self_id=None, node_info=None):
+    """One line of the Activity feed. When the packet said where it went, the line says so; an encrypted packet's
+    content is never shown, only what it was."""
     sig = ""
+    where = destination_text(a.get("to_id"), self_id, node_info, sent=bool(a.get("sent")))
+    summary = a.get("summary", "")
+    if a.get("kind") == "encrypted":
+        summary = unreadable_text(destination(a.get("to_id"), self_id))
     if a.get("rx_snr") is not None:
         sig = f"  ({a['rx_snr']:+.1f} dB)"
     arrow = ">" if a.get("sent") else "<"
     if a.get("sent") and isinstance(a.get("delivery"), dict):
         sig = f"  [{delivery.delivery_text(a['delivery'])}]"
-    return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {a.get('from', '?')}: {a.get('summary', '')}{sig}"
+    who = f"{a.get('from', '?')} ({where})" if where else a.get("from", "?")
+    return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {who}: {summary}{sig}"
+
+
+DEFAULT_KEY_WARNING = ("This channel uses Meshtastic's public default key: anyone with a Meshtastic radio nearby "
+                       "can read what is sent on it.")
+
+
+def default_key_line(snapshot):
+    """The standing warning by the message box when the channel being sent on uses the public default key, else "".
+    Nothing is said when the radio's channel list is not available or the key cannot be told: no guessing."""
+    snap = snapshot or {}
+    sel = snap.get("selected_channel") or 0
+    for c in snap.get("configured_channels") or []:
+        if isinstance(c, dict) and c.get("index", 0) == sel:
+            return DEFAULT_KEY_WARNING if c.get("default_key") is True else ""
+    return ""
+
+
+def composer_line(snapshot):
+    """Where the message being typed will go. This app only sends to everyone on the chosen channel: "To everyone
+    on channel 0 (LongFast)". The channel's own name, or for a primary with an empty name the radio's preset; the
+    name is left out when neither is known."""
+    snap = snapshot or {}
+    sel = snap.get("selected_channel") or 0
+    name = ""
+    for c in snap.get("configured_channels") or []:
+        if isinstance(c, dict) and c.get("index", 0) == sel:
+            name = c.get("name") or (snap.get("modem_preset") or "" if c.get("primary") else "")
+    return f"To everyone on channel {sel}" + (f" ({name})" if name else "")
 
 
 def hint(library_ok, service_active, rail):
@@ -440,9 +682,10 @@ def build_panel(win, Switch):
     from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, QObject, pyqtSignal
     from PyQt6.QtGui import QColor, QPainter, QPalette, QPen
     from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                                 QLineEdit, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
+                                 QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem,
                                  QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
     from .foldertabs import FolderTabWidget
+    from . import pixel
 
     class Signals(QObject):
         ready = pyqtSignal(object)
@@ -496,9 +739,51 @@ def build_panel(win, Switch):
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
             p.end()
 
+    class Spark(QWidget):
+        """A small pixel line chart of one figure over its last readings, drawn as the Home screen draws its own
+        (pixel.spark_columns)."""
+
+        def __init__(self, name):
+            super().__init__()
+            self.name, self.values = name, []
+            self.setFixedHeight(26)
+
+        def paintEvent(self, _):
+            lo, hi = SPARK_RANGES[self.name]
+            p = QPainter(self)
+            colour = QColor("#3fe0d0" if self.name == "snr" else "#37b24d")
+            prev = None
+            for x, y in pixel.spark_columns(self.values, lo, hi, self.width(), self.height()):
+                p.fillRect(x, y, 4, 2, colour)
+                if prev is not None and prev != y:
+                    p.fillRect(x, min(prev, y), 2, abs(prev - y) + 2, colour)
+                prev = y
+            p.end()
+
     class NodeTable(QTableWidget):
         """The nodes table. The name column takes the spare width and the others only what they need
-        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters."""
+        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters.
+        Escape clears a chosen node, and Enter on the chosen row does too; with nothing chosen Escape is not taken,
+        so the window's own Escape/Back still works."""
+        on_escape = on_enter = None
+        is_picked = staticmethod(lambda: False)
+
+        def event(self, event):
+            from PyQt6.QtCore import QEvent
+            if event.type() == QEvent.Type.ShortcutOverride and event.key() == Qt.Key.Key_Escape \
+                    and escape_clears(self.is_picked()):
+                event.accept()                   # take Escape before the window's shortcut does
+                return True
+            return super().event(event)
+
+        def keyPressEvent(self, event):
+            if event.key() == Qt.Key.Key_Escape and escape_clears(self.is_picked()) and self.on_escape:
+                self.on_escape()
+                return
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.on_enter:
+                self.on_enter()
+                return
+            super().keyPressEvent(event)
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -533,7 +818,11 @@ def build_panel(win, Switch):
             self.note = QLabel("")
             self.note.setStyleSheet("font-size: 12pt; color: #9e9e9e;")
             self.note.setWordWrap(True)
+            self.busy = QLabel("Channel use: -")
+            self.busy.setStyleSheet("font-size: 12pt;")
+            self.busy.setWordWrap(True)
             hl.addWidget(self.status)
+            hl.addWidget(self.busy)
             hl.addWidget(self.note)
             root.addWidget(head)
 
@@ -572,26 +861,70 @@ def build_panel(win, Switch):
             self.table.setHorizontalHeaderLabels(["Name", SIGNAL_HEADER, "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+            # a row can be chosen, as in the other tables of the app: the arrow keys and the D-pad move the current row
+            self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+            self.table.itemSelectionChanged.connect(self.pick_node)
+            self.table.cellClicked.connect(lambda *_: self.clicked_row())
+            self.table.on_escape = self.clear_pick
+            self.table.on_enter = self.chosen_again
+            self.table.is_picked = lambda: self.picked
+            self.just_picked = False
             self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
             self.table.horizontalHeader().setStretchLastSection(False)
             self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+            self.picked, self.row_ids, self.last_snap = None, [], {}
+            self.details = QLabel(DETAILS_PROMPT)
+            self.details.setWordWrap(True)
+            self.details.setStyleSheet("font-size: 11pt;")
+            self.details.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             nl.addWidget(cap)
-            nl.addWidget(self.table)
+            nl.addWidget(self.table, 1)
+            detail_box = QWidget()
+            dl = QVBoxLayout(detail_box)
+            dl.setContentsMargins(0, 0, 0, 0)
+            dl.addWidget(self.details)
+            self.sparks = {}
+            for name in ("battery", "snr"):
+                caption = QLabel("")
+                caption.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+                chart = Spark(name)
+                self.sparks[name] = (caption, chart)
+                dl.addWidget(caption)
+                dl.addWidget(chart)
+                caption.hide()
+                chart.hide()
             mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
             fl = QVBoxLayout(feed)
-            cap = QLabel("Activity")
-            cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
+            self.feed_cap = QLabel("Activity")
+            self.feed_cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
             self.feed = QPlainTextEdit()
             self.feed.setReadOnly(True)
             self.feed.setStyleSheet("font-size: 11pt;")
-            fl.addWidget(cap)
-            fl.addWidget(self.feed)
+            dl.addStretch(1)
+            self.detail_scroll = QScrollArea()          # the chosen node's details, in the place of Activity
+            self.detail_scroll.setWidgetResizable(True)
+            self.detail_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.detail_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.detail_scroll.setWidget(detail_box)
+            self.detail_scroll.hide()
+            fl.addWidget(self.feed_cap)
+            fl.addWidget(self.feed, 1)
+            fl.addWidget(self.detail_scroll, 1)
             mid.addWidget(feed, 2)
             root.addLayout(mid, 1)
 
+            self.where = QLabel("")
+            self.where.setStyleSheet("font-size: 11pt; color: #9e9e9e;")
+            self.where.setWordWrap(True)
+            root.addWidget(self.where)
+            self.keywarn = QLabel("")                    # a quiet standing line, never a pop-up
+            self.keywarn.setStyleSheet("font-size: 11pt; color: #f59f00;")
+            self.keywarn.setWordWrap(True)
+            self.keywarn.hide()
+            root.addWidget(self.keywarn)
             row = QHBoxLayout()
             self.allow = Switch()
             self.allow.clicked.connect(self.toggle_allow)
@@ -665,6 +998,7 @@ def build_panel(win, Switch):
             if time.time() >= self.note_until:          # hold a just-set status (Sent, Exported to...) a moment,
                 self.note.setText(f"Sending goes to channel {snap.get('selected_channel', 0)}." +  # rather than
                                   (f"  Last send: {tx}" if tx else ""))                             # overwrite it at once
+            self.busy.setText("Channel use: " + channel_busy_text(snap["node_info"], snap.get("self_id")))
             own = own_position(snap["node_info"], snap.get("self_id"))
             rows = node_rows(snap["node_info"], snap.get("self_id"), own=own)
             sig = rows_signature(rows)
@@ -678,15 +1012,78 @@ def build_panel(win, Switch):
                         if key == "signal":
                             item.setToolTip(row["signal_tip"])
                         self.table.setItem(r, c, item)
+                self.row_ids = [row["id"] for row in rows]
+                keep = row_of(self.row_ids, self.picked)
+                if keep >= 0:                            # the chosen node stays chosen when the table is rebuilt
+                    self.table.blockSignals(True)
+                    self.table.selectRow(keep)
+                    self.table.blockSignals(False)
                 self.table.fit_columns()
-            lines = [activity_line(a) for a in snap["activities"][-40:]]
+            self.last_snap = snap
+            self.show_details()
+            lines = [activity_line(a, snap.get("self_id"), snap.get("node_info")) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
+            self.where.setText(composer_line(snap))
+            warning = default_key_line(snap)
+            self.keywarn.setText(warning)
+            self.keywarn.setVisible(bool(warning))
             if own:
                 e.update_proximity({"lat": own[0], "lon": own[1]}, haversine_km)
             if self.on_snap:
                 self.on_snap(e, snap, own)
             self.update_send()
+
+        # ---- the chosen node
+        def pick_node(self):
+            chosen = picked_node(self.row_ids, self.table.currentRow())
+            if chosen is not None and chosen != self.picked:
+                self.picked, self.just_picked = chosen, True
+            self.show_details()
+
+        def clicked_row(self):
+            """A click on a row: the press that chose it is not a second choice; a click on the chosen row is."""
+            if self.just_picked:
+                self.just_picked = False
+                return
+            self.chosen_again()
+
+        def chosen_again(self):
+            self.just_picked = False
+            self.picked = pick_again(self.picked, picked_node(self.row_ids, self.table.currentRow()))
+            if self.picked is None:
+                self.clear_pick()
+            else:
+                self.show_details()
+
+        def clear_pick(self):
+            """Back to Activity, the way the other tables clear a choice: the selection is cleared quietly."""
+            self.picked, self.just_picked = None, False
+            self.table.blockSignals(True)
+            self.table.clearSelection()
+            self.table.blockSignals(False)
+            self.show_details()
+
+        def show_details(self):
+            snap = self.last_snap or {}
+            info = (snap.get("node_info") or {}).get(self.picked) if self.picked else None
+            text = "\n".join(node_details(info, self.picked, self_id=snap.get("self_id"))) if info else DETAILS_PROMPT
+            title, shows = right_card(self.picked, info)
+            self.feed_cap.setText(title)
+            self.feed.setVisible(shows == "activity")
+            self.detail_scroll.setVisible(shows == "details")
+            if text != self.details.text():
+                self.details.setText(text)
+            series = ((snap.get("node_series") or {}).get(self.picked) or {}) if info else None
+            for name, (caption, chart) in self.sparks.items():
+                points = (series or {}).get(name) or []
+                caption.setVisible(series is not None)
+                caption.setText(series_caption(name, points) if series is not None else "")
+                chart.setVisible(len(points) >= 2)
+                values = series_values(points)
+                if values != chart.values:
+                    chart.values = values
+                    chart.update()
 
         # ---- channels and export
         def sync_channels(self, snap):
@@ -823,6 +1220,9 @@ def build_panel(win, Switch):
                 colour = "#3fe0d0" if r["sent"] else "#ff7a45"
                 who = html.escape(r["who"])
                 tag = " checked in" if r["checkin"] else ""
+                where = destination_text(r.get("to_id"), snap.get("self_id"), snap.get("node_info"), r["sent"])
+                if where:
+                    tag += f' <span style="color:#9a90a6">{html.escape(where)}</span>'
                 if r["state"]:
                     tag += f' <span style="color:#9a90a6">({html.escape(r["state"])})</span>'
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '

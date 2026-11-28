@@ -1,5 +1,6 @@
 import collections
 import copy
+import math
 import os
 import subprocess
 import threading
@@ -98,7 +99,32 @@ def choose_serial_port(devices, identify):
 CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role values (SECONDARY is 2)
 
 
-def configured_channels(channels):
+DEFAULT_PSK = b"\x01"           # the library's shorthand for Meshtastic's well-known default key
+
+
+def uses_default_key(settings, primary=False, modem_preset=None):
+    """Whether a channel uses Meshtastic's public default key, from the library's channel settings
+    (Channel.settings), or None when that cannot be told.
+
+    Assumption, from the library's protobuf and not checked on a radio: `psk` is bytes, and a single byte 1 stands for
+    the default key (the key everyone with Meshtastic has). Single bytes 2 to 10 are variants of the same public key
+    and are not counted here; an empty psk means no encryption at all, also not counted. When the settings carry no
+    psk, a primary channel with an empty name on the LongFast preset is the out-of-the-box channel and so counts."""
+    if settings is None:
+        return None
+    psk = getattr(settings, "psk", None)
+    if psk is not None:
+        try:
+            return bytes(psk) == DEFAULT_PSK
+        except (TypeError, ValueError):
+            return None
+    name = getattr(settings, "name", None)
+    if primary and name is not None and not str(name).strip() and modem_preset == "LongFast":
+        return True
+    return None
+
+
+def configured_channels(channels, modem_preset=None):
     """The channels set up on the radio, from the library's channel objects (interface.localNode.channels): a list
     of {"index", "name", "primary"}, the primary first and then by index, disabled ones left out. The primary's name
     may be empty, which means the radio's default. None when there is nothing usable, so the caller can fall back
@@ -116,10 +142,49 @@ def configured_channels(channels):
             continue
         if role == CHANNEL_DISABLED:
             continue
-        name = getattr(getattr(ch, "settings", None), "name", "") or ""
-        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY})
+        settings = getattr(ch, "settings", None)
+        name = getattr(settings, "name", "") or ""
+        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY,
+                      "default_key": uses_default_key(settings, role == CHANNEL_PRIMARY, modem_preset)})
     found.sort(key=lambda c: (not c["primary"], c["index"]))
     return found or None
+
+
+# The library's LoRa modem presets (Config.LoRaConfig.ModemPreset) by number, written as the radio names a primary
+# channel whose own name is empty. An assumption from the library's protobuf, not checked against a radio.
+MODEM_PRESETS = ("LongFast", "LongSlow", "VeryLongSlow", "MediumSlow", "MediumFast", "ShortSlow", "ShortFast",
+                 "LongModerate", "ShortTurbo")
+
+
+def modem_preset_name(lora_config):
+    """The preset the radio is set to ("LongFast"), from the library's LoRa config (interface.localNode.localConfig
+    .lora), or None when it is not using a preset or the config is not available. Only reads it."""
+    if lora_config is None or not getattr(lora_config, "use_preset", False):
+        return None
+    try:
+        number = int(getattr(lora_config, "modem_preset", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return MODEM_PRESETS[number] if 0 <= number < len(MODEM_PRESETS) else None
+
+
+SERIES_LIMIT = 60                   # readings kept per node and per figure, in memory only
+
+
+def append_reading(series, when, value, limit=SERIES_LIMIT):
+    """A node's short history of one figure with a new reading added: a list of (time, value), oldest first, at
+    most `limit` long. A missing or unusable reading (None, not a number, not finite) changes nothing; a reading
+    that arrives out of order goes in its place by time; a second reading at the same time replaces the first."""
+    points = [p for p in (series or []) if isinstance(p, (list, tuple)) and len(p) == 2]
+    try:
+        when, value = float(when), float(value)
+    except (TypeError, ValueError):
+        return points[-limit:] if limit > 0 else []
+    if not (math.isfinite(when) and math.isfinite(value)):
+        return points[-limit:] if limit > 0 else []
+    points = [p for p in points if p[0] != when] + [(when, value)]
+    points.sort(key=lambda p: p[0])
+    return points[-limit:] if limit > 0 else []
 
 
 def explain_tcp_failure(exc, host, port):
@@ -153,6 +218,7 @@ class LoRa:
         self.max_chat = 300
         self.node_info = {}
         self.node_history = {}
+        self.node_series = {}               # node -> {"battery": [(time, %)], "snr": [(time, dB)]}, as heard here
         self.max_track_points = 8
         self.recent_alerts = []
         self.max_alerts = 6
@@ -160,6 +226,7 @@ class LoRa:
         self.max_checkins = 6
         self.channel_activity = {}
         self.configured_channels = None     # the radio's own channel list, when the connection gives it
+        self.modem_preset = None            # the radio's preset name ("LongFast"), when the connection gives it
         self.selected_channel = 0
         self.auto_follow_channel = False
         self.channel_locked = False
@@ -204,10 +271,12 @@ class LoRa:
                 "chat": copy.deepcopy(self.chat),
                 "node_info": copy.deepcopy(self.node_info),
                 "node_history": copy.deepcopy(self.node_history),
+                "node_series": copy.deepcopy(self.node_series),
                 "recent_alerts": copy.deepcopy(self.recent_alerts),
                 "recent_checkins": copy.deepcopy(self.recent_checkins),
                 "channel_activity": copy.deepcopy(self.channel_activity),
                 "configured_channels": copy.deepcopy(self.configured_channels),
+                "modem_preset": self.modem_preset,
                 "active_channels": active_channels,
                 "selected_channel": selected_channel,
                 "best_channel": best_channel,
@@ -691,6 +760,40 @@ class LoRa:
             if isinstance(stored, dict) and not position.get("time"):
                 stored.pop("time", None)
 
+    def _remember_telemetry_received(self, node_id, packet):
+        """Note when this app received a node's own report of its battery and channel use: the library keeps the
+        figures but not when they came, and the node details say how old they are."""
+        if node_id is None:
+            return
+        received = packet.get("rxTime") if isinstance(packet, dict) else None
+        try:
+            received = float(received) if received else time.time()
+        except (TypeError, ValueError):
+            received = time.time()
+        with self.lock:
+            entry = self.node_info.get(str(node_id))
+            if isinstance(entry, dict):
+                entry["telemetryReceived"] = received
+
+    def _remember_readings(self, packet):
+        """Add this packet's signal-to-noise as heard here, and the battery level the node reported in it, to the
+        node's short history. A level over 100 means external power, not a level, and is not kept."""
+        node_id = packet.get("fromId") if isinstance(packet, dict) else None
+        if node_id is None:
+            return
+        when = packet.get("rxTime") or time.time()
+        battery = self._extract_metrics(packet).get("batteryLevel")
+        try:
+            if battery is not None and float(battery) > 100:
+                battery = None
+        except (TypeError, ValueError):
+            battery = None
+        with self.lock:
+            series = self.node_series.setdefault(str(node_id), {})
+            for name, value in (("snr", packet.get("rxSnr")), ("battery", battery)):
+                if value is not None:
+                    series[name] = append_reading(series.get(name), when, value, SERIES_LIMIT)
+
     def _remember_link_metrics(self, node_id, packet):
         if node_id is None or not isinstance(packet, dict):
             return
@@ -728,6 +831,9 @@ class LoRa:
         if isinstance(decoded, dict):
             candidates.append(decoded)
             candidates.extend(value for value in decoded.values() if isinstance(value, dict))
+            # the library gives a telemetry packet as decoded["telemetry"]["deviceMetrics"], one level further down
+            for value in list(candidates[1:]):
+                candidates.extend(inner for inner in value.values() if isinstance(inner, dict))
 
         metrics = {}
         for candidate in candidates:
@@ -899,6 +1005,11 @@ class LoRa:
                 suffix = f" {note}" if note else ""
                 summary = f"Check-in {parsed_checkin['lat']:.5f},{parsed_checkin['lon']:.5f}{suffix}"
                 self._remember_checkin(node_name, from_id, parsed_checkin, sent=sent, channel=channel)
+        elif not decoded and packet.get("encrypted") is not None:
+            # the library hands on a packet it could not decrypt with "encrypted" and no "decoded": a direct message
+            # encrypted to another node, or a channel this radio has no key for. Its content is not shown.
+            kind = "encrypted"
+            summary = "Encrypted, cannot be read here"
         else:
             position = decoded.get("position")
             if isinstance(position, dict) and position:
@@ -925,6 +1036,7 @@ class LoRa:
                     metrics = self._extract_metrics(packet)
                     if metrics:
                         self._remember_node_info(from_id, deviceMetrics=metrics)
+                        self._remember_telemetry_received(from_id, packet)
                         parts = []
                         battery = metrics.get("batteryLevel")
                         voltage = metrics.get("voltage")
@@ -947,6 +1059,8 @@ class LoRa:
             "time": timestamp,
             "from": node_name,
             "from_id": str(from_id),
+            # where the packet went: "^all" (everyone on the channel) or a node. This app only ever sends to everyone.
+            "to_id": "^all" if sent else (packet.get("toId") if packet.get("toId") is not None else packet.get("to")),
             "channel": channel,
             "portnum": portnum,
             "kind": kind,
@@ -1070,6 +1184,7 @@ class LoRa:
             with self.lock:
                 activity = self._build_activity(packet, sent=False)
                 self._remember_link_metrics(packet.get("fromId"), packet)
+                self._remember_readings(packet)
                 self._remember_channel_activity(activity["channel"], sent=False)
                 self.last_rx_time = time.time()
                 self.last_rx_summary = f"{activity['from']}: {activity['summary']}"
@@ -1106,8 +1221,14 @@ class LoRa:
                 return
             nodes = copy.deepcopy(getattr(self.interface, "nodes", None))
             try:
+                self.modem_preset = modem_preset_name(getattr(getattr(getattr(
+                    self.interface, "localNode", None), "localConfig", None), "lora", None))
+            except Exception as e:
+                debug(f"LoRa: could not read the modem preset: {e}")
+                self.modem_preset = None
+            try:
                 self.configured_channels = configured_channels(
-                    getattr(getattr(self.interface, "localNode", None), "channels", None))
+                    getattr(getattr(self.interface, "localNode", None), "channels", None), self.modem_preset)
             except Exception as e:                      # reading only; a library without it keeps the fallback
                 debug(f"LoRa: could not read the configured channels: {e}")
                 self.configured_channels = None

@@ -265,9 +265,9 @@ class ConfiguredChannelTests(unittest.TestCase):
 
     def test_the_radios_channels_become_the_list_primary_first_disabled_left_out(self):
         got = lora.configured_channels(list(reversed(self.CHANNELS)))
-        self.assertEqual(got, [{"index": 0, "name": "", "primary": True},
-                               {"index": 1, "name": "Family", "primary": False},
-                               {"index": 3, "name": "Hikers", "primary": False}])
+        self.assertEqual(got, [{"index": 0, "name": "", "primary": True, "default_key": None},
+                               {"index": 1, "name": "Family", "primary": False, "default_key": None},
+                               {"index": 3, "name": "Hikers", "primary": False, "default_key": None}])
 
     def test_nothing_usable_means_none(self):
         for bad in (None, [], [channel(0, 0)], 5, [object()]):
