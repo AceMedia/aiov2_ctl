@@ -11,27 +11,22 @@ ROW = 1260                              # about the width of the row on the uCon
 
 
 class RowLayoutTests(unittest.TestCase):
+    def test_the_strip_is_what_the_six_buttons_and_six_gaps_leave(self):
+        self.assertEqual(iga.strip_width(ROW), 1068)
+
     def test_one_to_six_pages_at_the_uconsoles_width(self):
-        buttons = len(iga.ROW_BUTTONS) * (iga.BUTTON_WIDTH + iga.ROW_GAP)
-        modes = {}
+        want = {1: ([], 1068), 2: ([196], 872), 3: ([196] * 2, 676), 4: ([196] * 3, 480), 5: ([162] * 4, 420),
+                6: ([40] * 5, 868)}
         for count in range(1, 7):
             for current in range(count):
                 row = iga.row_layout(ROW, count, current)
-                self.assertEqual(len(row), count)
-                self.assertEqual(row[current]["mode"], "address")
-                self.assertGreaterEqual(row[current]["width"], iga.ADDRESS_MIN, (count, current))
-                self.assertLessEqual(sum(t["width"] for t in row) + buttons + count * iga.ROW_GAP, ROW)
-                others = {t["mode"] for i, t in enumerate(row) if i != current}
-                self.assertLessEqual(len(others), 1)
-                modes[count] = others.pop() if others else None
-        self.assertIsNone(modes[1])
-        self.assertEqual([modes[n] for n in (2, 3, 4)], ["title"] * 3)
-        self.assertEqual(modes[6], "icon")                # with six pages the others are favicons only
-
-    def test_titles_never_grow_past_their_most_and_icons_are_small(self):
-        row = iga.row_layout(ROW, 2, 0)
-        self.assertEqual(row[1], {"mode": "title", "width": iga.TITLE_TAB_MAX})
-        self.assertEqual(iga.row_layout(ROW, 6, 2)[0], {"mode": "icon", "width": iga.ICON_TAB})
+                self.assertEqual(sum(t["width"] for t in row), 1068, (count, current))   # no gaps between tabs
+                self.assertEqual(row[current], {"mode": "address", "width": want[count][1]}, (count, current))
+                others = [t["width"] for i, t in enumerate(row) if i != current]
+                self.assertEqual(others, want[count][0], (count, current))
+                self.assertGreaterEqual(row[current]["width"], iga.ADDRESS_MIN)
+        self.assertEqual({t["mode"] for t in iga.row_layout(ROW, 6, 0)[1:]}, {"icon"})
+        self.assertEqual({t["mode"] for t in iga.row_layout(ROW, 5, 0)[1:]}, {"title"})
 
     def test_a_narrow_row_still_gives_every_page_a_place(self):
         row = iga.row_layout(400, 6, 5)
@@ -39,26 +34,64 @@ class RowLayoutTests(unittest.TestCase):
         self.assertTrue(all(t["width"] >= 0 for t in row))
         self.assertEqual(iga.row_layout(ROW, 0, 9)[0]["mode"], "address")    # odd input is made sensible
 
-    def test_characters_that_fit(self):
-        self.assertEqual(iga.chars_for(iga.ICON_TAB), 0)
-        self.assertGreater(iga.chars_for(iga.TITLE_TAB_MIN), 10)
-        self.assertEqual(iga.chars_for(500, icons=2), (500 - 12 - 40) // 8)
+    def test_the_overlap_is_the_styles(self):
+        self.assertEqual(iga.TAB_OVERLAP, 4)
+        self.assertIn(f"margin: 4px -{iga.TAB_OVERLAP}px 0px 0px;", style.stylesheet("dark"))
 
-    def test_the_address_puts_the_host_in_bold_escaped_and_cut(self):
-        self.assertEqual(iga.address_html("https://example.org/a"), "<b>example.org</b>/a")
-        self.assertEqual(iga.address_html("http://example.org/"), "http://<b>example.org</b>/")
-        cut = iga.address_html("https://example.org/" + "x" * 100, most=30)
-        self.assertTrue(cut.startswith("<b>example.org</b>/"))
-        self.assertTrue(cut.endswith("…"))
-        self.assertIn("&lt;script&gt;", iga.address_html("https://a.org/<script>"))
-        self.assertNotIn("<script>", iga.address_html("https://a.org/<script>"))
-        self.assertEqual(iga.address_html("about:blank"), "about:blank")
 
-    def test_the_mark_icon(self):
+class AddressSlotTests(unittest.TestCase):
+    def test_mark_favicon_and_words_in_order_centred_and_clear_of_the_foot(self):
+        s = iga.address_slots(872)
+        self.assertEqual(s["mark"], (10, 6, 16, 16))
+        self.assertEqual(s["favicon"], (30, 6, 16, 16))
+        self.assertEqual(s["text"], (52, 6, 872 - 52 - 14, 16))
+        for x, y, w, h in s.values():
+            self.assertEqual(y + h / 2, iga.CENTRE_LINE)
+            self.assertLessEqual(x + w, 872 - iga.TAB_INSET_RIGHT)
+
+    def test_while_typing_there_is_no_favicon_and_the_box_is_inside_the_tab(self):
+        s = iga.address_slots(1260, editing=True)
+        self.assertIsNone(s["favicon"])
+        self.assertEqual(s["text"][0], 32)
+        x, y, w, h = iga.editor_box(1260)
+        self.assertEqual((x, y + h / 2), (32, iga.CENTRE_LINE))
+        self.assertLessEqual(y + h, iga.ROW_HEIGHT)
+        self.assertGreaterEqual(y, 0)
+        self.assertEqual(iga.address_slots(10)["text"][2], 0)      # never a negative width
+
+
+class AddressTextTests(unittest.TestCase):
+    def test_runs(self):
+        self.assertEqual(iga.address_runs("https://example.org/a?b=1"), ("", "example.org", "/a?b=1"))
+        self.assertEqual(iga.address_runs("http://192.168.0.1:8080/x"), ("http://", "192.168.0.1:8080", "/x"))
+        self.assertEqual(iga.address_runs("about:blank"), ("", "", "about:blank"))
+
+    def test_the_path_goes_first_and_the_host_is_kept(self):
+        fits = lambda s: len(s) <= 20  # noqa: E731
+        self.assertEqual(iga.elide_address("", "example.org", "/a", fits), ("", "example.org", "/a"))
+        lead, host, rest = iga.elide_address("", "example.org", "/a/very/long/path", fits)
+        self.assertEqual(host, "example.org")
+        self.assertTrue(rest.endswith("…"))
+        self.assertLessEqual(len(lead + host + rest), 20)
+        lead, host, rest = iga.elide_address("http://", "a-very-long-host-name.example.org", "/x", fits)
+        self.assertEqual(rest, "")
+        self.assertTrue(host.endswith("…"))
+        self.assertEqual(iga.elide_address("", "abc", "", lambda s: False), ("", "…", ""))
+
+    def test_the_label_uses_colour_not_weight_and_is_escaped(self):
+        t = style.TOKENS["dark"]
+        text = iga.address_label("", "a.org", "/<b>", t)
+        self.assertIn(f"color:{t['text']}\">a.org</span>", text)
+        self.assertIn(f"color:{t['muted']}\">/&lt;b&gt;</span>", text)
+        self.assertNotIn("<b>", text)
+
+    def test_the_mark(self):
         self.assertEqual(iga.mark_icon("https://a.org"), "lock")
         self.assertEqual(iga.mark_icon("http://a.org"), "unlock")
         self.assertEqual(iga.mark_icon("about:blank", own=True), "app")
         self.assertIsNone(iga.mark_icon("about:blank"))
+        self.assertIn("does not vouch for the site", iga.mark_words("https://a.org"))
+        self.assertIn("can be read", iga.mark_words("http://a.org"))
 
 
 class FieldHeightTests(unittest.TestCase):
@@ -80,15 +113,26 @@ class FieldHeightTests(unittest.TestCase):
 
 
 class IconTests(unittest.TestCase):
+    NAMES = ("back", "forward", "reload", "stop", "new", "menu", "bookmark", "lock", "unlock", "app", "page")
+
     def test_every_icon_is_sixteen_by_sixteen_of_two_characters(self):
-        for name in ("back", "forward", "reload", "stop", "new", "menu", "bookmark", "lock", "unlock", "app",
-                     "page"):
+        for name in self.NAMES:
             rows = iga.ICONS[name]
             self.assertEqual(len(rows), 16, name)
             self.assertTrue(all(len(r) == 16 and set(r) <= set("#.") for r in rows), name)
-            self.assertIn("#", "".join(rows), name)
         self.assertEqual(iga.ICONS["forward"], [r[::-1] for r in iga.ICONS["back"]])
         self.assertEqual(len({"".join(rows) for rows in iga.ICONS.values()}), len(iga.ICONS))
+
+    def test_the_same_weight_and_centre_for_all(self):
+        from ops_gui import pixelicon
+        for name in self.NAMES:
+            rows = iga.ICONS[name]
+            left, top, right, bottom = pixelicon.ink_bounds(rows)
+            self.assertTrue(1 <= left and right <= 14 and top == 2 or name == "menu", (name, left, top))
+            self.assertTrue(1 <= left and right <= 14 and 2 <= top and bottom <= 13, name)
+            self.assertLessEqual(abs((left + right) / 2 - 7.5), 0.5, name)
+            self.assertLessEqual(abs((top + bottom) / 2 - 7.5), 0.5, name)
+            self.assertEqual(pixelicon.lone_pixels(rows), [], name)         # strokes are never one pixel alone
 
     def test_every_icon_button_says_what_it_does_and_its_key(self):
         for name in iga.ROW_BUTTONS:

@@ -569,56 +569,96 @@ def load_error_text(code_name):
 
 
 
-# ---- the slim top row: buttons, the pages, and the current page's tab, which is the address bar
-ROW_HEIGHT = 28                 # the app's ordinary button height (style: min-height 28px)
-BUTTON_WIDTH = 30
-ROW_GAP = 2
+# ---- the slim top row, drawn as the app's own folder tabs
+# One row 28 pixels high: three icon buttons, the strip of pages (folder tabs, the current one the address), three
+# icon buttons, with ROW_GAP between those seven items and none between the tabs, which overlap as folder tabs do.
+ROW_HEIGHT = 28
+BUTTON_WIDTH = 28
+ROW_GAP = 4
 ROW_BUTTONS = ("back", "forward", "reload", "new", "bookmark", "menu")
-ICON_TAB = 34                   # a page shown by its favicon only
-TITLE_TAB_MIN, TITLE_TAB_MAX = 140, 220
+ICON_TAB = 40                   # a page shown by its favicon only, with its whole folder outline
+TITLE_TAB_MIN, TITLE_TAB_MAX = 140, 196
 ADDRESS_MIN = 420               # the current page's tab always keeps this much for its address
-CHAR_WIDTH = 8                  # Spleen 8x16, the app's pixel font
+TAB_OVERLAP = 4                 # how far a tab's foot lies over its right-hand neighbour (style: margin-right -4px)
+TAB_INSET_LEFT, TAB_INSET_RIGHT = 10, 14      # clear of the cut corner on the left and of the foot on the right
+ICON_SLOT, ICON_GAP, TEXT_GAP = 16, 4, 6
+CENTRE_LINE = 14                # icons and words are centred this far down the row
+
+
+def strip_width(width):
+    """What is left of a row `width` wide for the tabs, after the six buttons and the six gaps round the strip."""
+    return max(0, int(width) - len(ROW_BUTTONS) * BUTTON_WIDTH - len(ROW_BUTTONS) * ROW_GAP)
 
 
 def row_layout(width, count, current):
-    """How the row shares `width` pixels among `count` pages, `current` being the index of the current one.
-    Returns [{'mode': 'address' | 'title' | 'icon', 'width': pixels}] in page order. The buttons take their
-    fixed room first; the other pages show favicon and title while each can have TITLE_TAB_MIN, otherwise favicon
-    only; the current page takes the rest, and never less than ADDRESS_MIN while the row is wide enough."""
+    """How the strip shares out among `count` pages, `current` being the index of the current one: [{'mode':
+    'address' | 'title' | 'icon', 'width'}] in page order. Widths are each tab's advance along the strip (the
+    overlap is inside them) and add up to the strip exactly. The other pages show favicon and title while each can
+    have TITLE_TAB_MIN after the address has ADDRESS_MIN, otherwise favicon only; the current page takes the rest."""
     count = max(1, int(count))
     current = min(max(0, int(current)), count - 1)
-    room = max(0, int(width) - len(ROW_BUTTONS) * (BUTTON_WIDTH + ROW_GAP) - count * ROW_GAP)
+    strip = strip_width(width)
     others = count - 1
-    if others and (room - ADDRESS_MIN) // others >= TITLE_TAB_MIN:
-        mode, each = "title", min(TITLE_TAB_MAX, (room - ADDRESS_MIN) // others)
+    if others and (strip - ADDRESS_MIN) // others >= TITLE_TAB_MIN:
+        mode, each = "title", min(TITLE_TAB_MAX, (strip - ADDRESS_MIN) // others)
     else:
         mode, each = "icon", ICON_TAB
-    rest = max(room - others * each, min(room, ADDRESS_MIN) if others == 0 else 0)
+    rest = max(0, strip - others * each)
     return [{"mode": "address", "width": rest} if i == current else {"mode": mode, "width": each}
             for i in range(count)]
 
 
-def chars_for(width, icons=1):
-    """How many characters of text fit on a tab `width` pixels wide with `icons` 16 pixel icons on it."""
-    return max(0, (int(width) - 12 - icons * 20) // CHAR_WIDTH)
+def address_slots(tab_width, editing=False):
+    """Where things sit inside the current page's tab, in its own pixels: {'mark', 'favicon', 'text'} as (x, y,
+    w, h). The security mark has a 16 pixel slot, then the favicon, then the words, all centred on CENTRE_LINE;
+    while typing there is no favicon, so the words start sooner. 'favicon' is None while typing."""
+    top = CENTRE_LINE - ICON_SLOT // 2
+    mark = (TAB_INSET_LEFT, top, ICON_SLOT, ICON_SLOT)
+    favicon = None if editing else (mark[0] + ICON_SLOT + ICON_GAP, top, ICON_SLOT, ICON_SLOT)
+    x = (favicon or mark)[0] + ICON_SLOT + TEXT_GAP
+    return {"mark": mark, "favicon": favicon, "text": (x, top, max(0, int(tab_width) - x - TAB_INSET_RIGHT),
+                                                      ICON_SLOT)}
 
 
-def address_html(url, most=60):
-    """The current page's address for its tab, host in bold, cut to `most` characters, every part escaped."""
+def editor_box(tab_width):
+    """The typing box inside the opened tab: where the words go while typing, a little taller than the words."""
+    x, _, w, _ = address_slots(tab_width, editing=True)["text"]
+    return x, CENTRE_LINE - 12, w, 24
+
+
+def address_runs(url):
+    """The address shown in the current page's tab as (lead, host, rest): https:// is left out (the padlock says
+    it), http:// is kept; anything not a web address is all in `rest`."""
     url = url or ""
     if not _web(url):
-        return html.escape(url[:most])
+        return "", "", url
     parts = urlsplit(url)
-    scheme, host = parts.scheme + "://", parts.netloc
-    rest = url[len(scheme) + len(host):]
-    shown_scheme = "" if parts.scheme == "https" else scheme          # https is the usual: the padlock says it
-    text = shown_scheme + host + rest
-    if len(text) > most:
-        keep = max(0, most - 1 - len(shown_scheme) - len(host))
-        rest = rest[:keep] + "…" if keep else ""
-        if len(shown_scheme) + len(host) > most:
-            host = host[:max(1, most - 1 - len(shown_scheme))] + "…"
-    return f"{html.escape(shown_scheme)}<b>{html.escape(host)}</b>{html.escape(rest)}"
+    lead = "" if parts.scheme == "https" else parts.scheme + "://"
+    head = parts.scheme + "://" + parts.netloc
+    return lead, parts.netloc, url[len(head):]
+
+
+def elide_address(lead, host, rest, fits):
+    """Cut the address to fit: the path goes first, from its end; the whole host is kept as long as it can be.
+    `fits(text)` says whether a text fits (the font's own measure, in the tab)."""
+    if fits(lead + host + rest):
+        return lead, host, rest
+    for k in range(len(rest) - 1, -1, -1):
+        cut = rest[:k] + "…"
+        if fits(lead + host + cut):
+            return lead, host, cut
+    for k in range(len(host) - 1, -1, -1):
+        cut = host[:k] + "…"
+        if fits(lead + cut):
+            return lead, cut, ""
+    return "", "…", ""
+
+
+def address_label(lead, host, rest, colours):
+    """The address as one line: the site in the app's text colour, the rest in its muted colour, all escaped."""
+    c = page_colours(colours)
+    return (f"<span style=\"color:{c['text']}\">{html.escape(lead + host)}</span>"
+            f"<span style=\"color:{c['muted']}\">{html.escape(rest)}</span>")
 
 
 def mark_icon(url, own=False):
@@ -630,37 +670,47 @@ def mark_icon(url, own=False):
     return {"secure connection": "lock", "not secure": "unlock", "this app's own page": "app"}.get(word)
 
 
-# ---- the app's pixel icons for IGA's buttons, 16 by 16, '#' drawn in the button text colour
+def mark_words(url, own=False):
+    """The tooltip for the mark: what the connection is, without promising the site can be trusted."""
+    kind = mark_icon(url, own)
+    return {"lock": "Secure connection (https): what you send is encrypted on the way. It does not vouch for the "
+                    "site.",
+            "unlock": "Not secure (http): what you send can be read on the way.",
+            "app": "This app's own page."}.get(kind, "")
+
+
+# ---- the app's pixel icons for IGA's buttons: one 16 by 16 grid, strokes two pixels wide, ink centred
 def _art(rows):
     rows = [r.ljust(16, ".")[:16] for r in rows]
     return rows + ["." * 16] * (16 - len(rows))
 
 
-_BACK = _art(["", "", "", "......#", ".....##", "....###", "...###########", "..############", "...###########",
-              "....###", ".....##", "......#"])
+_BACK = _art(["", "", "......##", ".....##", "....##", "...##", "..##", "..############", "..############",
+              "..##", "...##", "....##", ".....##", "......##"])
+_BODY = ["..############", "..############", "..#####..#####", "..#####..#####", "..#####..#####", "..############",
+         "..############", "..############"]
 ICONS = {
     "back": _BACK,
     "forward": [r[::-1] for r in _BACK],
-    "reload": _art(["", "......#####", "....##.....#.#", "...#........##", "...#.......###", "..#", "..#", "..#",
-                    "..#", "...#........#", "...#........#", "....##.....#", "......#####"]),
-    "stop": _art(["", "..##........##", "...##......##", "....##....##", ".....##..##", "......####",
-                  ".......##", "......####", ".....##..##", "....##....##", "...##......##", "..##........##"]),
-    "new": _art(["", "", ".......##", ".......##", ".......##", ".......##", "..############", "..############",
-                 ".......##", ".......##", ".......##", ".......##"]),
+    "reload": _art(["", "", "....######..##", "...########.##", "..##......####", "..##.....#####", "..##",
+                    "..##", "..##........##", "..##........##", "...##......##", "...##......##", "....########",
+                    ".....######"]),
+    "stop": _art(["", "", "..##........##", "..###......###", "...###....###", "....###..###", ".....######",
+                  "......####", "......####", ".....######", "....###..###", "...###....###", "..###......###",
+                  "..##........##"]),
+    "new": _art(["", ""] + [".......##"] * 5 + ["..############"] * 2 + [".......##"] * 5),
     "menu": _art(["", "", "", "..############", "..############", "", "", "..############", "..############", "",
                   "", "..############", "..############"]),
-    "bookmark": _art(["", "....########", "....#......#", "....#......#", "....#......#", "....#......#",
-                      "....#......#", "....#......#", "....#..##..#", "....#.#..#.#", "....##....##", "....#......#"]),
-    "lock": _art(["", ".....######", "....#......#", "....#......#", "....#......#", "..############",
-                  "..############", "..#####..#####", "..#####..#####", "..############", "..############"]),
-    "unlock": _art(["", ".........######", "........#......#", "........#......#", "........#", "..############",
-                    "..############", "..#####..#####", "..#####..#####", "..############", "..############"]),
-    "app": _art(["", "################", "#.#.#.##########", "################", "#..............#",
-                 "#......##......#", "#.....#..#.....#", "#....#....#....#", "#....#....#....#", "#.....#..#.....#",
-                 "#......##......#", "#..............#", "################"]),
-    "page": _art(["", ".....######", "...##......##", "..#..........#", ".#............#", ".#............#",
-                  "################", ".#............#", ".#............#", "..#..........#", "...##......##",
-                  ".....######"]),
+    "bookmark": _art(["", "", "...##########", "...##########"] + ["...##......##"] * 7 +
+                     ["...##..##..##", "...##.####.##", "...####..####"]),
+    "lock": _art(["", "", ".....######", "....##....##", "....##....##", "....##....##"] + _BODY),
+    "unlock": _art(["", "", ".......######", "......##....##", "......##....##", "......##"] + _BODY),
+    "app": _art(["", "", "..############", "..############", "..##........##", "..##........##",
+                 "..##..####..##", "..##..####..##", "..##..####..##", "..##..####..##", "..##........##",
+                 "..##........##", "..############", "..############"]),
+    "page": _art(["", "", ".....######", "...###....###", "..##........##", "..##........##", ".##..........##",
+                  ".##############", ".##############", ".##..........##", "..##........##", "..##........##",
+                  "...###....###", ".....######"]),
 }
 ICON_WORDS = {"back": "Back (Alt+Left)", "forward": "Forward (Alt+Right)", "reload": "Reload (Ctrl+R)",
               "stop": "Stop loading (Escape)", "new": "New page (Ctrl+T)", "bookmark": "Bookmark this page",
