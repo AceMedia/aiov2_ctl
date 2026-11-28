@@ -7082,6 +7082,10 @@ FEATURES = (
     {"key": "ghost", "title": "Ghost hunt (for fun)",
      "summary": "A tab of playful meters for entertainment, built from the app's real radio readings; it cannot detect anything.",
      "required": False, "default": False, "apt": (), "hardware": None, "needs": ("app",)},
+    {"key": "browser", "title": "IGA browser",
+     "summary": "A small web browser as a tab in the ops app (Qt WebEngine); an open page takes about 350 MB of memory.",
+     "required": False, "default": False, "apt": ("python3-pyqt6.qtwebengine",), "hardware": None,
+     "needs": ("app",)},
     {"key": "gps", "title": "GPS",
      "summary": "gpsd, which reads the GPS receiver for the app and the console.",
      "required": False, "default": True, "apt": ("gpsd",), "hardware": "aio_board", "needs": ("core",)},
@@ -7499,6 +7503,8 @@ def install_state(environ=None, euid=None, run=_run_text):
             present.add("wiki-pictures")
         if os.path.isfile(os.path.join(ghost_home(who.pw_dir), "enabled")):
             present.add("ghost-on")
+        if os.path.isfile(os.path.join(iga_home(who.pw_dir), "enabled")):
+            present.add("browser-on")
     # The rules file can only be read by root; anyone else asks sudo what they may run, which needs no password
     # once the rules are there.
     listening = None
@@ -7537,6 +7543,7 @@ FEATURE_MARKERS = {
     "wiki": ("wiki-on",),
     "wikipics": ("wiki-pictures",),
     "ghost": ("ghost-on",),
+    "browser": ("browser-on",),
     "sdr": ("sdr-recovery",),
     "listening": ("sudoers-listening",),
     "flipper": ("udev",),
@@ -7645,6 +7652,31 @@ def _ghost_steps(key, state):
                   f"packages, switches no rail and starts no scan. Sessions you record are kept in {folder}, "
                   f"readable only by you, and are never sent anywhere.",
                   False, f"Remove {folder}/enabled", path=folder)]
+
+
+IGA_LAUNCHER_FILE = "iga-browser.desktop"
+
+
+def iga_home(home):
+    """Where a user's IGA browser switch, bookmarks, history (only if asked for) and browser profile are kept."""
+    return os.path.join(home, ".local", "share", "aiov2_ctl", "iga")
+
+
+def _browser_steps(key, state):
+    """The IGA browser's own step: a switch file and a start-menu entry, both written as the user. Its package,
+    python3-pyqt6.qtwebengine, is installed by the usual package step before this."""
+    user, home = state.get("user"), state.get("home")
+    if not user or not home:
+        return [_step(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the IGA browser"), False,
+                      "", blocks=True)]
+    folder = iga_home(home)
+    return [_step(key, "on", "browser-on",
+                  f"Switch on the IGA tab in the ops app for {user}: an empty file, {folder}/enabled, and a "
+                  f"start-menu entry 'IGA browser' that opens the app on that tab. IGA loads only the pages you "
+                  f"ask for. Its bookmarks, cookies and saved logins are kept in {folder}, readable only by you. "
+                  f"It switches no rail.",
+                  False, f"Remove {folder}/enabled and the 'IGA browser' start-menu entry", path=folder,
+                  source=state.get("app_source"))]
 
 
 def wiki_pictures_url(remote=None):
@@ -7874,6 +7906,8 @@ def install_plan(selected_keys, facts, state):
             plan += _wiki_steps(key, state)
         elif key == "ghost":
             plan += _ghost_steps(key, state)
+        elif key == "browser":
+            plan += _browser_steps(key, state)
         elif key == "sdr":
             plan.append(_step(key, "recovery", "systemd",
                               f"Write the readsb recovery ({SDR_RECOVERY_DROPIN_PATH}) and the once-a-minute "
@@ -8444,6 +8478,28 @@ def _act_ghost_on(step, ctx, run=_run_text):
     return "done", "restart the ops app to see the Ghost hunt tab"
 
 
+def _act_browser_on(step, ctx, run=_run_text):
+    """The IGA switch file (folder 0700) and its start-menu entry, both as the user, never as root."""
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    had = os.path.isfile(os.path.join(step["path"], "enabled"))
+    if not had:
+        rc, _, err = run(as_user(user, ["sh", "-c", 'mkdir -p "$1" && chmod 700 "$1" && : > "$1/enabled"', "sh",
+                                        step["path"]]), cwd="/", timeout=30)
+        if rc != 0:
+            return "failed", (err.strip().splitlines() or ["the switch could not be written"])[-1]
+    source = step.get("source")
+    if source and app_source(source):
+        rc, _, err = run(as_user(user, ["/usr/bin/python3", "-m", "ops_gui", "--install-iga-launcher"]),
+                         cwd=source, timeout=120)
+        if rc != 0:
+            last = [l for l in err.strip().splitlines() if l.strip()]
+            return "failed", "the tab is on, but the start-menu entry could not be written" + \
+                (f": {last[-1].strip()}" if last else "")
+    return ("already" if had else "done"), "" if had else "restart the ops app to see the IGA tab"
+
+
 def _act_wiki_pictures(step, ctx, run=_run_text):
     user = ctx.get("user")
     if not user:
@@ -8526,6 +8582,7 @@ INSTALL_ACTIONS_BY_KIND = {
     "launchers": _act_launchers,
     "wiki-on": _act_wiki_on,
     "ghost-on": _act_ghost_on,
+    "browser-on": _act_browser_on,
     "wiki-pictures": _act_wiki_pictures,
     "note": _act_note,
 }
@@ -8687,6 +8744,7 @@ MARKER_WORDS = {
     "console-shortcut": "the uConsole Ops Console shortcut",
     "wiki-on": "the Wiki tab's switch",
     "ghost-on": "the Ghost hunt tab's switch",
+    "browser-on": "the IGA tab's switch",
     "wiki-pictures": "the wiki's pictures",
     "sdr-recovery": "the readsb recovery",
     "sudoers-listening": "the rules for listening without a password",
@@ -9236,6 +9294,17 @@ def uninstall_plan(selected, state):
                                     f"Switch off the Ghost hunt tab in the ops app, as {user}. Any sessions you "
                                     f"recorded stay in {ghost_home(home)} until you delete them.", False,
                                     paths=(os.path.join(ghost_home(home), "enabled"),)))
+        elif key == "browser":
+            if not home:
+                plan.append(_unstep(key, "no-user", "note",
+                                    NO_USER_MESSAGE.replace("the ops app", "the IGA browser"), False, blocks=True))
+            else:
+                plan.append(_unstep(key, "off", "user-file",
+                                    f"Switch off the IGA tab in the ops app and remove its start-menu entry, as "
+                                    f"{user}. Your bookmarks and browser data stay in {iga_home(home)} until you "
+                                    f"delete them.", False,
+                                    paths=(os.path.join(iga_home(home), "enabled"),
+                                           os.path.join(apps, IGA_LAUNCHER_FILE))))
         elif key == "flipper":
             plan.append(_unstep(key, "udev", "udev",
                                 f"Remove {COMPANION_UDEV_PATH}. After that only root can open a Flipper or ESP32 "

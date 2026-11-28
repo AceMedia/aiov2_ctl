@@ -15,6 +15,7 @@
 - [Power & Telemetry](Power-&-Telemetry)
 - [Applications](Applications)
 - [Ghost Hunt (for fun)](Ghost-Hunt)
+- [IGA Browser](IGA-Browser)
 
 **Radios and companions**
 

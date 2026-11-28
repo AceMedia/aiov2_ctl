@@ -286,6 +286,7 @@ QCheckBox::indicator {{ width: 22px; height: 22px; border: 2px solid {t['muted']
 QCheckBox::indicator:checked {{ background: {t['accent']}; border-color: {t['accent']}; }}
 
 QLineEdit, QComboBox, QAbstractSpinBox {{ {field} color: {t['text']}; {field_pad} }}
+QLineEdit#rowfield {{ min-height: 0px; padding-top: 0px; padding-bottom: 0px; }}
 QComboBox QAbstractItemView {{ background: {t['card']}; color: {t['text']};
                                selection-background-color: {t['accent']}; border: 1px solid {t['border']}; }}
 QPlainTextEdit, QTextBrowser, QTableWidget, QListWidget {{ {field} color: {t['text']};

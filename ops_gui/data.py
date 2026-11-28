@@ -500,7 +500,7 @@ def has_ethernet(base="/sys/class/net"):
 
 
 def tab_names(snapshot, flipper_shown, marauder_shown=False, home=False, network=False, bluetooth=False,
-              everything=False, wiki=False, apps=False, ghost=False):
+              everything=False, wiki=False, apps=False, ghost=False, iga=False):
     """Tabs in order: Home, Overview, Everything, Wi-Fi, Bluetooth, one per powered antenna, Flipper, Settings,
     Help. Bluetooth, like every hardware tab, only while its radio is there (the internal card, on the USB rail).
     Everything is always there in the app: it has no radio of its own and uses whichever are on."""
@@ -522,6 +522,8 @@ def tab_names(snapshot, flipper_shown, marauder_shown=False, home=False, network
         names.append("Wiki")
     if ghost:                                   # the optional Ghost hunt add-on, only when it is installed
         names.append("Ghost hunt")
+    if iga:                                     # the optional IGA browser, only when it is installed
+        names.append("IGA")
     return names
 
 
@@ -595,7 +597,8 @@ def save_settings(values, path=None):
 
 TAB_ICONS = {"Overview": "blocks", "Wi-Fi": "globe", "GPS": "compass", "LoRa": "email",
              "SDR": "search", "Flipper": "code", "Settings": "cog", "Help": "notes", "Wiki": "domain", "Apps": "rocket", "Marauder": "shield", "Home": "heartbeat", "Network": "server",
-             "Bluetooth": "bluetooth", "Everything": "growth", "Ghost hunt": "media"}
+             "Bluetooth": "bluetooth", "Everything": "growth", "Ghost hunt": "media",
+             "IGA": "iga"}
 
 SUN = [
     "................",

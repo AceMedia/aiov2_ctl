@@ -11,6 +11,7 @@ import sys
 
 GUI_FILE = "uconsole-ops-gui.desktop"
 CLI_FILE = "uconsole-ops-console.desktop"
+IGA_FILE = "iga-browser.desktop"          # only for the optional IGA browser feature, written by its install step
 
 
 def quote(path):
@@ -45,6 +46,41 @@ def entries(repo, python="/usr/bin/python3", isfile=os.path.isfile):
         "Categories=System;Utility;ConsoleOnly;\nStartupNotify=false\n"
     )
     return {GUI_FILE: gui, CLI_FILE: cli}
+
+
+def iga_entry(repo, python="/usr/bin/python3", isfile=os.path.isfile):
+    """The 'IGA browser' launcher: the ops app, opened straight on its IGA tab."""
+    repo = os.path.realpath(repo)
+    icon = icon_for(repo, "iga.png", "web-browser", isfile)
+    return (
+        "[Desktop Entry]\nType=Application\nName=IGA browser\n"
+        "Comment=A small web browser, in the uConsole Ops app\n"
+        f"Exec={python} -m ops_gui --tab IGA\nPath={repo}\nIcon={icon}\nTerminal=false\n"
+        "Categories=Network;WebBrowser;\nStartupNotify=false\n"
+    )
+
+
+def install_iga(repo, target=None, python="/usr/bin/python3"):
+    """Write the IGA launcher. Returns its path. Refuses to run as root."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise PermissionError("Run this as your own user, not root: the launcher belongs to your menu.")
+    if not os.path.isdir(os.path.join(repo, "ops_gui")):
+        raise FileNotFoundError(f"{repo} does not look like the Ops checkout.")
+    target = target or applications_dir()
+    os.makedirs(target, exist_ok=True)
+    path = os.path.join(target, IGA_FILE)
+    with open(path, "w") as f:
+        f.write(iga_entry(repo, python))
+    os.chmod(path, 0o755)
+    return path
+
+
+def remove_iga(target=None):
+    path = os.path.join(target or applications_dir(), IGA_FILE)
+    if os.path.isfile(path):
+        os.remove(path)
+        return [path]
+    return []
 
 
 def applications_dir(environ=None):
@@ -90,6 +126,13 @@ def command(argv, repo=None):
             for path in install(repo):
                 print(f"Wrote {path}")
             print("Find them in the start menu under Applications > System: uConsole Ops and uConsole Ops Console.")
+            return 0
+        if "--install-iga-launcher" in argv:
+            print(f"Wrote {install_iga(repo)}")
+            return 0
+        if "--remove-iga-launcher" in argv:
+            for path in remove_iga():
+                print(f"Removed {path}")
             return 0
         if "--remove-launchers" in argv:
             for path in remove():

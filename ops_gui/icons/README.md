@@ -3,6 +3,9 @@ https://acemedia.host/icons/ (ace-pixel-icons-1.1.zip). The sun and moon on the 
 button are not part of the set; they are drawn in code in ops_gui/data.py on the same
 pixel grid.
 
+iga-bare.png is not part of the set: tools/icons.py draws it from the same 16 by 16 bitmap as its Help icon (a
+browser window with a compass, orange frame, navy body) and scales it by whole numbers to 32 and 64 px.
+
 bluetooth-bare.png is not part of the set either: it was drawn for this app on the same 16 by 16 grid
 (a blue badge with the Bluetooth mark) and scaled by whole numbers to 32 and 64 px.
 
@@ -31,6 +34,7 @@ A tab has its icon in two places, and tests/test_icon_parity.py fails if either 
 | Apps | rocket | rocket |
 | Settings | cog | cog |
 | Help | notes | question mark |
+| IGA (optional) | iga (drawn for this app by tools/icons.py) | a browser window with a compass |
 
 The rail rows on Overview reuse compass, email, search and server (`RAIL_INFO` in ops_gui/data.py).
 

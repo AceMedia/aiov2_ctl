@@ -66,6 +66,10 @@ def closing_listeners(win):
         page = getattr(win, "pages", {}).get(ghost.TAB)
         if page is not None and callable(getattr(page, "stop", None)):
             out.append(page)
+    if getattr(win, "iga_on", False):              # the optional IGA browser: its stop() clears data if asked to
+        page = getattr(win, "pages", {}).get("IGA")
+        if page is not None and callable(getattr(page, "stop", None)):
+            out.append(page)
     return out
 
 
@@ -376,6 +380,10 @@ def build_window():
             self.ghost_on = ghost.wanted()          # the optional, for-fun add-on: only when it is installed
             if self.ghost_on:
                 self.pages[ghost.TAB] = ghost.build(self)
+            from . import iga
+            self.iga_on = iga.wanted()              # the optional IGA browser: only when it is installed
+            if self.iga_on:
+                self.pages[iga.TAB] = iga.build(self)   # a placeholder; Qt WebEngine loads when it is first shown
             from . import bt_panel
             self.bt_available = bt_panel.adapter_available
             self.pages["Bluetooth"] = bt_panel.build_page(self)
@@ -431,6 +439,7 @@ def build_window():
             bl.addWidget(self.foot, 1)
             bl.addWidget(self.stats_label, 4)
             root.addWidget(bar)
+            self.status_frame = bar
             self.cpu_sample, self.throttled, self.stat_ticks = None, 0, 0
             self.stat_timer = QTimer(self)
             self.stat_timer.timeout.connect(self.update_stats)
@@ -454,7 +463,9 @@ def build_window():
                 QShortcut(QKeySequence(f"F{n + 1}"), self, activated=lambda n=n: self.home_key(n))
             QShortcut(QKeySequence("e"), self, activated=self.guard(lambda: self.home_key(5)))
             for key in ("f", "F11"):
-                QShortcut(QKeySequence(key), self, activated=self.toggle_fullscreen)
+                QShortcut(QKeySequence(key), self, activated=lambda k=key: self.fullscreen_key(k))
+            self.tabs.currentChanged.connect(lambda _=0: self.iga_tab_left())
+            self.tabs.currentChanged.connect(lambda _=0: self.iga_arrived())
             QShortcut(QKeySequence("Escape"), self, activated=self.back)
             QShortcut(QKeySequence("Tab"), self, activated=lambda: self.step(1))
             QShortcut(QKeySequence("Shift+Tab"), self, activated=lambda: self.step(-1))
@@ -660,6 +671,9 @@ def build_window():
             wiki_page = self.pages.get("Wiki")
             if wiki_page is not None and hasattr(wiki_page, "recolour"):
                 wiki_page.recolour()                        # its page carries its colours inside it
+            iga_page = self.pages.get("IGA") if getattr(self, "iga_on", False) else None
+            if iga_page is not None and hasattr(iga_page, "recolour"):
+                iga_page.recolour()                         # the app's own pages in IGA, never a site's
             can = handoff.has_display() and handoff.terminal_argv(handoff.install_dir()) is not None
             self.term_btn.setVisible(True)
             self.term_btn.setIcon(theme_icon("terminal", pal.color(QPalette.ColorRole.ButtonText)))
@@ -711,6 +725,7 @@ def build_window():
                                   self.settings.get("home_tab") is not False, data.has_ethernet(),
                                   self.bt_available(), everything=True,
                                   wiki=getattr(self, "wiki_on", False), ghost=getattr(self, "ghost_on", False),
+                                  iga=getattr(self, "iga_on", False),
                                   apps=bool(self.settings.get("apps_tab") or self.settings.get("games_tab")))
             if getattr(self, "names", None) == names:
                 self.refresh_help()
@@ -817,7 +832,66 @@ def build_window():
             elif action == "return":
                 self.showFullScreen()
 
+        def fullscreen_key(self, key):
+            """f and F11. On the IGA tab F11 steps back out of IGA's full-screen states (iga.f11_action)."""
+            if key == "F11" and self.iga_showing():
+                from . import iga
+                self.iga_fullscreen(iga.f11_action(getattr(self, "iga_fs", 0)))
+            else:
+                self.toggle_fullscreen()
+
+        def iga_showing(self):
+            return bool(getattr(self, "iga_on", False) and self.tabs.count() and self.current_name() == "IGA")
+
+        def iga_fullscreen(self, action):
+            """The IGA tab's three full-screen states (iga.next_fullscreen): normal, the browser full screen with
+            the app's tabs and status bar hidden, and the page alone."""
+            from . import iga
+            old = getattr(self, "iga_fs", 0)
+            if action == "page_on" and old != 2:
+                self.iga_fs_before = old
+            self.apply_iga_fs(iga.next_fullscreen(old, action, getattr(self, "iga_fs_before", 0)))
+
+        def apply_iga_fs(self, state, keep_window=False):
+            from . import iga
+            view = iga.fullscreen_view(state)
+            old = getattr(self, "iga_fs", 0)
+            if old == 0 and state > 0:
+                self.iga_was_full = self.isFullScreen()
+            self.iga_fs = state
+            self.tabs.tabBar().setVisible(view["app_bars"])
+            corner = self.tabs.cornerWidget(Qt.Corner.TopRightCorner)
+            if corner is not None:
+                corner.setVisible(view["app_bars"])
+            if getattr(self, "status_frame", None) is not None:
+                self.status_frame.setVisible(view["app_bars"])
+            page = self.pages.get("IGA")
+            if page is not None and hasattr(page, "set_row_hidden"):
+                page.set_row_hidden(not view["iga_row"])
+            self.peek = {"peeking": False, "count": 0}
+            if view["window_full"] and not self.isFullScreen():
+                self.showFullScreen()
+            elif not view["window_full"] and not keep_window and old > 0 and self.isFullScreen() and \
+                    not getattr(self, "iga_was_full", False):
+                self.showMaximized()
+
+        def iga_arrived(self):
+            """The IGA tab has just become the showing tab: the keyboard goes inside it (iga.arrival_focus)."""
+            if self.iga_showing():
+                page = self.pages.get("IGA")
+                if page is not None and hasattr(page, "arrive"):
+                    QTimer.singleShot(0, page.arrive)
+
+        def iga_tab_left(self):
+            """Another tab was chosen while IGA was in one of its full-screen states: the app's tabs and status bar
+            come back; the window stays as it is."""
+            if getattr(self, "iga_fs", 0) and not self.iga_showing():
+                self.apply_iga_fs(0, keep_window=True)
+
         def toggle_fullscreen(self):
+            if self.iga_showing():                              # on the IGA tab the control cycles its states
+                self.iga_fullscreen("toggle")
+                return
             self.peek = {"peeking": False, "count": 0}          # asked for by hand: no stepping back in
             if self.isFullScreen():
                 self.showMaximized()
@@ -864,7 +938,17 @@ def build_window():
         def typing(self):
             """True while a text box has the keyboard, so single-letter shortcuts leave it alone."""
             w = QApplication.focusWidget()
-            return isinstance(w, (QLineEdit, QPlainTextEdit, QTextEdit))
+            return isinstance(w, (QLineEdit, QPlainTextEdit, QTextEdit)) or self.in_typing_zone(w)
+
+        def in_typing_zone(self, w=None):
+            """True when `w` (or the widget with the keyboard) is inside a widget marked as a place where the person
+            types, such as a web page: the property typing_zone set on it or on one of its parents."""
+            w = QApplication.focusWidget() if w is None else w
+            while w is not None and hasattr(w, "property"):
+                if w.property("typing_zone"):
+                    return True
+                w = w.parentWidget() if hasattr(w, "parentWidget") else None
+            return False
 
         def guard(self, fn):
             """A single-letter shortcut does nothing while a box is being typed in, while the screensaver is
@@ -924,12 +1008,18 @@ def build_window():
         def back(self):
             """One level back at a time (the order is focusnav.back_step): close the terminal drawer, leave a
             wiki page for its list, leave the page for the row of tabs, leave full screen, go to the first tab."""
+            iga_page = self.pages.get("IGA") if getattr(self, "iga_on", False) else None
+            web = iga_page.escape_plan() if iga_page is not None and self.current_name() == "IGA" else None
             step = focusnav.back_step(self.drawer.isVisible(),
                                       self.current_name() == "Wiki" and self.pages["Wiki"].page.hasFocus(),
                                       self.nav_on and self.nav_in_page(), self.isFullScreen(),
-                                      not self.names or self.current_name() == self.names[0])
+                                      not self.names or self.current_name() == self.names[0], web=web)
             if step == "drawer":
                 self.drawer.close_drawer()
+            elif step == "web":                     # one IGA step; IGA never changes which tab is selected
+                iga_page.escape_do(web)
+                if web == "tabs":
+                    self.nav_to(self.tabs.tabBar())
             elif step == "reading":
                 self.pages["Wiki"].back()
             elif step == "tabs":
@@ -1238,9 +1328,43 @@ def build_window():
                         self.saver_stop()
                     return True
                 self.last_input = time.monotonic()
+            if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and getattr(self, "iga_on", False) and \
+                    self.iga_showing() and QApplication.activeWindow() is self and \
+                    QApplication.activeModalWidget() is None:
+                # IGA's own keys (Ctrl+L, Ctrl+T, Ctrl+Tab...) are IGA's whenever its tab shows, wherever the
+                # keyboard is in the window: the row of tabs, a corner button, IGA itself (iga.key_owner).
+                from . import iga
+                focus = QApplication.focusWidget()
+                page = self.pages.get("IGA")
+                where = "app_tabs" if focus is self.tabs.tabBar() else \
+                    ("page" if self.in_typing_zone() else
+                     ("iga" if focus is not None and page is not None and page.isAncestorOf(focus) else "corner"))
+                mods = event.modifiers()
+                owner = iga.key_owner(True, where, iga.key_name(event.key(), Qt.Key),
+                                      bool(mods & Qt.KeyboardModifier.ControlModifier),
+                                      bool(mods & Qt.KeyboardModifier.ShiftModifier),
+                                      bool(mods & Qt.KeyboardModifier.AltModifier))
+                if owner and owner != "page":
+                    event.accept()
+                    if kind == QEvent.Type.KeyPress:
+                        page = self.pages.get("IGA")
+                        if page is not None and hasattr(page, "key_act"):
+                            page.key_act(owner)
+                    return True
+            if kind == QEvent.Type.ShortcutOverride and getattr(self, "iga_on", False) and self.in_typing_zone():
+                # A web page has the keyboard: letters, numbers and Tab are the page's, so claim them from the app's
+                # shortcuts and they arrive as ordinary key presses. Escape, F-keys and Ctrl or Alt keys still work.
+                from . import iga
+                k, mods = int(event.key()), event.modifiers()
+                if iga.page_keeps(k == int(Qt.Key.Key_Escape), int(Qt.Key.Key_F1) <= k <= int(Qt.Key.Key_F35),
+                                  bool(mods & Qt.KeyboardModifier.ControlModifier),
+                                  bool(mods & Qt.KeyboardModifier.AltModifier),
+                                  bool(mods & Qt.KeyboardModifier.MetaModifier)):
+                    event.accept()
+                    return True
             if kind == QEvent.Type.KeyPress and not self.nav_sending and QApplication.activeWindow() is self and \
                     QApplication.activePopupWidget() is None and QApplication.activeModalWidget() is None and \
-                    obj is (QApplication.focusWidget() or self) and \
+                    obj is (QApplication.focusWidget() or self) and not self.in_typing_zone() and \
                     event.modifiers() in (Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.KeypadModifier):
                 direction = {Qt.Key.Key_Up: "up", Qt.Key.Key_Down: "down", Qt.Key.Key_Left: "left",
                              Qt.Key.Key_Right: "right"}.get(event.key())
@@ -1254,7 +1378,8 @@ def build_window():
                     ((obj.isWidgetType() and obj.window() is self) or obj is self.windowHandle()):
                 self.nav_drop()                         # seen at the window first, before Qt moves the keyboard
             if event.type() == QEvent.Type.MouseButtonRelease and obj.isWidgetType() and \
-                    obj.window() is self and not isinstance(obj, (QLineEdit, QPlainTextEdit, QComboBox)):
+                    obj.window() is self and not isinstance(obj, (QLineEdit, QPlainTextEdit, QComboBox)) and \
+                    not self.in_typing_zone(obj):
                 if event.button() == Qt.MouseButton.RightButton:
                     self.back()
                     return True
@@ -1890,7 +2015,9 @@ def finish(code, streams=None, leave=os._exit):
 def main():
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QTimer
-    from . import splash, startup
+    from . import iga, splash, startup
+    if iga.wanted():                                      # only with the IGA browser installed; loads nothing
+        iga.prepare_app()
     app = QApplication(sys.argv)
     full = startup.wants_fullscreen(sys.argv)            # opened at login in full screen (Settings > General)
     # Building the window takes most of a second: put the loading screen up first, so something shows at once.

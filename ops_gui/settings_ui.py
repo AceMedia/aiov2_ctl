@@ -347,6 +347,64 @@ def build_settings(win, Bridge_signals):
     lay.addStretch(1)
     sub.addTab(scroll, "Flipper")
 
+    # ---- IGA, the optional browser: a page only when its feature is installed
+    if getattr(win, "iga_on", False):
+        from PyQt6.QtWidgets import QLineEdit as IgaLine
+        from . import data as iga_data, iga
+        scroll, lay = page()
+        cur = iga.settings_from(getattr(win, "settings", None) or iga_data.load_settings())
+
+        def save_iga(key, value):
+            if isinstance(getattr(win, "settings", None), dict):
+                win.settings[key] = value
+            iga_data.save_settings(dict(iga_data.load_settings(), **{key: value}))
+
+        v = card("Search from the address bar", lay)
+        custom = IgaLine(cur["iga_search_custom"])
+        custom.setPlaceholderText("https://example.org/search?q=%s")
+        custom.setStyleSheet("font-size: 13pt; padding: 6px;")
+        custom_note = label("", True)
+
+        def note_custom():
+            text = custom.text().strip()
+            custom_note.setText("" if not text or iga.good_template(text) else
+                                "The address must start with https:// or http:// and have %s where the words go. "
+                                "Until it does, nothing is searched.")
+
+        def pick_search(value):
+            save_iga("iga_search", value)
+            for key, b in search_buttons.items():
+                b.setChecked(key == value)
+            custom.setEnabled(value == "custom")
+
+        search_row, search_buttons = choices(iga.SEARCH_CHOICES, pick_search)
+        setting(v, "Search engine", "Text that is not an address goes only to the engine chosen here. With no "
+                                    "search, it goes nowhere.", search_row)
+        v.addWidget(label("Custom search address, with %s where the words go:", True))
+        v.addWidget(custom)
+        v.addWidget(custom_note)
+        custom.editingFinished.connect(lambda: (save_iga("iga_search_custom", custom.text().strip()), note_custom()))
+        pick_search(cur["iga_search"])
+        note_custom()
+
+        v = card("Kept on this uConsole", lay)
+        history_b = onoff(lambda on: save_iga("iga_history", bool(on)))
+        history_b.setChecked(cur["iga_history"])
+        setting(v, "Remember visited pages", "Off unless you switch it on. Up to 500 pages, kept in "
+                                             "~/.local/share/aiov2_ctl/iga and readable only by you.", history_b)
+        wipe_b = onoff(lambda on: save_iga("iga_clear_on_close", bool(on)))
+        wipe_b.setChecked(cur["iga_clear_on_close"])
+        setting(v, "Clear everything when the app closes", "Cookies, site storage, cache and history. Bookmarks "
+                                                           "are kept.", wipe_b)
+        forget_b = button("Clear history")
+        forget_b.clicked.connect(lambda: (iga.clear_history(iga.user_folder()), win.say("IGA's history is cleared.")))
+        setting(v, "Visited pages", "Removes the list of visited pages now.", forget_b)
+
+        v = card("What IGA sends", lay)
+        v.addWidget(label(iga.SENDS, True))
+        lay.addStretch(1)
+        sub.addTab(scroll, "IGA")
+
     # ---- Features: what the installer has put here, and adding or removing one
     scroll, lay = page()
     left, right = columns(lay, 3, 2)
