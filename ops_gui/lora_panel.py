@@ -125,11 +125,51 @@ def message_rows(activities, channel=None, limit=CHAT_LIMIT):
         rows.append({"time": a.get("time", ""), "who": "Me" if a.get("sent") else a.get("from") or "Unknown",
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
-                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
+                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"), "to_id": a.get("to_id"),
                      "packet_id": a.get("packet_id"), "stamp": a.get("stamp"),
                      "state": delivery.delivery_text(a.get("delivery") or {"state": delivery.HANDED})
                      if a.get("sent") else ""})
     return rows[-limit:]
+
+
+BROADCAST_NUMBER = 0xFFFFFFFF          # the library's broadcast address, written "^all" in its packets
+
+
+def destination(to_id, self_id=None):
+    """Where a packet went: "everyone" (the broadcast address, "^all" or 0xFFFFFFFF), "me" (this radio), "other"
+    (another node: this radio only overheard it), or None when the packet did not say."""
+    if to_id is None or to_id == "":
+        return None
+    if str(to_id).strip() == "^all" or nodeid.canonical(to_id) == nodeid.canonical(BROADCAST_NUMBER):
+        return "everyone"
+    if nodeid.same(to_id, self_id):
+        return "me"
+    return "other"
+
+
+def destination_text(to_id, self_id=None, node_info=None, sent=False):
+    """The destination in words: "to everyone on the channel", "direct to this radio", "direct to Ann" (sent by
+    this radio) or "direct to Ann, overheard". "" when not known."""
+    kind = destination(to_id, self_id)
+    if kind == "everyone":
+        return "to everyone on the channel"
+    if kind == "me":
+        return "direct to this radio"
+    if kind == "other":
+        info = None
+        for key, value in (node_info or {}).items():
+            if nodeid.same(key, to_id):
+                info = value
+        name = node_name(info, nodeid.canonical(to_id)) if info else nodeid.canonical(to_id)
+        return f"direct to {name}" + ("" if sent else ", overheard")
+    return ""
+
+
+def unreadable_text(kind):
+    """What to say in place of an encrypted packet's content, which is never shown."""
+    if kind == "other":
+        return "a direct message to another node; its text is encrypted to them and cannot be read here"
+    return "encrypted with a key this radio does not have; its content cannot be read here"
 
 
 def view_signature(rows):
@@ -504,14 +544,34 @@ def rows_signature(rows):
                  for r in rows or [])
 
 
-def activity_line(a):
+def activity_line(a, self_id=None, node_info=None):
+    """One line of the Activity feed. When the packet said where it went, the line says so; an encrypted packet's
+    content is never shown, only what it was."""
     sig = ""
+    where = destination_text(a.get("to_id"), self_id, node_info, sent=bool(a.get("sent")))
+    summary = a.get("summary", "")
+    if a.get("kind") == "encrypted":
+        summary = unreadable_text(destination(a.get("to_id"), self_id))
     if a.get("rx_snr") is not None:
         sig = f"  ({a['rx_snr']:+.1f} dB)"
     arrow = ">" if a.get("sent") else "<"
     if a.get("sent") and isinstance(a.get("delivery"), dict):
         sig = f"  [{delivery.delivery_text(a['delivery'])}]"
-    return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {a.get('from', '?')}: {a.get('summary', '')}{sig}"
+    who = f"{a.get('from', '?')} ({where})" if where else a.get("from", "?")
+    return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {who}: {summary}{sig}"
+
+
+def composer_line(snapshot):
+    """Where the message being typed will go. This app only sends to everyone on the chosen channel: "To everyone
+    on channel 0 (LongFast)". The channel's own name, or for a primary with an empty name the radio's preset; the
+    name is left out when neither is known."""
+    snap = snapshot or {}
+    sel = snap.get("selected_channel") or 0
+    name = ""
+    for c in snap.get("configured_channels") or []:
+        if isinstance(c, dict) and c.get("index", 0) == sel:
+            name = c.get("name") or (snap.get("modem_preset") or "" if c.get("primary") else "")
+    return f"To everyone on channel {sel}" + (f" ({name})" if name else "")
 
 
 def hint(library_ok, service_active, rail):
@@ -698,6 +758,10 @@ def build_panel(win, Switch):
             mid.addWidget(feed, 2)
             root.addLayout(mid, 1)
 
+            self.where = QLabel("")
+            self.where.setStyleSheet("font-size: 11pt; color: #9e9e9e;")
+            self.where.setWordWrap(True)
+            root.addWidget(self.where)
             row = QHBoxLayout()
             self.allow = Switch()
             self.allow.clicked.connect(self.toggle_allow)
@@ -793,9 +857,10 @@ def build_panel(win, Switch):
                 self.table.fit_columns()
             self.last_snap = snap
             self.show_details()
-            lines = [activity_line(a) for a in snap["activities"][-40:]]
+            lines = [activity_line(a, snap.get("self_id"), snap.get("node_info")) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
+            self.where.setText(composer_line(snap))
             if own:
                 e.update_proximity({"lat": own[0], "lon": own[1]}, haversine_km)
             if self.on_snap:
@@ -949,6 +1014,9 @@ def build_panel(win, Switch):
                 colour = "#3fe0d0" if r["sent"] else "#ff7a45"
                 who = html.escape(r["who"])
                 tag = " checked in" if r["checkin"] else ""
+                where = destination_text(r.get("to_id"), snap.get("self_id"), snap.get("node_info"), r["sent"])
+                if where:
+                    tag += f' <span style="color:#9a90a6">{html.escape(where)}</span>'
                 if r["state"]:
                     tag += f' <span style="color:#9a90a6">({html.escape(r["state"])})</span>'
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '

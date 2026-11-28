@@ -122,6 +122,24 @@ def configured_channels(channels):
     return found or None
 
 
+# The library's LoRa modem presets (Config.LoRaConfig.ModemPreset) by number, written as the radio names a primary
+# channel whose own name is empty. An assumption from the library's protobuf, not checked against a radio.
+MODEM_PRESETS = ("LongFast", "LongSlow", "VeryLongSlow", "MediumSlow", "MediumFast", "ShortSlow", "ShortFast",
+                 "LongModerate", "ShortTurbo")
+
+
+def modem_preset_name(lora_config):
+    """The preset the radio is set to ("LongFast"), from the library's LoRa config (interface.localNode.localConfig
+    .lora), or None when it is not using a preset or the config is not available. Only reads it."""
+    if lora_config is None or not getattr(lora_config, "use_preset", False):
+        return None
+    try:
+        number = int(getattr(lora_config, "modem_preset", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return MODEM_PRESETS[number] if 0 <= number < len(MODEM_PRESETS) else None
+
+
 def explain_tcp_failure(exc, host, port):
     """A short, useful status line for a failed Meshtastic TCP connection."""
     local = host in ("localhost", "127.0.0.1", "::1")
@@ -160,6 +178,7 @@ class LoRa:
         self.max_checkins = 6
         self.channel_activity = {}
         self.configured_channels = None     # the radio's own channel list, when the connection gives it
+        self.modem_preset = None            # the radio's preset name ("LongFast"), when the connection gives it
         self.selected_channel = 0
         self.auto_follow_channel = False
         self.channel_locked = False
@@ -208,6 +227,7 @@ class LoRa:
                 "recent_checkins": copy.deepcopy(self.recent_checkins),
                 "channel_activity": copy.deepcopy(self.channel_activity),
                 "configured_channels": copy.deepcopy(self.configured_channels),
+                "modem_preset": self.modem_preset,
                 "active_channels": active_channels,
                 "selected_channel": selected_channel,
                 "best_channel": best_channel,
@@ -917,6 +937,11 @@ class LoRa:
                 suffix = f" {note}" if note else ""
                 summary = f"Check-in {parsed_checkin['lat']:.5f},{parsed_checkin['lon']:.5f}{suffix}"
                 self._remember_checkin(node_name, from_id, parsed_checkin, sent=sent, channel=channel)
+        elif not decoded and packet.get("encrypted") is not None:
+            # the library hands on a packet it could not decrypt with "encrypted" and no "decoded": a direct message
+            # encrypted to another node, or a channel this radio has no key for. Its content is not shown.
+            kind = "encrypted"
+            summary = "Encrypted, cannot be read here"
         else:
             position = decoded.get("position")
             if isinstance(position, dict) and position:
@@ -966,6 +991,8 @@ class LoRa:
             "time": timestamp,
             "from": node_name,
             "from_id": str(from_id),
+            # where the packet went: "^all" (everyone on the channel) or a node. This app only ever sends to everyone.
+            "to_id": "^all" if sent else (packet.get("toId") if packet.get("toId") is not None else packet.get("to")),
             "channel": channel,
             "portnum": portnum,
             "kind": kind,
@@ -1130,6 +1157,12 @@ class LoRa:
             except Exception as e:                      # reading only; a library without it keeps the fallback
                 debug(f"LoRa: could not read the configured channels: {e}")
                 self.configured_channels = None
+            try:
+                self.modem_preset = modem_preset_name(getattr(getattr(getattr(
+                    self.interface, "localNode", None), "localConfig", None), "lora", None))
+            except Exception as e:
+                debug(f"LoRa: could not read the modem preset: {e}")
+                self.modem_preset = None
         if isinstance(nodes, dict) and nodes:
             merged_nodes = {}
             for node_id, info in nodes.items():
