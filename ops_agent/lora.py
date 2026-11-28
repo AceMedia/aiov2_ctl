@@ -8,7 +8,7 @@ from datetime import datetime
 
 from . import bootstrap, companions
 from .power import debug, log
-from . import nodeid
+from . import geo, nodeid
 
 
 def _pubsub():
@@ -512,15 +512,10 @@ class LoRa:
     def _remember_node_position(self, node_id, position):
         if not isinstance(position, dict):
             return
-        lat = position.get("latitude")
-        lon = position.get("longitude")
-        if lat is None or lon is None:
+        where = geo.latlon(position)
+        if where is None:
             return
-        try:
-            lat = float(lat)
-            lon = float(lon)
-        except (TypeError, ValueError):
-            return
+        lat, lon = where
 
         point = {
             "time": self._position_timestamp(position),
@@ -667,7 +662,8 @@ class LoRa:
             return
         lat = local_position.get("lat")
         lon = local_position.get("lon")
-        if lat is None or lon is None:
+        own = geo.latlon({"latitude": lat, "longitude": lon})
+        if own is None:
             return
         with self.lock:
             node_items = list(self.node_info.items())
@@ -675,12 +671,11 @@ class LoRa:
             pos = info.get("position") if isinstance(info, dict) else None
             if not isinstance(pos, dict):
                 continue
-            node_lat = pos.get("latitude")
-            node_lon = pos.get("longitude")
-            if node_lat is None or node_lon is None:
+            where = geo.latlon(pos)
+            if where is None:
                 continue
             try:
-                distance_km = distance_fn(float(lat), float(lon), float(node_lat), float(node_lon))
+                distance_km = distance_fn(own[0], own[1], where[0], where[1])
             except (TypeError, ValueError):
                 continue
             inside = distance_km <= self.proximity_radius_km

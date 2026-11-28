@@ -12,7 +12,7 @@ import html
 import math
 import time
 
-from ops_agent import nodeid
+from ops_agent import geo, nodeid
 
 TICK_MS = 1000
 
@@ -176,22 +176,8 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 
 
 def node_latlon(info):
-    """(lat, lon) from a node's position, or None. Accepts float and 1e-7 integer forms."""
-    pos = (info or {}).get("position") if isinstance(info, dict) else None
-    if not isinstance(pos, dict):
-        return None
-    lat, lon = pos.get("latitude"), pos.get("longitude")
-    if lat is None and pos.get("latitudeI") is not None:
-        lat = pos["latitudeI"] / 1e7
-    if lon is None and pos.get("longitudeI") is not None:
-        lon = pos["longitudeI"] / 1e7
-    try:
-        lat, lon = float(lat), float(lon)
-    except (TypeError, ValueError):
-        return None
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
-        return None
-    return lat, lon
+    """(lat, lon) from a node's position, or None. The one checked converter, ops_agent.geo.latlon()."""
+    return geo.latlon(info.get("position")) if isinstance(info, dict) else None
 
 
 def own_position(node_info, self_id):
