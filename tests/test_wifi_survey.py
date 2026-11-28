@@ -375,6 +375,56 @@ class CaptureKeepTests(unittest.TestCase):
         d = data(payload=b"\xaa\xaa\x03\x00\x00\x00\x88\x8e" + b"\x01\x03" + b"\x22" * 95)
         self.assertIsNone(a.capture_keep(d))
 
+    SNAP = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
+    IPV4 = b"\xaa\xaa\x03\x00\x00\x00\x08\x00"
+
+    def amsdu(self, body, protected=False):
+        # QoS data to the access point, with the A-MSDU bit (bit 7 of the first QoS control byte) set
+        return bytes([0x88, 0x41 if protected else 0x01]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" \
+            + b"\x80\x00" + body
+
+    def subframe(self, snap, rest=b"\x02\x03" + b"\x11" * 40):
+        payload = snap + rest
+        return AP + STA + struct.pack(">H", len(payload)) + payload
+
+    def mesh(self, ext, snap, protected=False, rest=b"\x02\x03" + b"\x11" * 40):
+        # four-address QoS data with "mesh control present" (0x01 in the second QoS control byte), then a mesh
+        # control field of 6 bytes plus 6 for each extra address
+        control = bytes([ext]) + b"\x05" + b"\x00" * 4 + b"\x00" * (6 * ext)
+        return bytes([0x88, 0x43 if protected else 0x03]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" + STA \
+            + b"\x00\x01" + control + snap + rest
+
+    def test_an_a_msdu_carrying_eapol_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.amsdu(self.subframe(self.SNAP))))
+
+    def test_an_a_msdu_without_eapol_comes_back_header_only(self):
+        d = self.amsdu(self.subframe(self.IPV4))
+        self.assertEqual(a.capture_keep(d), d[:26])
+
+    def test_an_a_msdu_too_short_to_tell_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.amsdu(b"")))
+        self.assertIsNone(a.capture_keep(self.amsdu(self.subframe(self.SNAP)[:18])))
+
+    def test_a_mesh_data_frame_carrying_eapol_is_dropped(self):
+        for ext in (0, 1, 2):
+            self.assertIsNone(a.capture_keep(self.mesh(ext, self.SNAP)), ext)
+
+    def test_a_mesh_data_frame_without_eapol_comes_back_header_only(self):
+        for ext in (0, 1, 2):
+            d = self.mesh(ext, self.IPV4)
+            self.assertEqual(a.capture_keep(d), d[:32], ext)
+
+    def test_a_mesh_data_frame_too_short_or_odd_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.mesh(0, b"", rest=b"")[:32]))
+        self.assertIsNone(a.capture_keep(self.mesh(2, b"", rest=b"")[:40]))
+        self.assertIsNone(a.capture_keep(self.mesh(3, self.IPV4)))      # the reserved address-extension value
+
+    def test_protected_a_msdu_and_mesh_frames_come_back_header_only(self):
+        d = self.amsdu(self.subframe(self.SNAP), protected=True)
+        self.assertEqual(a.capture_keep(d), d[:26])
+        d = self.mesh(0, self.SNAP, protected=True)
+        self.assertEqual(a.capture_keep(d), d[:32])
+
     def test_an_authentication_frame_comes_back_header_only(self):
         auth = mgmt(11, AP, STA, AP, b"\x03\x00\x01\x00\x00\x00" + b"\x33" * 100)
         self.assertEqual(a.capture_keep(auth), auth[:24])

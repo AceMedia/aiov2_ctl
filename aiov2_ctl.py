@@ -5331,6 +5331,43 @@ _KEEP_REASON = (10, 12)            # disassociation, deauthentication: the heade
 _EAPOL_SNAP = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
 
 
+def _mesh_control_len(frame, at):
+    """The length of the 802.11s mesh control field starting at `at` (6, 12 or 18 bytes), or None when it cannot
+    be read or uses the reserved address-extension value."""
+    if len(frame) <= at or frame[at] & 3 == 3:
+        return None
+    return 6 + 6 * (frame[at] & 3)
+
+
+def _carries_eapol(frame, hdr, amsdu, mesh):
+    """Whether the unprotected data frame body after `hdr` carries EAPOL, or might: in doubt, True.
+
+    A plain body starts with its LLC/SNAP. An 802.11s mesh data frame has a mesh control field first. An A-MSDU
+    is a series of subframes, each a 14-byte header then its own LLC/SNAP; only the first is looked at. In a mesh
+    A-MSDU the mesh control may come before the subframe or inside it, so both places are checked."""
+    if not amsdu and not mesh:
+        body = frame[hdr:hdr + 8]
+        return body == _EAPOL_SNAP or (len(body) < 8 and _EAPOL_SNAP.startswith(body) and bool(body))
+    places = []
+    if mesh:
+        mc = _mesh_control_len(frame, hdr)
+        if mc is None:
+            return True
+        places.append(hdr + mc + (14 if amsdu else 0))
+        if amsdu:
+            inner = _mesh_control_len(frame, hdr + 14)
+            if inner is None:
+                return True
+            places.append(hdr + 14 + inner)
+    else:
+        places.append(hdr + 14)
+    for at in places:
+        snap = frame[at:at + 8]
+        if len(snap) < 8 or snap == _EAPOL_SNAP:
+            return True
+    return False
+
+
 def capture_keep(frame):
     """The part of one 802.11 frame (without radiotap) that may be written to a capture file, or None to drop it.
 
@@ -5338,7 +5375,8 @@ def capture_keep(frame):
     Deauthentication and disassociation frames keep their header and reason code. Every other management frame,
     authentication and association included, keeps its header only, so no authentication body reaches the file.
     Control frames carry no body and are kept. Data frames keep their header only, and a data frame carrying
-    EAPOL (the key exchange, where the PMKID and handshake live) is dropped entirely. Anything malformed, or of
+    EAPOL (the key exchange, where the PMKID and handshake live) is dropped entirely, A-MSDU and 802.11s mesh
+    data frames included; one too short to tell is dropped too. Anything malformed, or of
     the reserved or extension type, is dropped."""
     if len(frame) < 10:
         return None
@@ -5358,11 +5396,13 @@ def capture_keep(frame):
         return bytes(frame[:24])
     if ftype == 2:
         qos = bool(sub & 8)
-        hdr = 24 + (6 if fc1 & 3 == 3 else 0) + (2 if qos else 0) + (4 if qos and fc1 & 0x80 else 0)
+        qos_at = 24 + (6 if fc1 & 3 == 3 else 0)
+        hdr = qos_at + (2 if qos else 0) + (4 if qos and fc1 & 0x80 else 0)
         if len(frame) < hdr:
             return None
-        body = frame[hdr:hdr + 8]
-        if not fc1 & 0x40 and (body == _EAPOL_SNAP or (len(body) < 8 and _EAPOL_SNAP.startswith(body) and body)):
+        amsdu = qos and bool(frame[qos_at] & 0x80)              # A-MSDU present
+        mesh = qos and bool(frame[qos_at + 1] & 0x01)           # 802.11s mesh control present
+        if not fc1 & 0x40 and _carries_eapol(frame, hdr, amsdu, mesh):
             return None
         return bytes(frame[:hdr])
     return None
