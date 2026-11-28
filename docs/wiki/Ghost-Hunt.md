@@ -57,6 +57,8 @@ None of them says anything about people, presence, position, direction or distan
 
 **Record** writes a session: one line every 2 seconds holding the time, how many things each source hears and their strengths (rounded), and the four meters. The first line says what the file is and *entertainment: not evidence of anything*. No device address, name or position is ever written.
 
+A recording stops by itself after four hours, or when its file reaches 20 MB, whichever comes first, and the tab says why. It is also stopped when the app closes.
+
 Sessions are kept only on the device, in
 
 ```
