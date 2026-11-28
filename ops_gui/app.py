@@ -1877,16 +1877,22 @@ def finish(code, streams=None, leave=os._exit):
 
 def main():
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QTimer
+    from . import splash, startup
     app = QApplication(sys.argv)
+    full = startup.wants_fullscreen(sys.argv)            # opened at login in full screen (Settings > General)
+    # Building the window takes most of a second: put the loading screen up first, so something shows at once.
+    loading = splash.show(app, full) if splash.wanted(sys.argv) else None
     win = build_window()
     win.resize(720, 640)
     if "--tab" in sys.argv:
         win.pending_tab = sys.argv[sys.argv.index("--tab") + 1] if len(sys.argv) > sys.argv.index("--tab") + 1 else ""
-    from . import startup
-    if startup.wants_fullscreen(sys.argv):              # opened at login in full screen (Settings > General)
+    if full:
         win.showFullScreen()
     else:
         win.showMaximized()
+    if loading is not None:
+        QTimer.singleShot(250, loading.close)             # once the window has had time to draw over it
     finish(app.exec())
 
 
