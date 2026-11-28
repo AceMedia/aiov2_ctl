@@ -341,5 +341,26 @@ class WakingTests(unittest.TestCase):
             self.assertNotIn(word, text)
 
 
+class WifiHeardTests(unittest.TestCase):
+    def test_the_ordinary_scans_networks_are_heard_as_well_as_the_surveys(self):
+        scan = [{"bssid": "AA:BB:CC:00:00:01", "signal_dbm": -60}, {"bssid": "aa:bb:cc:00:00:02", "signal_dbm": -75}]
+        self.assertEqual(ss.wifi_heard(None, scan), [{"id": "aa:bb:cc:00:00:01", "rssi": -60},
+                                                     {"id": "aa:bb:cc:00:00:02", "rssi": -75}])
+        bands = ss.signal_bands({"wifi": ss.wifi_heard(None, scan)})
+        self.assertEqual(bands[0]["caption"], "WI-FI  2 NETWORKS")
+
+    def test_a_network_in_both_is_counted_once_with_the_surveys_reading(self):
+        survey = [{"bssid": "aa:bb:cc:00:00:01", "signal": "-48 dBm"}]
+        scan = [{"bssid": "AA:BB:CC:00:00:01", "signal_dbm": -60}, {"bssid": "aa:bb:cc:00:00:03", "signal_dbm": -80}]
+        self.assertEqual(ss.wifi_heard(survey, scan), [{"id": "aa:bb:cc:00:00:01", "rssi": -48.0},
+                                                       {"id": "aa:bb:cc:00:00:03", "rssi": -80}])
+
+    def test_rows_without_a_reading_or_an_address_are_left_out(self):
+        self.assertEqual(ss.wifi_heard([{"bssid": "x", "signal": ""}, {"signal": "-50 dBm"}, "junk"],
+                                       [{"bssid": "y"}, {"bssid": "z", "signal_dbm": True}, None]), [])
+        self.assertEqual(ss.wifi_heard(None, None), [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
