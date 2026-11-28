@@ -108,7 +108,8 @@ class FieldHeightTests(unittest.TestCase):
         import os
         with open(os.path.join(os.path.dirname(iga.__file__), "iga.py")) as f:
             text = f.read()
-        self.assertEqual(text.count('setObjectName("rowfield")'), 2)
+        self.assertEqual(text.count('setObjectName("rowfield")'), 1)      # the panels' fields
+        self.assertEqual(text.count('setObjectName("tabfield")'), 1)      # the address, inside its tab
         self.assertEqual(iga.ROW_HEIGHT, 28)
 
 

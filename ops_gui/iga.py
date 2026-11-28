@@ -923,7 +923,7 @@ def build(win):
     import shutil
     import time
     from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
-    from PyQt6.QtGui import QIcon, QImage, QKeySequence, QPalette, QPixmap, QShortcut
+    from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QKeySequence, QPixmap, QShortcut
     from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
                                  QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
     from . import data, style
@@ -937,15 +937,11 @@ def build(win):
         return settings_from(getattr(win, "settings", None) or data.load_settings())
 
     def pixel_icon(name):
-        """One of IGA's 16 by 16 pixel icons in the button text colour, as the window's top-bar icons are drawn."""
-        colour = page.palette().color(QPalette.ColorRole.ButtonText)
-        img = QImage(16, 16, QImage.Format.Format_ARGB32)
-        img.fill(0)
-        for y, row in enumerate(ICONS[name]):
-            for x, cell in enumerate(row):
-                if cell == "#":
-                    img.setPixelColor(x, y, colour)
-        return QIcon(QPixmap.fromImage(img))
+        """One of IGA's 16 by 16 pixel icons, drawn by the same renderer as the window's top-bar icons: the theme's
+        text colour, and its muted colour when the button is off."""
+        from . import pixelicon
+        t = style.TOKENS["dark" if getattr(win, "theme", "dark") == "dark" else "light"]
+        return pixelicon.bitmap_icon(ICONS[name], QColor(t["text"]), 1, QColor(t["muted"]))
 
     class Page(QWidget):
         def keyPressEvent(self, event):
@@ -1037,11 +1033,49 @@ def build(win):
                 pid = open_page(blank=True)
                 return st["views"][pid].page() if pid is not None else None
 
-        # ---- the one slim row
-        row = QWidget()
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(ROW_GAP)
+        # ---- the one slim row: the app's own folder tabs, with the icon buttons in its two corners
+        from .foldertabs import FolderTabBar, FolderTabWidget
+
+        class PageBar(FolderTabBar):
+            """The app's folder tab bar, with each tab as wide as row_layout() says."""
+
+            def __init__(self):
+                super().__init__()
+                self.widths = []
+
+            def tabSizeHint(self, i):
+                w = self.widths[i] if 0 <= i < len(self.widths) else ICON_TAB
+                return QSize(max(0, int(w)), ROW_HEIGHT)
+
+            def minimumTabSizeHint(self, i):
+                return self.tabSizeHint(i)
+
+            def keyPressEvent(self, event):
+                if int(event.key()) in (int(Qt.Key.Key_Return), int(Qt.Key.Key_Enter)):
+                    expand()
+                    return
+                super().keyPressEvent(event)
+
+            def tabLayoutChange(self):
+                super().tabLayoutChange()
+                QTimer.singleShot(0, place_address)
+
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                QTimer.singleShot(0, place_address)
+
+        tabs = FolderTabWidget()
+        bar = PageBar()
+        tabs.setTabBar(bar)                      # before any tab is added
+        tabs.setObjectName("igatabs")            # style.py: the compact folder tabs of IGA's row
+        bar.setDrawBase(False)
+        bar.setExpanding(False)
+        bar.setUsesScrollButtons(False)
+        bar.setElideMode(Qt.TextElideMode.ElideRight)
+        bar.setIconSize(QSize(16, 16))
+        bar.setFocusPolicy(Qt.FocusPolicy.StrongFocus)          # Escape from a page lands on the tabs
+        bar.setAccessibleName("IGA's open pages. The current one is the address: press Enter or Ctrl+L to type")
+        outer.addWidget(tabs, 1)
         buttons = {}
 
         def icon_button(name, slot):
@@ -1056,49 +1090,60 @@ def build(win):
             buttons[name] = b
             return b
 
+        def corner(names_slots, left):
+            box = QWidget()
+            lay = QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, ROW_GAP, 0) if left else lay.setContentsMargins(ROW_GAP, 0, 0, 0)
+            lay.setSpacing(ROW_GAP)
+            for name, slot in names_slots:
+                lay.addWidget(icon_button(name, slot))
+            box.setFixedHeight(ROW_HEIGHT)
+            return box
+        left_box = corner((("back", lambda: act("back")), ("forward", lambda: act("forward")),
+                           ("reload", lambda: act("reload_or_stop"))), True)
+        right_box = corner((("new", lambda: (open_page(), arrive())), ("bookmark", lambda: bookmark_this()),
+                            ("menu", lambda: toggle_menu())), False)
+        tabs.setCornerWidget(left_box, Qt.Corner.TopLeftCorner)
+        tabs.setCornerWidget(right_box, Qt.Corner.TopRightCorner)
+
+        # inside the current page's tab: the mark, the favicon and the address, or the typing box
+        address = QWidget(bar)
+        address.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)   # a click is the tab's
+        mark_lab, fav_lab, text_lab = QLabel(address), QLabel(address), QLabel(address)
+        text_lab.setTextFormat(Qt.TextFormat.RichText)
+        text_lab.setFont(style.pixel_font(16))
+
         class AddressField(QLineEdit):
             def focusOutEvent(self, event):
                 super().focusOutEvent(event)
                 if st["editing"]:
                     QTimer.singleShot(0, collapse)
 
-        field = AddressField()
+        field = AddressField(bar)
+        field.setObjectName("tabfield")         # style.py: the field colour inside the open tab, no frame of its own
+        field.setFont(style.pixel_font(16))
         field.setPlaceholderText("Type an address, then Enter")
         field.setAccessibleName("Address of the current page")
-        field.setObjectName("rowfield")         # style.py: no minimum height or padding above and below,
-        field.setFixedHeight(ROW_HEIGHT)        # so it is exactly as high as the row's buttons
         field.hide()
-        tabs_box = QWidget()
-        tl = QHBoxLayout(tabs_box)
-        tl.setContentsMargins(0, 0, 0, 0)
-        tl.setSpacing(ROW_GAP)
-        rl.addWidget(icon_button("back", lambda: act("back")))
-        rl.addWidget(icon_button("forward", lambda: act("forward")))
-        rl.addWidget(icon_button("reload", lambda: act("reload_or_stop")))
-        rl.addWidget(tabs_box, 1)
-        rl.addWidget(field, 1)
-        rl.addWidget(icon_button("new", lambda: (open_page(), arrive())))
-        rl.addWidget(icon_button("bookmark", lambda: bookmark_this()))
-        rl.addWidget(icon_button("menu", lambda: toggle_menu()))
-        outer.addWidget(row)
 
-        panel = QFrame()
-        panel.setObjectName("card")                     # the app's own card look
+        # under the row, inside the pane: the panels (attached, no gap) and the thin progress line
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
+        panel = QWidget()
         pl = QVBoxLayout(panel)
-        pl.setContentsMargins(6, 4, 6, 4)
-        pl.setSpacing(4)
+        pl.setContentsMargins(8, 8, 8, 8)
+        pl.setSpacing(6)
         panel.hide()
-        outer.addWidget(panel)
-
+        tv.addWidget(panel)
         progress = QProgressBar()
         progress.setTextVisible(False)
         progress.setMaximumHeight(4)
         progress.setRange(0, 100)
         progress.hide()
-        outer.addWidget(progress)
-
-        stack = QStackedWidget()
-        outer.addWidget(stack, 1)
+        tv.addWidget(progress)
+        st["holders"] = {}
 
         def current():
             return st["views"].get(pages.current)
@@ -1120,70 +1165,114 @@ def build(win):
             icon = i.get("icon")
             return icon if icon is not None and not icon.isNull() else pixel_icon("page")
 
-        # ---- the pages in the row: the current one is the address
+        def move_top(pid):
+            holder = st["holders"].get(pid)
+            if holder is not None and top.parent() is not holder:
+                holder.layout().insertWidget(0, top)
+            top.show()
+
+        def corners_visible(on):
+            left_box.setVisible(on)
+            right_box.setVisible(on)
+
+        # ---- the pages in the row
         def relayout():
-            had_focus = st.get("current_tab") is not None and st["current_tab"].hasFocus()
-            while tl.count():
-                w = tl.takeAt(0).widget()
-                if w is not None:
-                    w.hide()
-                    w.deleteLater()
-            st["current_tab"] = None
-            width = row.width() if row.width() > 0 else page.width() - 8
-            plan = row_layout(width, len(pages.order), pages.index(pages.current) if pages.order else 0)
-            for pid, place in zip(pages.order, plan):
-                view = st["views"].get(pid)
-                if view is None:
-                    continue
+            n = len(pages.order)
+            if not n or pages.current not in pages.order:
+                return
+            cur = pages.index(pages.current)
+            width = max(0, page.width() - 8)
+            if st["editing"]:
+                widths = [width if i == cur else 0 for i in range(n)]
+                plan = [{"mode": "address" if i == cur else "hidden", "width": w} for i, w in enumerate(widths)]
+            else:
+                plan = row_layout(width, n, cur)
+            bar.widths = [p["width"] for p in plan]
+            for i, (pid, place) in enumerate(zip(pages.order, plan)):
+                if i >= bar.count():
+                    break
                 url = shown_url(pid)
                 own = st["info"].get(pid, {}).get("own")
-                title = "" if own else view.title()
-                b = QPushButton("")
-                b.setFixedSize(max(0, place["width"]), ROW_HEIGHT)
+                view = st["views"].get(pid)
+                title = "" if own or view is None else view.title()
+                label = page_label(title, url, 60)
+                try:
+                    bar.setTabVisible(i, place["mode"] != "hidden")
+                except Exception:
+                    pass
                 if place["mode"] == "address":
-                    b.setCheckable(True)
-                    b.setChecked(True)
-                    b.setFocusPolicy(Qt.FocusPolicy.StrongFocus)     # Escape from a page lands here
-                    inner = QHBoxLayout(b)
-                    inner.setContentsMargins(6, 0, 6, 0)
-                    inner.setSpacing(4)
-                    marks = mark_icon(url, own=bool(own))
-                    words = security_mark(START if own else url)
-                    for icon in ([pixel_icon(marks)] if marks else []) + [favicon(pid)]:
-                        lab = QLabel()
-                        lab.setPixmap(icon.pixmap(16, 16))
-                        lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-                        inner.addWidget(lab)
-                    text = QLabel()
-                    text.setTextFormat(Qt.TextFormat.RichText)
-                    most = chars_for(place["width"], 2)
-                    text.setText(html.escape(page_label(title, url, most)) if own or not _web(url)
-                                 else address_html(url, most))
-                    text.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-                    inner.addWidget(text, 1)
-                    tip = (words + ". " if words else "") + (url if url != "about:blank" else "New page") + \
-                        ". Click, or Ctrl+L, to type an address."
-                    b.setToolTip(tip)
-                    b.setAccessibleName("Current page: " + (title or url or "new page") +
-                                        (f", {words}" if words else "") + ". Press to type an address (Ctrl+L)")
-                    b.clicked.connect(lambda *_: expand())
-                    st["current_tab"] = b
+                    bar.setTabIcon(i, QIcon())
+                    bar.setTabText(i, "")
+                    tip = mark_words(url, bool(own))
+                    bar.setTabToolTip(i, (tip + "\n" if tip else "") + (url if url != "about:blank" else "New page")
+                                      + "\nPress, or Ctrl+L, to type an address.")
                 else:
-                    b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-                    b.setIcon(favicon(pid))
-                    b.setIconSize(QSize(16, 16))
-                    if place["mode"] == "title":
-                        b.setText(page_label(title, url, max(1, chars_for(place["width"]))))
-                    b.setToolTip((title or page_label(title, url)) + "\n" + url)
-                    b.setAccessibleName("Page: " + (title or page_label(title, url)))
-                    b.clicked.connect(lambda *_, p=pid: choose(p))
-                tl.addWidget(b)
-            tl.addStretch(1)
-            if had_focus and st["current_tab"] is not None:
-                st["current_tab"].setFocus()
+                    bar.setTabIcon(i, favicon(pid))
+                    bar.setTabText(i, label if place["mode"] == "title" else "")
+                    bar.setTabToolTip(i, label + ("\n" + url if url and url != label else ""))
+                try:
+                    bar.setTabData(i, label)
+                except Exception:
+                    pass
+            corners_visible(not st["editing"] and not st["row_hidden"])
+            bar.setElideMode(bar.elideMode())               # asks the bar to lay its tabs out again
+            bar.updateGeometry()
+            bar.update()
+            QTimer.singleShot(0, place_address)
             refresh_buttons()
 
         st["relayout"] = relayout
+
+        def place_address():
+            """Put the mark, favicon and address (or the typing box) inside the current tab, at address_slots()."""
+            try:
+                if not pages.order or pages.current not in pages.order or not bar.isVisible():
+                    address.hide()
+                    return
+                i = pages.index(pages.current)
+                r = bar.tabRect(i)
+                if r.width() <= 0:
+                    address.hide()
+                    return
+                pid = pages.current
+                url = shown_url(pid)
+                own = bool(st["info"].get(pid, {}).get("own"))
+                slots = address_slots(r.width(), st["editing"])
+                address.setGeometry(r.x() + bar.inset(), r.y(), r.width(), r.height())
+                kind = mark_icon(url, own)
+                mark_lab.setGeometry(*slots["mark"])
+                mark_lab.setPixmap(pixel_icon(kind).pixmap(16, 16) if kind else QPixmap())
+                mark_lab.setToolTip(mark_words(url, own))
+                mark_lab.setAccessibleName(mark_words(url, own))
+                if slots["favicon"] is None:
+                    fav_lab.hide()
+                else:
+                    fav_lab.setGeometry(*slots["favicon"])
+                    fav_lab.setPixmap(favicon(pid).pixmap(16, 16))
+                    fav_lab.show()
+                x, y, w, h = slots["text"]
+                text_lab.setGeometry(x, y, w, h)
+                if st["editing"]:
+                    text_lab.hide()
+                    fx, fy, fw, fh = editor_box(r.width())
+                    field.setGeometry(r.x() + bar.inset() + fx, r.y() + fy, fw, fh)
+                    field.show()
+                    field.raise_()
+                else:
+                    field.hide()
+                    metrics = QFontMetrics(text_lab.font())
+                    if own or not _web(url):
+                        view = st["views"].get(pid)
+                        runs = ("", "", page_label("" if own or view is None else view.title(), url, 200))
+                    else:
+                        runs = address_runs(url)
+                    runs = elide_address(*runs, lambda s: metrics.horizontalAdvance(s) <= w)
+                    text_lab.setText(address_label(*runs, colours()))
+                    text_lab.show()
+                address.show()
+                address.raise_()
+            except Exception:                     # never let the row's drawing take the tab down
+                address.hide()
 
         def refresh_buttons():
             view = current()
@@ -1203,18 +1292,18 @@ def build(win):
             buttons["bookmark"].setEnabled(_web(url) and not info().get("own"))
 
         def focus_current():
-            if st.get("current_tab") is not None:
-                st["current_tab"].setFocus()
+            if bar.isVisible():
+                bar.setFocus()
 
         def expand():
-            """The current page's tab opens into a field across the whole row, its address selected."""
+            """The current page's tab opens across the whole row, the same folder tab, with its address selected."""
             st["editing"] = True
             if st["row_hidden"]:
-                row.show()                      # page full screen: the row comes back just to type
-            for w in list(buttons.values()) + [tabs_box]:
-                w.hide()
+                bar.show()                      # page full screen: the row comes back just to type
             url = shown_url(pages.current)
             field.setText("" if url in ("about:blank", START) else url)
+            relayout()
+            place_address()
             field.show()
             field.setFocus()
             field.selectAll()
@@ -1224,16 +1313,26 @@ def build(win):
                 return
             st["editing"] = False
             field.hide()
-            for w in list(buttons.values()) + [tabs_box]:
-                w.show()
             if st["row_hidden"]:
-                row.hide()
+                bar.hide()
             relayout()
             view = current()
             if to_view and view is not None:
                 view.setFocus()
             elif not st["row_hidden"]:
                 focus_current()
+
+        def tab_pressed(i):
+            if not 0 <= i < len(pages.order):
+                return
+            if pages.order[i] == pages.current:
+                expand()
+            else:
+                choose(pages.order[i])
+
+        bar.tabBarClicked.connect(tab_pressed)
+        tabs.currentChanged.connect(lambda i: choose(pages.order[i])
+                                    if 0 <= i < len(pages.order) and pages.order[i] != pages.current else None)
 
         def go(text):
             p = prefs()
@@ -1295,7 +1394,6 @@ def build(win):
                 box = QLineEdit(spec["field"])
                 box.setObjectName("rowfield")
                 box.setFixedHeight(ROW_HEIGHT)
-                pl.addWidget(box)
             lst = None
             if spec["list"]:
                 lst = QListWidget()
@@ -1304,7 +1402,9 @@ def build(win):
                 lst.setMaximumHeight(170)
                 pl.addWidget(lst)
             line = QHBoxLayout()
-            line.setSpacing(4)
+            line.setSpacing(6)
+            if box is not None:
+                line.addWidget(box, 1)
 
             def press(bid):
                 handler(bid, box.text() if box is not None else "", lst.currentRow() if lst is not None else -1)
@@ -1313,7 +1413,8 @@ def build(win):
                 b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 b.clicked.connect(lambda *_, i=bid: press(i))
                 line.addWidget(b)
-            line.addStretch(1)
+            if box is None:
+                line.addStretch(1)
             pl.addLayout(line)
             first = spec["buttons"][0][0]
             if box is not None:
@@ -1376,7 +1477,15 @@ def build(win):
                 wp.fullScreenRequested.connect(page_fullscreen)
             st["views"][pid] = view
             st["info"][pid] = {}
-            stack.addWidget(view)
+            holder = QWidget()
+            hv = QVBoxLayout(holder)
+            hv.setContentsMargins(0, 0, 0, 0)
+            hv.setSpacing(0)
+            hv.addWidget(view, 1)
+            st["holders"][pid] = holder
+            tabs.blockSignals(True)
+            tabs.insertTab(pages.index(pid), holder, "")
+            tabs.blockSignals(False)
             return view
 
         def got_icon(pid, icon):
@@ -1456,18 +1565,31 @@ def build(win):
 
         def choose(pid):
             pages.select(pid)
-            stack.setCurrentWidget(st["views"][pid])
+            tabs.blockSignals(True)
+            tabs.setCurrentIndex(pages.index(pid))
+            tabs.blockSignals(False)
+            bar.update()
+            move_top(pid)
             progress.setVisible(bool(info().get("loading")))
             relayout()
 
         def close_page(pid=None):
             pid = pages.current if pid is None else pid
+            at = pages.index(pid)
             fresh = pages.close(pid)
             view = st["views"].pop(pid)
             st["info"].pop(pid, None)
-            stack.removeWidget(view)
+            holder = st["holders"].pop(pid, None)
+            if top.parent() is holder:
+                top.setParent(page)                 # kept: it moves to the next current page
+                top.hide()
+            tabs.blockSignals(True)
+            tabs.removeTab(at)
+            tabs.blockSignals(False)
             view.page().deleteLater()            # the page goes first: Qt WebEngine warns if a profile outlives it
             view.deleteLater()
+            if holder is not None:
+                holder.deleteLater()
             if fresh is not None:
                 make_view(fresh)
                 show_own(fresh, "start")
@@ -1793,7 +1915,8 @@ def build(win):
         def set_row_hidden(hidden):
             st["row_hidden"] = bool(hidden)
             if not st["editing"]:
-                row.setVisible(not hidden)
+                bar.setVisible(not hidden)
+                corners_visible(not hidden)
             if hidden:
                 strip.hide()
             elif not getattr(win, "iga_fs", 0):
