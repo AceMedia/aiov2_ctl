@@ -110,6 +110,7 @@ FEATURES = {
     "send": "Send a file / new folder / install",
     "apps": "App list",
     "pins": "Reading the header pins",
+    "clock": "Clock check",
 }
 _NEEDS_RPC = ("live_screen", "copy", "send")       # these go over the protobuf RPC session
 _NEEDS_SD = ("files", "copy", "send")
@@ -144,4 +145,79 @@ def unavailable_rows(caps):
 def available(caps, feature):
     """True unless `caps` says the feature cannot work (unknown features are left alone)."""
     return bool((caps or {}).get(feature, (True, ""))[0])
+
+
+
+# ---- 3. The Flipper's clock ------------------------------------------------------------------------------
+# The Flipper's real-time clock keeps local wall-clock time with no time zone. So both sides are compared as
+# naive local times: the Flipper's `date` answer as printed, and this computer's local time as printed by
+# `aiov2_ctl --flipper clock` straight after it. Setting the clock writes this computer's local time. Nothing
+# is ever set automatically: only the tab's button, after the person confirms, runs `clock set --yes`.
+import datetime as _dt
+
+_STAMP_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})")
+CLOCK_TOLERANCE_S = 2          # the serial round trip takes about a second
+
+
+def parse_stamp(text):
+    """The first 'YYYY-MM-DD HH:MM:SS' in `text` as a naive datetime, or None."""
+    m = _STAMP_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return _dt.datetime(*(int(g) for g in m.groups()))
+    except ValueError:
+        return None
+
+
+def clock_reading(text):
+    """(flipper time, computer time) from the 'Flipper clock:' and 'This computer:' lines, None where missing."""
+    flipper = computer = None
+    for line in (text or "").splitlines():
+        if line.startswith("Flipper clock:"):
+            flipper = parse_stamp(line)
+        elif line.startswith("This computer:"):
+            computer = parse_stamp(line)
+    return flipper, computer
+
+
+def clock_offset(flipper, computer):
+    """Whole seconds the Flipper is ahead (positive) or behind (negative), or None."""
+    if not isinstance(flipper, _dt.datetime) or not isinstance(computer, _dt.datetime):
+        return None
+    return round((flipper - computer).total_seconds())
+
+
+def duration_text(seconds):
+    """'3 min 12 s', '2 h 5 min', '4 days 1 h': at most the two largest units."""
+    seconds = abs(int(seconds))
+    parts = []
+    for size, unit in ((86400, "days"), (3600, "h"), (60, "min"), (1, "s")):
+        count, seconds = divmod(seconds, size)
+        if count or parts:
+            parts.append(f"{count} {'day' if unit == 'days' and count == 1 else unit}")
+    parts = parts[:2]
+    while len(parts) > 1 and parts[-1].startswith("0 "):
+        parts.pop()
+    return " ".join(parts) or "0 s"
+
+
+def clock_text(offset):
+    if offset is None:
+        return "Could not read the Flipper's clock."
+    if abs(offset) <= CLOCK_TOLERANCE_S:
+        return f"Flipper clock matches this computer (within {CLOCK_TOLERANCE_S} s)."
+    return f"Flipper clock is {duration_text(offset)} {'ahead of' if offset > 0 else 'behind'} this computer."
+
+
+def clock_args():
+    return ["aiov2_ctl", "--flipper", "clock"]
+
+
+def clock_set_args():
+    return ["aiov2_ctl", "--flipper", "clock", "set", "--yes"]
+
+
+CLOCK_SET_QUESTION = ("Set the Flipper's clock to this computer's local time? The Flipper keeps local time "
+                      "with no time zone. The clock is read again afterwards to check.")
 

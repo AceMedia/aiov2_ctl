@@ -130,6 +130,95 @@ class CapabilityTests(unittest.TestCase):
         self.assertEqual(s.unavailable_rows(caps), [("Copy to uConsole", "x")])
 
 
+class ClockTests(unittest.TestCase):
+    T = s._dt.datetime
+
+    def test_parse_reading(self):
+        out = "Flipper clock: 2026-11-28 14:03:00 6\nThis computer: 2026-11-28 14:06:12\n"
+        fl, pc = s.clock_reading(out)
+        self.assertEqual(fl, self.T(2026, 11, 28, 14, 3, 0))
+        self.assertEqual(pc, self.T(2026, 11, 28, 14, 6, 12))
+        self.assertEqual(s.clock_text(s.clock_offset(fl, pc)), "Flipper clock is 3 min 12 s behind this computer.")
+
+    def test_garbled_reading(self):
+        for bad in ("", None, "Error: Timed out", "Flipper clock: 2026-13-45 99:00:00\nThis computer: x",
+                    "Flipper clock: (no answer)\nThis computer: 2026-11-28 14:06:12"):
+            fl, pc = s.clock_reading(bad)
+            self.assertIsNone(s.clock_offset(fl, pc), repr(bad))
+        self.assertEqual(s.clock_text(None), "Could not read the Flipper's clock.")
+
+    def test_ahead_and_matching(self):
+        base = self.T(2026, 1, 1, 0, 0, 0)
+        self.assertEqual(s.clock_offset(base + s._dt.timedelta(hours=2, minutes=5), base), 7500)
+        self.assertEqual(s.clock_text(7500), "Flipper clock is 2 h 5 min ahead of this computer.")
+        self.assertIn("matches", s.clock_text(2))
+        self.assertIn("matches", s.clock_text(-1))
+        self.assertIn("3 s behind", s.clock_text(-3))
+
+    def test_durations(self):
+        self.assertEqual(s.duration_text(0), "0 s")
+        self.assertEqual(s.duration_text(-192), "3 min 12 s")
+        self.assertEqual(s.duration_text(3600), "1 h")
+        self.assertEqual(s.duration_text(86400 + 3600), "1 day 1 h")
+        self.assertEqual(s.duration_text(3 * 86400), "3 days")
+
+    def test_args(self):
+        self.assertEqual(s.clock_args(), ["aiov2_ctl", "--flipper", "clock"])
+        self.assertEqual(s.clock_set_args()[-2:], ["set", "--yes"])
+
+    def test_clock_is_a_cli_feature(self):
+        self.assertTrue(s.capabilities(s.parse_device_info(FORK), {"mode": "cli"})["clock"][0])
+        self.assertFalse(s.capabilities({}, {"mode": "bridge"})["clock"][0])
+
+
+class DateCommandTests(unittest.TestCase):
+    """The one clock-setting command aiov2_ctl sends."""
+
+    def test_text(self):
+        import aiov2_ctl as a
+        when = s._dt.datetime(2026, 11, 28, 9, 4, 5)        # a Saturday
+        self.assertEqual(a.flipper_date_command(when), "date 2026-11-28 09:04:05 6")
+        self.assertTrue(a.flipper_date_command(s._dt.datetime(2026, 11, 30, 23, 59, 59)).endswith(" 1"))
+        self.assertRegex(a.flipper_date_command(when), r"^date [0-9: -]+$")   # built here, never from input
+
+    def test_refused_answers(self):
+        import aiov2_ctl as a
+        self.assertTrue(a.flipper_date_refused("Invalid datetime format"))
+        self.assertTrue(a.flipper_date_refused("Usage:\r\ndate [YYYY-MM-DD HH:MM:SS d]"))
+        self.assertFalse(a.flipper_date_refused(""))
+
+    def test_clock_command_with_a_stand_in(self):
+        import io
+        from contextlib import redirect_stdout
+        import aiov2_ctl as a
+
+        class Cli:
+            def __init__(self):
+                self.sent = []
+
+            def run(self, command):
+                self.sent.append(command)
+                return "2026-11-28 14:03:00 6" if command == "date" else ""
+
+        cli = Cli()
+        with redirect_stdout(io.StringIO()) as out:
+            a.flipper_clock(cli, [])
+        self.assertEqual(cli.sent, ["date"])                       # reading never sets
+        fl, pc = s.clock_reading(out.getvalue())
+        self.assertEqual(fl, s._dt.datetime(2026, 11, 28, 14, 3, 0))
+        self.assertIsNotNone(pc)
+        with self.assertRaises(a.FlipperError):
+            a.flipper_clock(cli, ["set"])                          # no --yes, nothing sent
+        self.assertEqual(cli.sent, ["date"])
+        with redirect_stdout(io.StringIO()):
+            a.flipper_clock(cli, ["set"], yes=True)
+        self.assertEqual(len(cli.sent), 3)
+        self.assertTrue(cli.sent[1].startswith("date 2"))
+        self.assertEqual(cli.sent[2], "date")                      # read back to confirm
+        with self.assertRaises(a.FlipperError):
+            a.flipper_clock(cli, ["bogus"], yes=True)
+
+
 if __name__ == "__main__":
     unittest.main()
 
