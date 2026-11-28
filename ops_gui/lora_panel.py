@@ -54,7 +54,18 @@ def signal_text(snr, rssi=None):
     return "  ".join(bits) or "-"
 
 
-def message_rows(activities, channel=None, limit=200):
+CHAT_LIMIT = 300                     # as many as the engine keeps (LoRa.max_chat)
+
+
+def chat_events(snapshot):
+    """The events the Messages view is built from: the engine's own chat list, which telemetry cannot push out,
+    or the activity list from an engine too old to keep one."""
+    snap = snapshot or {}
+    chat = snap.get("chat")
+    return chat if isinstance(chat, list) else snap.get("activities") or []
+
+
+def message_rows(activities, channel=None, limit=CHAT_LIMIT):
     """Text messages and check-ins from the activity list, oldest first, optionally for one channel."""
     rows = []
     for a in activities or []:
@@ -624,7 +635,7 @@ def build_panel(win, Switch):
                 self.on_reply()
 
         def update_from(self, snap):
-            acts = snap.get("activities")
+            acts = chat_events(snap)
             chans = message_channels(acts)
             have = [self.channel.itemData(i) for i in range(1, self.channel.count())]
             if have != chans:
@@ -726,7 +737,7 @@ def build_panel(win, Switch):
         def fan_out(self, engine, snap, own):
             self.radar_page.update_from(engine, snap, own)
             self.messages.update_from(snap)
-            rows = message_rows(snap.get("activities"))
+            rows = message_rows(chat_events(snap))
             if self.currentWidget() is self.messages:
                 self.messages.read_mark = row_signature(rows[-1]) if rows else self.messages.read_mark
             unread = unread_count(rows, self.messages.read_mark)

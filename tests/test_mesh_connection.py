@@ -220,3 +220,35 @@ class ChosenChannelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatIsKeptApartTests(unittest.TestCase):
+    """A burst of telemetry must not push a text message out of what the Messages view shows."""
+
+    def test_a_message_survives_300_telemetry_packets(self):
+        engine = lora.LoRa()
+        engine._handle_packet({"fromId": "!0000abcd", "channel": 0,
+                               "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "meet at the hut"}})
+        for i in range(300):
+            engine._handle_packet({"fromId": "!0000beef", "channel": 0,
+                                   "decoded": {"portnum": "TELEMETRY_APP",
+                                               "telemetry": {"batteryLevel": 50 + i % 40}}})
+        snap = engine.snapshot()
+        self.assertEqual(snap["activities"][-1]["kind"], "telemetry")
+        self.assertNotIn("text", [a["kind"] for a in snap["activities"]])      # long gone from the activity list
+        rows = lp.message_rows(lp.chat_events(snap))
+        self.assertEqual([r["text"] for r in rows], ["meet at the hut"])
+
+    def test_the_chat_list_is_bounded(self):
+        engine = lora.LoRa()
+        for i in range(engine.max_chat + 25):
+            engine._handle_packet({"fromId": "!0000abcd", "channel": 0,
+                                   "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": f"m{i}"}})
+        chat = engine.snapshot()["chat"]
+        self.assertEqual(len(chat), engine.max_chat)
+        self.assertEqual(chat[-1]["summary"], f"m{engine.max_chat + 24}")
+
+    def test_an_older_snapshot_without_chat_still_works(self):
+        acts = [{"kind": "text", "time": "t", "from": "Ann", "summary": "hi"}]
+        self.assertEqual(lp.chat_events({"activities": acts}), acts)
+        self.assertEqual(lp.chat_events(None), [])
