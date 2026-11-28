@@ -8,7 +8,7 @@ is started or stopped, and whatever the app was doing carries on underneath.
 It covers the app's own window, not the desktop: with the app in full screen that is the whole screen.
 
 Each one is drawn dark, in the app's pixel style and the feature colour, whatever the theme:
-  mandelbrot  a slow dive into the Mandelbrot set, drawn in blocks, a few rows at a time
+  mandelbrot  a slow, steady dive into the Mandelbrot set, each picture gliding into the next
   system      the processor, temperature, memory and disk as bars, with the last minutes as graphs
   stars       a starfield
   rain        falling code
@@ -16,7 +16,9 @@ Each one is drawn dark, in the app's pixel style and the feature colour, whateve
 
 Everything above build() is plain Python and is tested without a screen."""
 import math
+import queue
 import random
+import threading
 import time
 
 KINDS = (("mandelbrot", "Mandelbrot"), ("system", "System"), ("stars", "Starfield"), ("rain", "Falling code"),
@@ -62,40 +64,99 @@ def mix(a, b, k):
 TARGETS = ((-0.743643887037151, 0.131825904205330), (-1.25066, 0.02012), (-0.16070135, 1.0375665),
            (0.001643721971153, -0.822467633298876), (-0.7453, 0.1127))
 ZOOM, START_SPAN, LEVELS = 1.55, 3.4, 26            # 3.4 / 1.55**26 is about 4e-5 across: far inside what a float holds
-HOLD_SECONDS = 2.5                                  # how long a finished picture stays before the next one starts
-BUDGET = 0.010                                      # seconds of working out per tick: a fifth of the processor, no more
+HOLD_SECONDS = 2.5                                  # how long the deepest picture stays before the next dive starts
+BUDGET = 0.010                                      # without numpy: seconds of working out per tick
+SECONDS_PER_LEVEL = 5.0                             # how long the glide from one picture to the next, closer one takes
+FADE_SECONDS = 0.7                                  # the sharper picture is faded in over the magnified one
+DUTY = 0.25                                         # with numpy: the share of one processor core the working out may use
+BAILOUT = 256.0                                     # |z| squared at which a point has left: far enough out that the
+                                                    # shading runs evenly from one band into the next
+DENSITY = 5.0                                       # colours stepped through for each step a point takes to leave
+PALETTE = 240                                       # colours in one turn of the ramp
+LOG2 = math.log(2.0)
 
 
-def escape(cx, cy, limit):
-    """How many steps z = z*z + c takes to leave the circle of radius 2, or `limit` when it has not by then
-    (which is taken to mean c is in the set)."""
+def numpy_or_none():
+    """numpy if it is installed (it comes with the ops console), or None. With it the picture is worked out a
+    strip at a time off the main thread and can be three times as fine; without it, it is drawn in blocks."""
+    try:
+        import numpy
+        return numpy
+    except Exception:
+        return None
+
+
+def smooth(cx, cy, limit):
+    """How long z = z*z + c takes to leave, as a number with a fraction (so the colour changes evenly, with no
+    bands), or -1.0 when it has not left after `limit` steps, which is taken to mean c is in the set."""
     x = y = 0.0
     for n in range(limit):
         xx, yy = x * x, y * y
-        if xx + yy > 4.0:
-            return n
+        if xx + yy > BAILOUT:
+            return max(0.0, n + 1.0 - math.log(math.log(xx + yy) / 2.0) / LOG2)
         x, y = xx - yy + cx, 2.0 * x * y + cy
-    return limit
+    return -1.0
 
 
 def view(level, target):
-    """(centre x, centre y, width) of the picture at a zoom level. The first few levels slide from the whole
-    set to the target, so the dive starts from something recognisable."""
-    t = min(1.0, level / 4.0)
-    return -0.6 + (target[0] + 0.6) * t, target[1] * t, START_SPAN / (ZOOM ** level)
+    """(centre x, centre y, width) of the picture at a zoom level, which may be a fraction. The dive closes on
+    the target exactly as fast as the picture shrinks, so every picture lies wholly inside the one before it
+    and the last one can be magnified into the next without an edge showing. It starts from the whole set."""
+    span = START_SPAN / (ZOOM ** level)
+    k = span / START_SPAN
+    start_x, start_y = -0.6 + (target[0] + 0.6) * 0.5, target[1] * 0.5
+    return target[0] + (start_x - target[0]) * k, target[1] + (start_y - target[1]) * k, span
 
 
 def limit_for(level):
     """More steps the deeper it goes, or the detail would smear into the set."""
-    return 48 + 9 * level
+    return 48 + 9 * int(level)
 
 
-def row(y, cols, rows, cx, cy, span, limit):
-    """One row of the picture: the escape count of each block."""
+def smooth_row(y, cols, rows, cx, cy, span, limit):
+    """One row of the picture: smooth() for each point across it."""
     step = span / cols
     im = cy + (y - rows / 2.0 + 0.5) * step
     left = cx - span / 2.0 + step / 2.0
-    return [escape(left + x * step, im, limit) for x in range(cols)]
+    return [smooth(left + x * step, im, limit) for x in range(cols)]
+
+
+def smooth_rows_np(np, y0, y1, cols, rows, cx, cy, span, limit):
+    """Rows y0 up to y1 of the picture at once, with numpy: the same numbers smooth_row() gives, as an array."""
+    step = span / cols
+    cr = np.repeat((cx - span / 2.0 + step / 2.0 + np.arange(cols) * step)[None, :], y1 - y0, 0)
+    ci = np.repeat((cy + (np.arange(y0, y1) - rows / 2.0 + 0.5) * step)[:, None], cols, 1)
+    x, y = np.zeros_like(cr), np.zeros_like(cr)
+    out = np.full(cr.shape, -1.0)
+    live = np.ones(cr.shape, dtype=bool)
+    for n in range(limit):
+        xx, yy = x * x, y * y
+        mag = xx + yy
+        gone = live & (mag > BAILOUT)
+        if gone.any():
+            out[gone] = np.maximum(0.0, n + 1.0 - np.log(np.log(mag[gone]) / 2.0) / LOG2)
+            live &= ~gone
+            if not live.any():
+                break
+        y = np.where(live, 2.0 * x * y + ci, 0.0)
+        x = np.where(live, xx - yy + cr, 0.0)
+    return out
+
+
+def work_rows(np, job, put, alive, duty=DUTY, strip=24, clock=time.monotonic, sleep=time.sleep):
+    """Work a whole picture out, a strip of rows at a time, handing each to put(first row, numbers). Run on a
+    thread of its own. After each strip it rests long enough that the working out takes only `duty` of a
+    processor core, and it gives up as soon as alive() says no. True when the picture was finished."""
+    cols, rows, (cx, cy, span), limit = job
+    y = 0
+    while y < rows and alive():
+        y1 = min(rows, y + strip)
+        began = clock()
+        put(y, smooth_rows_np(np, y, y1, cols, rows, cx, cy, span, limit))
+        y = y1
+        if 0 < duty < 1 and y < rows and alive():
+            sleep((clock() - began) * (1.0 / duty - 1.0))
+    return y >= rows
 
 
 def ramp(bg, accent, accent2, steps=32):
@@ -110,9 +171,43 @@ def ramp(bg, accent, accent2, steps=32):
     return out
 
 
-def shade(count, limit, colours):
-    """The colour of a block from its escape count."""
-    return colours[0] if count >= limit else colours[1 + count % (len(colours) - 1)]
+def colour_index(count, size):
+    """Which of `size` colours a point gets from smooth(): the first for the set, the rest in a ring."""
+    return 0 if count < 0 else 1 + int(count * DENSITY) % (size - 1)
+
+
+def colour_words(colours):
+    """Each '#rrggbb' as the number a picture's memory holds for it."""
+    return [0xff000000 | int(c[1:], 16) for c in colours]
+
+
+def glide(level, seconds, newest):
+    """The zoom `seconds` later: steady, but never more than one step past the newest finished picture, so
+    what is on screen is never magnified further than that while the next one is being worked out."""
+    return min(level + seconds / SECONDS_PER_LEVEL, newest + 1.0)
+
+
+def window_in(picture, now, cols, rows):
+    """Where the view `now` lies inside a picture worked out for the view `picture`, in that picture's own
+    points: (left, top, width, height), fractions and all. Both views are (centre x, centre y, width)."""
+    scale = cols / picture[2]
+    w = now[2] * scale
+    h = w * rows / cols
+    return (now[0] - picture[0]) * scale + cols / 2.0 - w / 2.0, (now[1] - picture[1]) * scale + rows / 2.0 - h / 2.0, w, h
+
+
+def placed(window, cols, rows, width, height):
+    """(the part of the picture to take, where on a width x height screen to put it), each (left, top, width,
+    height), for a window from window_in(). The window is cut down to what the picture actually has, and the
+    place on screen is cut down to match; None when none of it is in the picture."""
+    x, y, w, h = window
+    if w <= 0 or h <= 0:
+        return None
+    x0, y0, x1, y1 = max(0.0, x), max(0.0, y), min(float(cols), x + w), min(float(rows), y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    fx, fy = width / w, height / h
+    return (x0, y0, x1 - x0, y1 - y0), ((x0 - x) * fx, (y0 - y) * fy, (x1 - x0) * fx, (y1 - y0) * fy)
 
 
 def next_dive(level, target_index):
@@ -209,12 +304,13 @@ def lit(value, total, segments):
 
 def build(win):
     """The widget that covers the window. Qt is imported here."""
-    from PyQt6.QtCore import QPoint, QRect, Qt, QTimer
+    from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
     from PyQt6.QtGui import QColor, QCursor, QImage, QPainter, QPen
     from PyQt6.QtWidgets import QWidget
     from . import pixel, statusbar, style
 
-    BLOCK = 6
+    np = numpy_or_none()
+    BLOCK = 2 if np is not None else 6                      # screen pixels to each point of the Mandelbrot picture
 
     class Saver(QWidget):
         def __init__(self):
@@ -247,7 +343,13 @@ def build(win):
         def stop(self):
             self.timer.stop()
             self.hide()
+            self.give_up()
             self.state = {}
+
+        def give_up(self):
+            """Tell any picture still being worked out on its own thread to stop."""
+            for flag in self.state.get("flags", ()):
+                flag.set()
 
         def mouseMoveEvent(self, event):
             now = (event.position().x(), event.position().y())
@@ -263,13 +365,18 @@ def build(win):
         # ---- each one's state
         def reset(self):
             w, h = max(1, self.width()), max(1, self.height())
+            self.give_up()
             s = self.state = {}
             if self.kind == "mandelbrot":
                 s["cols"], s["rows"] = max(8, w // BLOCK), max(8, h // BLOCK)
-                s["image"] = QImage(s["cols"], s["rows"], QImage.Format.Format_RGB32)
-                s["image"].fill(QColor(self.pal["bg"]))
-                s["colours"] = [QColor(c).rgb() for c in ramp(self.pal["bg"], self.pal["accent"], self.pal["accent2"])]
-                s["level"], s["target"], s["y"], s["hold"] = 0, self.rng.randrange(len(TARGETS)), 0, 0.0
+                s["colours"] = colour_words(ramp(self.pal["bg"], self.pal["accent"], self.pal["accent2"], PALETTE))
+                if np is not None:
+                    s["lut"] = np.array(s["colours"], dtype=np.uint32)
+                s["flags"] = []
+                s["target"], s["zoom"], s["hold"] = self.rng.randrange(len(TARGETS)), 0.0, 0.0
+                s["shown"], s["fade"], s["restart"] = None, None, False
+                s["look"] = view(0.0, TARGETS[s["target"]])
+                s["work"] = self.new_picture(0)
             elif self.kind == "stars":
                 s["stars"] = [new_star(self.rng) for _ in range(240)]
             elif self.kind == "rain":
@@ -289,30 +396,95 @@ def build(win):
             push(s["cpu"], stats.get("cpu"))
             push(s["temp"], stats.get("temp"))
 
+        # ---- the Mandelbrot dive
+        # One picture is on screen and is magnified, steadily, towards the target. Meanwhile the next picture,
+        # one step closer, is worked out; when the zoom reaches it, it is faded in over the magnified one, which
+        # it matches point for point but is sharper than. So the dive never stops and never jumps.
+        def new_picture(self, level):
+            s = self.state
+            cols, rows = s["cols"], s["rows"]
+            pic = {"level": level, "view": view(level, TARGETS[s["target"]]), "y": 0, "done": False}
+            if np is not None:
+                pic["points"] = np.full((rows, cols), s["colours"][0], dtype=np.uint32)
+                pic["image"] = QImage(pic["points"].data, cols, rows, cols * 4, QImage.Format.Format_RGB32)
+                pic["strips"], flag = queue.Queue(), threading.Event()
+                s["flags"].append(flag)
+                threading.Thread(target=work_rows, daemon=True,
+                                 args=(np, (cols, rows, pic["view"], limit_for(level)),
+                                       lambda y, numbers, strips=pic["strips"]: strips.put((y, numbers)),
+                                       lambda flag=flag: not flag.is_set())).start()
+            else:
+                pic["image"] = QImage(cols, rows, QImage.Format.Format_RGB32)
+                pic["image"].fill(QColor(self.pal["bg"]))
+            return pic
+
+        def fill(self, pic):
+            """Put what has been worked out since last time into the picture."""
+            s = self.state
+            cols, rows, size = s["cols"], s["rows"], len(s["colours"])
+            if np is not None:
+                while True:
+                    try:
+                        y, numbers = pic["strips"].get_nowait()
+                    except queue.Empty:
+                        break
+                    index = np.where(numbers < 0, 0, 1 + (numbers * DENSITY).astype(np.int64) % (size - 1))
+                    pic["points"][y:y + len(numbers)] = s["lut"][index]
+                    pic["y"] = y + len(numbers)
+            else:
+                cx, cy, span = pic["view"]
+                limit, until = limit_for(pic["level"]), time.monotonic() + BUDGET
+                while pic["y"] < rows and time.monotonic() < until:
+                    for x, n in enumerate(smooth_row(pic["y"], cols, rows, cx, cy, span, limit)):
+                        pic["image"].setPixel(x, pic["y"], s["colours"][colour_index(n, size)])
+                    pic["y"] += 1
+            pic["done"] = pic["y"] >= rows
+
+        def closer(self, pic):
+            return self.new_picture(pic["level"] + 1) if pic["level"] + 1 < LEVELS else None
+
+        def dive(self, now, dt):
+            s = self.state
+            work, shown = s["work"], s["shown"]
+            if work is not None and not work["done"]:
+                self.fill(work)
+            if s["hold"]:
+                if now >= s["hold"]:                        # the deepest picture has had its moment: somewhere new
+                    s["hold"], s["restart"] = 0.0, True
+                    s["target"] = next_dive(LEVELS - 1, s["target"])[1]
+                    s["work"] = self.new_picture(0)
+            elif shown is None:                             # the very first picture is shown as it is worked out
+                if work["done"]:
+                    s["shown"], s["work"] = work, self.closer(work)
+            elif s["restart"]:                              # the old dive stays put until the new one's first picture
+                if work["done"]:
+                    s["fade"] = (shown, s["look"], now)
+                    s["shown"], s["zoom"], s["restart"] = work, 0.0, False
+                    s["work"] = self.closer(work)
+            else:
+                s["zoom"] = glide(s["zoom"], dt, shown["level"] if work is not None else shown["level"] - 1.0)
+                if work is None:
+                    if s["zoom"] >= shown["level"]:
+                        s["hold"] = now + HOLD_SECONDS
+                elif work["done"] and s["zoom"] >= work["level"]:
+                    s["fade"] = (shown, None, now)
+                    s["shown"], s["work"] = work, self.closer(work)
+            if not s["restart"]:
+                s["look"] = view(s["zoom"], TARGETS[s["target"]])
+
+        def picture(self, p, pic, look):
+            s = self.state
+            where = placed(window_in(pic["view"], look, s["cols"], s["rows"]), s["cols"], s["rows"],
+                           self.width(), self.height())
+            if where:
+                p.drawImage(QRectF(*where[1]), pic["image"], QRectF(*where[0]))
+
         def tick(self):
             now = time.monotonic()
             dt, self.last = min(0.25, now - self.last), now
             s = self.state
             if self.kind == "mandelbrot":
-                if s["hold"]:
-                    if now >= s["hold"]:
-                        s["level"], s["target"] = next_dive(s["level"], s["target"])
-                        s["y"], s["hold"] = 0, 0.0
-                else:
-                    cx, cy, span = view(s["level"], TARGETS[s["target"]])
-                    limit, until = limit_for(s["level"]), now + BUDGET        # a few rows, then let the app breathe
-                    first = s["y"]
-                    while s["y"] < s["rows"] and time.monotonic() < until:
-                        colours = s["colours"]
-                        for x, n in enumerate(row(s["y"], s["cols"], s["rows"], cx, cy, span, limit)):
-                            s["image"].setPixel(x, s["y"], colours[0] if n >= limit else colours[1 + n % (len(colours) - 1)])
-                        s["y"] += 1
-                    if s["y"] >= s["rows"]:
-                        s["hold"] = now + HOLD_SECONDS
-                    # only the rows just worked out, and the caption at the foot, need drawing again
-                    self.update(0, first * BLOCK - BLOCK, self.width(), (s["y"] - first + 2) * BLOCK)
-                    self.update(0, self.height() - 40, 420, 40)
-                return
+                self.dive(now, dt)
             elif self.kind == "stars":
                 for star in s["stars"]:
                     star_step(star, dt, self.rng)
@@ -346,9 +518,25 @@ def build(win):
             pal, s = self.pal, self.state
             w, h = self.width(), self.height()
             p.fillRect(self.rect(), QColor(pal["bg"]))
-            if self.kind == "mandelbrot" and s.get("image") is not None:
-                p.drawImage(self.rect(), s["image"])
-                self.words(p, 16, h - 34, f"MANDELBROT  x{ZOOM ** s['level']:,.0f}", 16, pal["dim"])
+            if self.kind == "mandelbrot" and "look" in s:
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                shown, look = s["shown"], s["look"]
+                if shown is None:
+                    p.drawImage(self.rect(), s["work"]["image"])
+                else:
+                    part = 1.0
+                    if s["fade"]:
+                        old, where, began = s["fade"]
+                        part = (time.monotonic() - began) / FADE_SECONDS
+                        if part >= 1.0:
+                            s["fade"], part = None, 1.0
+                        else:
+                            self.picture(p, old, where or look)
+                    p.setOpacity(part)
+                    self.picture(p, shown, look)
+                    p.setOpacity(1.0)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+                self.words(p, 16, h - 34, f"MANDELBROT  x{ZOOM ** s['zoom']:,.0f}", 16, pal["dim"])
             elif self.kind == "stars":
                 for star in s.get("stars", ()):
                     at = star_at(star, w, h)
