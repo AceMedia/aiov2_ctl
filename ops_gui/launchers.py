@@ -20,19 +20,28 @@ def quote(path):
     return path
 
 
-def entries(repo, python="/usr/bin/python3"):
+def icon_for(repo, name, fallback, isfile=os.path.isfile):
+    """What a launcher's Icon line says: the project's own icon, by its full path, when this checkout has it
+    (img/ in the repository, drawn by tools/icons.py), otherwise a name from the desktop's icon theme."""
+    path = os.path.join(repo, "img", name)
+    return path if isfile(path) else fallback
+
+
+def entries(repo, python="/usr/bin/python3", isfile=os.path.isfile):
     """{file name: contents} for the two launchers."""
     repo = os.path.realpath(repo)
+    app_icon = icon_for(repo, "ops-app.png", "utilities-system-monitor", isfile)
+    console_icon = icon_for(repo, "ops-console.png", "utilities-terminal", isfile)
     gui = (
         "[Desktop Entry]\nType=Application\nName=uConsole Ops\n"
         "Comment=Rails, radios, GPS, LoRa, SDR and the Flipper in one window\n"
-        f"Exec={python} -m ops_gui\nPath={repo}\nIcon=utilities-system-monitor\nTerminal=false\n"
+        f"Exec={python} -m ops_gui\nPath={repo}\nIcon={app_icon}\nTerminal=false\n"
         "Categories=System;Utility;\nStartupNotify=false\n"
     )
     cli = (
         "[Desktop Entry]\nType=Application\nName=uConsole Ops Console\n"
         "Comment=The same tools in a terminal\n"
-        f"Exec={python} {quote(os.path.join(repo, 'ops.py'))}\nPath={repo}\nIcon=utilities-terminal\nTerminal=true\n"
+        f"Exec={python} {quote(os.path.join(repo, 'ops.py'))}\nPath={repo}\nIcon={console_icon}\nTerminal=true\n"
         "Categories=System;Utility;ConsoleOnly;\nStartupNotify=false\n"
     )
     return {GUI_FILE: gui, CLI_FILE: cli}
