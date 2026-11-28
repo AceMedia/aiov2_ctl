@@ -439,6 +439,43 @@ def signal_layout(bands, width, height, t, margin=36, caption=34):
     return {"offset": (dx, dy), "message": message, "bands": out}
 
 
+def read_heard(win):
+    """What the app's pages already hold, as plain lists for signal_bands(). Read only: the same tables the
+    Everything page reads, and nothing is asked of any radio. A source whose page or engine is not there at all
+    is None, so it can be shown as not listening rather than as having heard nothing. The Signals screensaver and
+    the optional Ghost hunt tab both read through this; the software radio is never read."""
+    out = {}
+    try:
+        panel = getattr(win, "wifi_panel", None)
+        out["wifi"] = None if panel is None else wifi_heard(
+            getattr(getattr(panel, "survey", None), "ap_list", None),
+            (getattr(panel, "scan_data", None) or {}).get("networks"))
+    except Exception:
+        pass
+    try:
+        page = (getattr(win, "pages", None) or {}).get("Bluetooth")
+        snap = getattr(page, "last_snap", None) or {}
+        out["bt"] = None if page is None else [{"id": d.get("addr"), "rssi": d.get("rssi")}
+                                               for d in snap.get("devices") or ()]
+    except Exception:
+        pass
+    try:
+        engine = getattr(getattr(win, "mesh_hub", None), "engine", None)
+        nodes = (engine.snapshot().get("node_info") or {}) if engine is not None else {}
+        out["mesh"] = None if engine is None else [{"id": n, "snr": info.get("snr")}
+                                                   for n, info in nodes.items() if isinstance(info, dict)]
+    except Exception:
+        pass
+    try:
+        gps = getattr(win, "gps_widget", None)
+        sats = getattr(getattr(gps, "sky", None), "sats", None) or ()
+        out["gps"] = None if gps is None else [{"id": s.get("PRN"), "ss": s.get("ss")}
+                                               for s in sats if isinstance(s, dict)]
+    except Exception:
+        pass
+    return out
+
+
 # ---- system
 HISTORY = 180               # readings kept for the graphs: three minutes at one a second
 
@@ -559,39 +596,7 @@ def build(win):
                 s["bands"] = signal_bands(self.heard())
 
         def heard(self):
-            """What the pages already hold, as plain lists for signal_bands(). Read only: the same tables the
-            Everything page reads, and nothing is asked of any radio. A source whose page or engine is not there
-            at all is None, so it can be shown as not listening rather than as having heard nothing."""
-            out = {}
-            try:
-                panel = getattr(win, "wifi_panel", None)
-                out["wifi"] = None if panel is None else wifi_heard(
-                    getattr(getattr(panel, "survey", None), "ap_list", None),
-                    (getattr(panel, "scan_data", None) or {}).get("networks"))
-            except Exception:
-                pass
-            try:
-                page = (getattr(win, "pages", None) or {}).get("Bluetooth")
-                snap = getattr(page, "last_snap", None) or {}
-                out["bt"] = None if page is None else [{"id": d.get("addr"), "rssi": d.get("rssi")}
-                                                       for d in snap.get("devices") or ()]
-            except Exception:
-                pass
-            try:
-                engine = getattr(getattr(win, "mesh_hub", None), "engine", None)
-                nodes = (engine.snapshot().get("node_info") or {}) if engine is not None else {}
-                out["mesh"] = None if engine is None else [{"id": n, "snr": info.get("snr")}
-                                                           for n, info in nodes.items() if isinstance(info, dict)]
-            except Exception:
-                pass
-            try:
-                gps = getattr(win, "gps_widget", None)
-                sats = getattr(getattr(gps, "sky", None), "sats", None) or ()
-                out["gps"] = None if gps is None else [{"id": s.get("PRN"), "ss": s.get("ss")}
-                                                       for s in sats if isinstance(s, dict)]
-            except Exception:
-                pass
-            return out
+            return read_heard(win)
 
         def read_system(self):
             s = self.state
