@@ -18,6 +18,7 @@ Everything above build() is plain Python and is tested without a screen.
 """
 import bisect
 import json
+import math
 import os
 import re
 import time
@@ -290,9 +291,12 @@ def parse_session(text):
     for line in lines[1:]:
         try:
             r = json.loads(line)
+            if not (math.isfinite(float(r["time"])) and math.isfinite(float(r["elapsed"]))):
+                continue
+            time.localtime(float(r["time"]))            # a time the replay line cannot show is not kept
             records.append({"time": float(r["time"]), "elapsed": float(r["elapsed"]), "bands": bands_from(r["bands"]),
                             "instruments": [m for m in r.get("instruments") or () if isinstance(m, dict)]})
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, OverflowError, OSError):
             continue
     records.sort(key=lambda r: r["elapsed"])
     return head, records
