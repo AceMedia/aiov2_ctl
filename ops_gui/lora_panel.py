@@ -652,6 +652,29 @@ def key_line(snapshot):
     return ""
 
 
+def mqtt_line(snapshot):
+    """A standing line when the radio itself is set to pass the channel being sent on to an internet server (its
+    MQTT module is on and the channel's uplink is enabled), else "". That is the radio's own configuration, made
+    outside this app; the app does not change it and sends nothing itself. Said because "on the mesh" would
+    otherwise be taken to mean "by radio only". Nothing is said when the radio does not report it."""
+    snap = snapshot or {}
+    if snap.get("mqtt_enabled") is not True:
+        return ""
+    sel = snap.get("selected_channel") or 0
+    for c in snap.get("configured_channels") or []:
+        if isinstance(c, dict) and c.get("index", 0) == sel and c.get("uplink"):
+            also = " It also takes in messages from that server." if c.get("downlink") else ""
+            return ("This radio is set to pass this channel's messages on to an internet server (MQTT), so they do "
+                    "not stay on the radio mesh." + also)
+    return ""
+
+
+def standing_lines(snapshot):
+    """The warnings shown by the message box, one per line: who can read the channel, and whether it leaves the
+    radio mesh. "" when there is nothing to say."""
+    return "\n".join(line for line in (key_line(snapshot), mqtt_line(snapshot)) if line)
+
+
 def composer_line(snapshot):
     """Where the message being typed will go. This app only sends to everyone on the chosen channel: "To everyone
     on channel 0 (LongFast)". The channel's own name, or for a primary with an empty name the radio's preset; the
@@ -1031,7 +1054,7 @@ def build_panel(win, Switch):
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
             self.where.setText(composer_line(snap))
-            warning = key_line(snap)
+            warning = standing_lines(snap)
             self.keywarn.setText(warning)
             self.keywarn.setVisible(bool(warning))
             if own:

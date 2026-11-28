@@ -110,8 +110,9 @@ def channel_key_kind(settings, primary=False, modem_preset=None):
     "private" (a real key someone chose) or "unknown" (anything else, or no key information).
 
     Assumption, from the library's protobuf and not checked on a radio: `psk` is bytes. An empty psk means no
-    encryption at all; a single byte 1 stands for the default key (the key everyone with Meshtastic has); single
-    bytes 2 to 10 are that same key with its last byte bumped, so just as public; 16 or 32 bytes are a real key.
+    encryption at all, and so does the single byte 0; a single byte 1 stands for the default key (the key everyone with Meshtastic has); every other
+    single byte (2 to 255) is that same key with its last byte moved on by that much, so just as public (a radio
+    seen with the byte 73 is why this is not only 2 to 10); 16 or 32 bytes are a real key.
     When the settings carry no psk, a primary channel with an empty name on the LongFast preset is the
     out-of-the-box channel and so counts as the default. Nothing else is guessed."""
     if settings is None:
@@ -124,11 +125,11 @@ def channel_key_kind(settings, primary=False, modem_preset=None):
             key = bytes(psk)
         except (TypeError, ValueError):
             return KEY_UNKNOWN
-        if not key:
+        if not key or key == b"\x00":           # no key, or the single byte 0, which Meshtastic defines as "no crypto"
             return KEY_NONE
         if key == DEFAULT_PSK:
             return KEY_DEFAULT
-        if len(key) == 1 and 2 <= key[0] <= 10:
+        if len(key) == 1:                       # 2 to 255: the public default key with its last byte moved on
             return KEY_PUBLIC_VARIANT
         if len(key) in (16, 32):
             return KEY_PRIVATE
@@ -160,7 +161,10 @@ def configured_channels(channels, modem_preset=None):
         settings = getattr(ch, "settings", None)
         name = getattr(settings, "name", "") or ""
         found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY,
-                      "key": channel_key_kind(settings, role == CHANNEL_PRIMARY, modem_preset)})
+                      "key": channel_key_kind(settings, role == CHANNEL_PRIMARY, modem_preset),
+                      # whether the radio is set to pass this channel to and from an internet (MQTT) server
+                      "uplink": bool(getattr(settings, "uplink_enabled", False)),
+                      "downlink": bool(getattr(settings, "downlink_enabled", False))})
     found.sort(key=lambda c: (not c["primary"], c["index"]))
     return found or None
 
@@ -242,6 +246,7 @@ class LoRa:
         self.channel_activity = {}
         self.configured_channels = None     # the radio's own channel list, when the connection gives it
         self.modem_preset = None            # the radio's preset name ("LongFast"), when the connection gives it
+        self.mqtt_enabled = None            # whether the radio's own MQTT module is switched on, when it says
         self.selected_channel = 0
         self.auto_follow_channel = False
         self.channel_locked = False
@@ -298,6 +303,7 @@ class LoRa:
                 "channel_activity": copy.deepcopy(self.channel_activity),
                 "configured_channels": copy.deepcopy(self.configured_channels),
                 "modem_preset": self.modem_preset,
+                "mqtt_enabled": self.mqtt_enabled,
                 "active_channels": active_channels,
                 "selected_channel": selected_channel,
                 "best_channel": best_channel,
@@ -1256,6 +1262,12 @@ class LoRa:
             except Exception as e:
                 debug(f"LoRa: could not read the modem preset: {e}")
                 self.modem_preset = None
+            try:
+                module = getattr(getattr(getattr(self.interface, "localNode", None), "moduleConfig", None), "mqtt", None)
+                self.mqtt_enabled = None if module is None else bool(getattr(module, "enabled", False))
+            except Exception as e:                      # reading only
+                debug(f"LoRa: could not read the MQTT setting: {e}")
+                self.mqtt_enabled = None
             try:
                 self.configured_channels = configured_channels(
                     getattr(getattr(self.interface, "localNode", None), "channels", None), self.modem_preset)

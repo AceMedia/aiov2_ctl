@@ -265,9 +265,11 @@ class ConfiguredChannelTests(unittest.TestCase):
 
     def test_the_radios_channels_become_the_list_primary_first_disabled_left_out(self):
         got = lora.configured_channels(list(reversed(self.CHANNELS)))
-        self.assertEqual(got, [{"index": 0, "name": "", "primary": True, "key": "unknown"},
-                               {"index": 1, "name": "Family", "primary": False, "key": "unknown"},
-                               {"index": 3, "name": "Hikers", "primary": False, "key": "unknown"}])
+        self.assertEqual([{k: c[k] for k in ("index", "name", "primary", "key")} for c in got],
+                         [{"index": 0, "name": "", "primary": True, "key": "unknown"},
+                          {"index": 1, "name": "Family", "primary": False, "key": "unknown"},
+                          {"index": 3, "name": "Hikers", "primary": False, "key": "unknown"}])
+        self.assertTrue(all(c["uplink"] is False and c["downlink"] is False for c in got))
 
     def test_nothing_usable_means_none(self):
         for bad in (None, [], [channel(0, 0)], 5, [object()]):

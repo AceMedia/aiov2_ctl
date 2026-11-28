@@ -34,8 +34,8 @@ class KeyKindTests(unittest.TestCase):
         self.assertEqual(kind(settings(name="", psk=b"\x01"), primary=True), "default")
         self.assertEqual(kind(settings(name="Family", psk=b"\x01")), "default")
 
-    def test_one_byte_keys_2_to_10_are_public_variants(self):
-        for n in range(2, 11):
+    def test_every_one_byte_key_from_2_up_is_a_public_variant(self):
+        for n in list(range(2, 11)) + [11, 73, 200, 255]:
             self.assertEqual(kind(settings(name="Hill", psk=bytes([n]))), "public_variant", n)
 
     def test_16_and_32_byte_keys_are_private(self):
@@ -43,7 +43,7 @@ class KeyKindTests(unittest.TestCase):
         self.assertEqual(kind(settings(name="Family", psk=bytes(range(32)))), "private")
 
     def test_anything_else_is_unknown(self):
-        for psk in (b"\x00", b"\x0b", b"\xff", b"ab", bytes(15), bytes(17), bytes(31), bytes(33)):
+        for psk in (b"ab", bytes(15), bytes(17), bytes(31), bytes(33)):
             self.assertEqual(kind(settings(name="Hill", psk=psk)), "unknown", psk)
         self.assertEqual(kind(settings(psk=object())), "unknown")
         self.assertEqual(kind(settings(psk=5)), "unknown")
@@ -97,6 +97,65 @@ class KeyLineTests(unittest.TestCase):
                          ["default", "private", "none", "public_variant"])
         self.assertEqual(lp.key_line(snap), lp.KEY_WARNINGS["default"])
         self.assertEqual([c.settings.psk for c in chans], [b"\x01", b"secret-key-16byt", b"", b"\x04"])
+
+
+class SingleZeroByteTests(unittest.TestCase):
+    """Meshtastic's channel settings define a one-byte key of 0 as no encryption at all. Seen on a real radio,
+    where it was reported as "unknown" and so no warning was shown."""
+
+    def test_a_single_zero_byte_is_no_encryption(self):
+        settings = types.SimpleNamespace(psk=b"\x00", name="")
+        self.assertEqual(lora.channel_key_kind(settings, True, "LongFast"), lora.KEY_NONE)
+
+    def test_the_neighbouring_values_are_unchanged(self):
+        self.assertEqual(lora.channel_key_kind(types.SimpleNamespace(psk=b"", name="")), lora.KEY_NONE)
+        self.assertEqual(lora.channel_key_kind(types.SimpleNamespace(psk=b"\x01", name="")), lora.KEY_DEFAULT)
+        self.assertEqual(lora.channel_key_kind(types.SimpleNamespace(psk=b"\x0b", name="")), lora.KEY_PUBLIC_VARIANT)
+        self.assertEqual(lora.channel_key_kind(types.SimpleNamespace(psk=bytes([73]), name="")), lora.KEY_PUBLIC_VARIANT,
+                         "the value seen on a real radio")
+        self.assertEqual(lora.channel_key_kind(types.SimpleNamespace(psk=b"\x00\x00", name="")), lora.KEY_UNKNOWN)
+
+
+
+class MqttLineTests(unittest.TestCase):
+    """The radio's own MQTT module can pass a channel to an internet server. The tab says so; it changes nothing."""
+
+    def snap(self, mqtt, uplink, downlink=False, sel=0):
+        return {"mqtt_enabled": mqtt, "selected_channel": sel,
+                "configured_channels": [{"index": 0, "name": "", "primary": True, "key": "public_variant",
+                                         "uplink": uplink, "downlink": downlink}]}
+
+    def test_it_is_said_when_the_module_is_on_and_the_channel_is_passed_up(self):
+        line = lp.mqtt_line(self.snap(True, True))
+        self.assertIn("internet server (MQTT)", line)
+        self.assertIn("do not stay on the radio mesh", line)
+        self.assertNotIn("takes in", line)
+        self.assertIn("takes in messages from that server", lp.mqtt_line(self.snap(True, True, True)))
+
+    def test_nothing_is_said_when_it_is_off_not_passed_up_or_not_reported(self):
+        self.assertEqual(lp.mqtt_line(self.snap(False, True)), "")
+        self.assertEqual(lp.mqtt_line(self.snap(True, False, True)), "")
+        self.assertEqual(lp.mqtt_line(self.snap(None, True)), "")
+        self.assertEqual(lp.mqtt_line(self.snap(True, True, sel=3)), "", "another channel is the one being sent on")
+        self.assertEqual(lp.mqtt_line({}), "")
+        self.assertEqual(lp.mqtt_line(None), "")
+
+    def test_both_warnings_stand_one_per_line(self):
+        both = lp.standing_lines(self.snap(True, True)).split("\n")
+        self.assertEqual(len(both), 2)
+        self.assertIn("variant", both[0])
+        self.assertIn("MQTT", both[1])
+        self.assertEqual(lp.standing_lines({}), "")
+
+    def test_the_channel_list_carries_what_the_radio_says_about_each_channel(self):
+        ch = types.SimpleNamespace(index=0, role=1, settings=types.SimpleNamespace(
+            name="", psk=bytes([73]), uplink_enabled=True, downlink_enabled=False))
+        got = lora.configured_channels([ch], "LongFast")
+        self.assertEqual((got[0]["key"], got[0]["uplink"], got[0]["downlink"]), ("public_variant", True, False))
+        bare = types.SimpleNamespace(index=1, role=2, settings=types.SimpleNamespace(name="Hill", psk=b"k" * 32))
+        self.assertEqual((lora.configured_channels([bare])[0]["uplink"], lora.configured_channels([bare])[0]["downlink"]),
+                         (False, False))
+
 
 
 if __name__ == "__main__":
