@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 GRID, SCALE = 32, 4
 NAVY, PALE, ORANGE, DEEP = "#10294b", "#f4f8f5", "#ffad00", "#0a1a31"
 RAILS = ("#00cf70", "#c4a1ff", "#13c9f2", "#ffad00")            # GPS, LoRa, SDR, USB: as in the logo
-NAMES = {"app": "ops-app.png", "console": "ops-console.png", "installer": "installer.png"}
+NAMES = {"app": "ops-app.png", "console": "ops-console.png", "installer": "installer.png", "iga": "iga.png"}
 
 
 def tile():
@@ -31,6 +31,31 @@ def tile():
 def rail_dots(y=25):
     """The four rail colours as a row of small squares."""
     return [(6 + i * 6, y, 9 + i * 6, y + 3, colour) for i, colour in enumerate(RAILS)]
+
+
+def globe(cx, cy, r):
+    """A pixel globe: a pale rim, a deep sea, an orange equator and meridian, and two pale lines of latitude."""
+    out = []
+    for dy in range(-r, r):
+        y = cy + dy
+        half = int(((r * r - (dy + 0.5) ** 2) ** 0.5) + 0.5)
+        if half <= 0:
+            continue
+        out.append((cx - half, y, cx + half, y + 1, PALE))
+        if half > 1:
+            out.append((cx - half + 1, y, cx + half - 1, y + 1, DEEP))
+    top = cy - r
+    out += [(cx - r + 2, cy, cx + r - 2, cy + 1, ORANGE)]                    # the equator
+    out += [(cx, top + 2, cx + 1, cy + r - 2, ORANGE)]                       # the meridian
+    for dy in (-5, 5):                                                       # two lines of latitude
+        half = int(((r * r - dy * dy) ** 0.5)) - 2
+        out += [(cx - half, cy + dy, cx + half, cy + dy + 1, PALE)]
+    for dx in (-5, 5):                                                       # two curved meridians
+        for dy in range(-r + 3, r - 2):
+            bend = 1 if abs(dy) > 5 else 0
+            x = cx + dx - (bend if dx > 0 else -bend)
+            out += [(x, cy + dy, x + 1, cy + dy + 1, PALE)]
+    return out
 
 
 def shapes(kind):
@@ -53,6 +78,9 @@ def shapes(kind):
         out += [(14, 5, 18, 14, ORANGE)]
         out += [(10 + i, 14 + i, 22 - i, 15 + i, ORANGE) for i in range(6)]
         out += [(5, 19, 7, 24, PALE), (25, 19, 27, 24, PALE), (5, 22, 27, 24, PALE)]
+        out += rail_dots(26)
+    elif kind == "iga":                                         # a globe, for the IGA browser
+        out += globe(16, 14, 10)
         out += rail_dots(26)
     else:
         raise ValueError(kind)
