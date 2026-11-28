@@ -706,6 +706,7 @@ def build(win):
     timer.start(int(SAMPLE_SECONDS * 1000))
     page.ghost_timer = timer
     page.stop_recording = stop_recording
+    page.stop = stop_recording              # the window's closeEvent stops the pages it lists (app.closing_listeners)
     refresh()
     return page
 
