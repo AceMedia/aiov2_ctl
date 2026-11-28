@@ -81,6 +81,14 @@ def settings_from(saved):
     return out
 
 
+def setting_to_save(saved, key, value, opening=False):
+    """(key, value) to write to the settings file, or None. Opening the page writes nothing, and nor does a value
+    that is what the setting already is (saved, or its default): only a change the person makes is saved."""
+    if opening or key not in DEFAULTS:
+        return None
+    return None if settings_from(saved)[key] == value else (key, value)
+
+
 def good_template(template):
     """True for a custom search address: http or https, a host, and %s where the words go."""
     if not isinstance(template, str) or "%s" not in template or any(c.isspace() for c in template):

@@ -354,7 +354,11 @@ def build_settings(win, Bridge_signals):
         scroll, lay = page()
         cur = iga.settings_from(getattr(win, "settings", None) or iga_data.load_settings())
 
-        def save_iga(key, value):
+        def save_iga(key, value, opening=False):
+            """Only what the person changes is written (iga.setting_to_save): never on opening the page."""
+            change = iga.setting_to_save(iga_data.load_settings(), key, value, opening)
+            if change is None:
+                return
             if isinstance(getattr(win, "settings", None), dict):
                 win.settings[key] = value
             iga_data.save_settings(dict(iga_data.load_settings(), **{key: value}))
@@ -371,8 +375,8 @@ def build_settings(win, Bridge_signals):
                                 "The address must start with https:// or http:// and have %s where the words go. "
                                 "Until it does, nothing is searched.")
 
-        def pick_search(value):
-            save_iga("iga_search", value)
+        def pick_search(value, opening=False):
+            save_iga("iga_search", value, opening)
             for key, b in search_buttons.items():
                 b.setChecked(key == value)
             custom.setEnabled(value == "custom")
@@ -384,7 +388,7 @@ def build_settings(win, Bridge_signals):
         v.addWidget(custom)
         v.addWidget(custom_note)
         custom.editingFinished.connect(lambda: (save_iga("iga_search_custom", custom.text().strip()), note_custom()))
-        pick_search(cur["iga_search"])
+        pick_search(cur["iga_search"], opening=True)          # shows the choice; writes nothing
         note_custom()
 
         v = card("Kept on this uConsole", lay)
