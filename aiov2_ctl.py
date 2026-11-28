@@ -7647,7 +7647,11 @@ def features_report(state, meta, facts, how=None, unfinished=False):
     """The features as data, for a program that shows them (the ops app's Settings). Each says whether the
     installer has it down as installed, what is missing from it, what adding it would bring with it and what
     removing it would take with it. `root` is how a program gets root for a change: 'sudo', 'pkexec' or None.
-    `unfinished` is True when an older updater put this version in place without running its installer."""
+    `unfinished` is what is left of an update: '' or False (nothing), 'program' (a newer version is in the
+    checkout but was never put in place) or 'installer' (it is in place but its installer has not run); True,
+    from an older caller, means 'installer'. The report carries it as `pending`, and as `unfinished` (true or
+    false) for an app older than `pending`."""
+    pending = unfinished if unfinished in ("program", "installer") else ("installer" if unfinished else "")
     recorded = recorded_features(meta, state)
     rows = []
     for f in FEATURES:
@@ -7669,7 +7673,7 @@ def features_report(state, meta, facts, how=None, unfinished=False):
             "hardware": HARDWARE_TITLES[f["hardware"]] if f["hardware"] else "",
             "hardware_found": found if isinstance(found, bool) else None,
         })
-    return {"version": 1, "root": how, "unfinished": bool(unfinished), "features": rows}
+    return {"version": 1, "root": how, "unfinished": bool(pending), "pending": pending, "features": rows}
 
 
 def features_command(args=()):
@@ -7677,7 +7681,7 @@ def features_command(args=()):
     if args == ["--json"]:
         how = elevation(_run_text(["sudo", "-n", "true"], timeout=10)[0] == 0, shutil.which("pkexec"))
         print(json.dumps(features_report(install_state(), load_install_meta(), hardware_facts(), how,
-                                         update_is_unfinished()), indent=1))
+                                         pending_update()), indent=1))
         return 0
     if args:
         print("Usage: aiov2_ctl --features [--json]")

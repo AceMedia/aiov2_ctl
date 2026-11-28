@@ -37,6 +37,25 @@ class ReportTests(unittest.TestCase):
         text = json.dumps({"version": 1, "root": "sudo", "unfinished": "yes", "features": [row("gps")]})
         self.assertIs(f.parse_report(text)["unfinished"], False)
 
+    def test_what_is_left_of_an_update_is_passed_on_and_an_older_report_means_the_installer(self):
+        def parsed(**extra):
+            return f.parse_report(json.dumps(dict({"version": 1, "root": "sudo", "features": [row("gps")]}, **extra)))
+        self.assertEqual(parsed()["pending"], "")
+        self.assertEqual(parsed(unfinished=True)["pending"], "installer", "an aiov2_ctl from before `pending`")
+        self.assertEqual(parsed(unfinished=True, pending="program")["pending"], "program")
+        self.assertEqual(parsed(unfinished=True, pending="installer")["pending"], "installer")
+        self.assertEqual(parsed(unfinished=True, pending="nonsense")["pending"], "installer")
+        self.assertIs(parsed(pending="program")["unfinished"], True, "something is left, whatever the old flag says")
+        self.assertEqual(parsed(pending=7)["pending"], "")
+
+    def test_settings_says_which_it_is(self):
+        self.assertEqual(f.update_note(""), "")
+        self.assertEqual(f.update_note("installer"), f.UNFINISHED)
+        self.assertEqual(f.update_note("program"), f.PULLED)
+        self.assertIn("never put in place", f.PULLED)
+        self.assertNotIn("is in place but", f.PULLED)
+        self.assertIn("Update", f.PULLED)
+
     def test_update_runs_as_the_user_in_a_terminal(self):
         self.assertEqual(f.UPDATE_ARGV[-1], "aiov2_ctl --update")
         self.assertNotIn("sudo", " ".join(f.UPDATE_ARGV))
