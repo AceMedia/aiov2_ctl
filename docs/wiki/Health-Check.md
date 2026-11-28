@@ -22,6 +22,7 @@ A read-only check of the uConsole. It changes nothing. Each line is `OK`, `INFO`
 | Audio | A note about the harmless `alsa_restore_std` warning from alsa-utils 1.2.14-1. |
 | Tray | Whether the login entry is current and the tray is running. |
 | Mesh | Whether the LoRa rail and `meshtasticd` are on. |
+| Wi-Fi listening | For the internal Wi-Fi card (USB `0e8d:7961`): its interface, driver and the kernel, and whether `iw` lists monitor mode among its supported modes. A listed mode does not prove it works on this kernel; only a real listen shows that. If the card is connected to a network, it says listening then follows that network's channel. If the card is off (it is on the USB rail) or `iw` is missing, it says so. It never puts the card into monitor mode. |
 
 Never run `rpi-update` on a uConsole.
 

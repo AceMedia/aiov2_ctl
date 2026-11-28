@@ -56,7 +56,12 @@ Puts the internal radio into monitor mode, hops between channels and lists what 
 - deauthentication floods. These are detected and reported, never sent.
 - how busy each channel is
 
-It never transmits, and the radio is returned to normal when it stops. `--pcap` also saves a capture under `~/aiov2-captures`, with data frames cut after their header so no payload is kept.
+It never transmits, and the radio is returned to normal when it stops.
+
+- A signal strength is credited only to the device that sent the frame. A device heard only through its access point's frames is listed with no strength yet.
+- How busy a channel is is given as frames per second of the time actually spent listening on it, so a channel listened to for longer does not look busier. A channel that was not listened to shows no figure. This is a count of frames, not airtime.
+
+`--pcap` also saves a capture under `~/aiov2-captures`, private to you. Beacons and probes are kept whole. Deauthentication and disassociation frames keep their header and reason code. Other management frames, authentication and association included, keep only their header. Data frames keep only their header, and a frame carrying the key exchange (EAPOL) is left out entirely.
 
 In the Ops app this is the Survey page of the Wi-Fi tab, which can also keep a wardriving log (each network with the position the uConsole heard it best from) and export it as a WiGLE CSV. That position is the uConsole's, not the network's.
 

@@ -386,6 +386,7 @@ sudo aiov2_ctl --net listen [--seconds 30] [--json]
 aiov2_ctl --companions [--json]
 aiov2_ctl --flipper info | ls [/ext] | apps | open <APP>
 aiov2_ctl --flipper put LOCAL REMOTE [--force] | get REMOTE [LOCAL] | mkdir REMOTE
+aiov2_ctl --flipper clock [set --yes]
 aiov2_ctl --marauder info | scan [all|beacon] [--seconds N] | list [aps|stations] | channel [N] | stop
 ```
 

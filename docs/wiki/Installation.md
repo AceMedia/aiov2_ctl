@@ -113,5 +113,7 @@ The installer window has the same thing as "Repair what is installed".
 - **The ops app and console need the checkout.** If `install.sh` ran without `git`, it downloaded only the one program file. The plan then says the app and console cannot go in. Install `git` and run `install.sh` again.
 - **An older install.** Earlier versions kept the ops app in a folder of its own, `~/ops-agentic`. An install or update removes that folder when it holds nothing of yours (no changed files, nothing unpushed, nothing stashed), and otherwise leaves it and says why.
 - **The tray at login** is not in the usual set. Add it with `aiov2_ctl --autostart`.
+- **No questions while packages install.** When a package brings a settings file and one is already there from an earlier install, the installer keeps the one that is there and carries on, so it never stops to wait for a key, in a terminal or in the installer window.
+- **Start menu icons.** uConsole Ops, the Ops console and the installer have the project's own pixel-style icons, and the tray's entry uses the board picture the tray shows. If the checkout has no icon files, the app and console entries use the desktop theme's icons.
 
 See also: [Uninstall](Uninstall), [Updates and Channels](Updates-and-Channels), [OS Compatibility & Requirements](OS-Compatibility-&-Requirements).
