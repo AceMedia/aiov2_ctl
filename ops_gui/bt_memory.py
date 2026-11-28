@@ -467,7 +467,9 @@ class Travel:
             when = d.get("last") if _number(d.get("last")) else now
             entry = self.trackers.setdefault(mac, {"addr": mac, "sightings": [], "last": when, "told": False})
             entry["last"] = max(entry["last"], when)
-            if entry["sightings"] and when - entry["sightings"][-1][0] < SIGHTING_EVERY:
+            # at most one sighting per SIGHTING_EVERY; one earlier than the last (the clock was set back) is taken
+            # and becomes the new latest, rather than refusing every sighting until the clock catches up
+            if entry["sightings"] and 0 <= when - entry["sightings"][-1][0] < SIGHTING_EVERY:
                 continue
             entry["sightings"].append((when, tpv["lat"], tpv["lon"]))
             del entry["sightings"][:-MAX_SIGHTINGS]

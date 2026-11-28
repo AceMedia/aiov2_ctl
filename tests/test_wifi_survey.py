@@ -223,7 +223,7 @@ class ChannelActivityTests(unittest.TestCase):
 class SurveyRunTimingTests(unittest.TestCase):
     """survey_run with a fake radio and clock: time goes to the channel the radio was really on."""
 
-    def run_survey(self, fail_channels=()):
+    def run_survey(self, fail_channels=(), band=(1, 6, 11), tried=None):
         import subprocess
         clock = [100.0]
 
@@ -239,6 +239,8 @@ class SurveyRunTimingTests(unittest.TestCase):
                 pass
 
         def cmd(*args, check=True):
+            if tried is not None:
+                tried.append(args[-1])
             if args[-1] in {str(c) for c in fail_channels}:
                 raise subprocess.CalledProcessError(1, args)
             return mock.Mock(stdout="")
@@ -247,7 +249,7 @@ class SurveyRunTimingTests(unittest.TestCase):
                 mock.patch.object(a, "monitor_setup", return_value=Sock()), \
                 mock.patch.object(a, "monitor_restore"), mock.patch.object(a, "_tool", return_value="/x"), \
                 mock.patch.object(a, "_monitor_cmd", side_effect=cmd), \
-                mock.patch.dict(a.SURVEY_BANDS, {"t": (1, 6, 11)}), \
+                mock.patch.dict(a.SURVEY_BANDS, {"t": band}), \
                 mock.patch.object(a.time, "monotonic", side_effect=monotonic):
             a.survey_run("wlan1", "t", 12.0, snaps.append)
         return snaps
@@ -266,6 +268,22 @@ class SurveyRunTimingTests(unittest.TestCase):
         self.assertNotIn("6", ch)
         self.assertGreater(ch["1"]["seconds"], 1.0)
         self.assertGreater(ch["11"]["seconds"], 1.0)
+
+    def test_a_failed_change_moves_on_to_the_next_channel_without_skipping_one(self):
+        tried = []
+        ch = self.run_survey(fail_channels=(6,), band=(1, 6, 11, 13), tried=tried)[-1]["channels"]
+        first = tried.index("6")
+        self.assertEqual(tried[first + 1], "11", tried)
+        self.assertEqual(tried[first:first + 4], ["6", "11", "13", "1"], tried)
+        self.assertNotIn("6", ch)
+        for c in ("1", "11", "13"):
+            self.assertGreater(ch[c]["seconds"], 1.0, c)
+
+    def test_a_failed_last_channel_wraps_round_to_the_first(self):
+        tried = []
+        self.run_survey(fail_channels=(11,), tried=tried)
+        first = tried.index("11")
+        self.assertEqual(tried[first + 1], "1", tried)
 
 
 class SignalOwnerTests(unittest.TestCase):
@@ -374,6 +392,56 @@ class CaptureKeepTests(unittest.TestCase):
     def test_a_plain_data_frame_carrying_eapol_is_dropped(self):
         d = data(payload=b"\xaa\xaa\x03\x00\x00\x00\x88\x8e" + b"\x01\x03" + b"\x22" * 95)
         self.assertIsNone(a.capture_keep(d))
+
+    SNAP = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
+    IPV4 = b"\xaa\xaa\x03\x00\x00\x00\x08\x00"
+
+    def amsdu(self, body, protected=False):
+        # QoS data to the access point, with the A-MSDU bit (bit 7 of the first QoS control byte) set
+        return bytes([0x88, 0x41 if protected else 0x01]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" \
+            + b"\x80\x00" + body
+
+    def subframe(self, snap, rest=b"\x02\x03" + b"\x11" * 40):
+        payload = snap + rest
+        return AP + STA + struct.pack(">H", len(payload)) + payload
+
+    def mesh(self, ext, snap, protected=False, rest=b"\x02\x03" + b"\x11" * 40):
+        # four-address QoS data with "mesh control present" (0x01 in the second QoS control byte), then a mesh
+        # control field of 6 bytes plus 6 for each extra address
+        control = bytes([ext]) + b"\x05" + b"\x00" * 4 + b"\x00" * (6 * ext)
+        return bytes([0x88, 0x43 if protected else 0x03]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" + STA \
+            + b"\x00\x01" + control + snap + rest
+
+    def test_an_a_msdu_carrying_eapol_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.amsdu(self.subframe(self.SNAP))))
+
+    def test_an_a_msdu_without_eapol_comes_back_header_only(self):
+        d = self.amsdu(self.subframe(self.IPV4))
+        self.assertEqual(a.capture_keep(d), d[:26])
+
+    def test_an_a_msdu_too_short_to_tell_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.amsdu(b"")))
+        self.assertIsNone(a.capture_keep(self.amsdu(self.subframe(self.SNAP)[:18])))
+
+    def test_a_mesh_data_frame_carrying_eapol_is_dropped(self):
+        for ext in (0, 1, 2):
+            self.assertIsNone(a.capture_keep(self.mesh(ext, self.SNAP)), ext)
+
+    def test_a_mesh_data_frame_without_eapol_comes_back_header_only(self):
+        for ext in (0, 1, 2):
+            d = self.mesh(ext, self.IPV4)
+            self.assertEqual(a.capture_keep(d), d[:32], ext)
+
+    def test_a_mesh_data_frame_too_short_or_odd_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.mesh(0, b"", rest=b"")[:32]))
+        self.assertIsNone(a.capture_keep(self.mesh(2, b"", rest=b"")[:40]))
+        self.assertIsNone(a.capture_keep(self.mesh(3, self.IPV4)))      # the reserved address-extension value
+
+    def test_protected_a_msdu_and_mesh_frames_come_back_header_only(self):
+        d = self.amsdu(self.subframe(self.SNAP), protected=True)
+        self.assertEqual(a.capture_keep(d), d[:26])
+        d = self.mesh(0, self.SNAP, protected=True)
+        self.assertEqual(a.capture_keep(d), d[:32])
 
     def test_an_authentication_frame_comes_back_header_only(self):
         auth = mgmt(11, AP, STA, AP, b"\x03\x00\x01\x00\x00\x00" + b"\x33" * 100)

@@ -100,30 +100,43 @@ CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role v
 
 
 DEFAULT_PSK = b"\x01"           # the library's shorthand for Meshtastic's well-known default key
+KEY_NONE, KEY_DEFAULT, KEY_PUBLIC_VARIANT, KEY_PRIVATE, KEY_UNKNOWN = (
+    "none", "default", "public_variant", "private", "unknown")
 
 
-def uses_default_key(settings, primary=False, modem_preset=None):
-    """Whether a channel uses Meshtastic's public default key, from the library's channel settings
-    (Channel.settings), or None when that cannot be told.
+def channel_key_kind(settings, primary=False, modem_preset=None):
+    """What kind of key a channel uses, from the library's channel settings (Channel.settings): "none" (not
+    encrypted), "default" (Meshtastic's public default key), "public_variant" (a simple variant of that public key),
+    "private" (a real key someone chose) or "unknown" (anything else, or no key information).
 
-    Assumption, from the library's protobuf and not checked on a radio: `psk` is bytes, and a single byte 1 stands for
-    the default key (the key everyone with Meshtastic has). Single bytes 2 to 10 are variants of the same public key
-    and are not counted here; an empty psk means no encryption at all, also not counted. When the settings carry no
-    psk, a primary channel with an empty name on the LongFast preset is the out-of-the-box channel and so counts."""
+    Assumption, from the library's protobuf and not checked on a radio: `psk` is bytes. An empty psk means no
+    encryption at all; a single byte 1 stands for the default key (the key everyone with Meshtastic has); single
+    bytes 2 to 10 are that same key with its last byte bumped, so just as public; 16 or 32 bytes are a real key.
+    When the settings carry no psk, a primary channel with an empty name on the LongFast preset is the
+    out-of-the-box channel and so counts as the default. Nothing else is guessed."""
     if settings is None:
-        return None
+        return KEY_UNKNOWN
     psk = getattr(settings, "psk", None)
     if psk is not None:
         if isinstance(psk, int):                # bytes(n) is n zero bytes, not a key: it cannot be told
-            return None
+            return KEY_UNKNOWN
         try:
-            return bytes(psk) == DEFAULT_PSK
+            key = bytes(psk)
         except (TypeError, ValueError):
-            return None
+            return KEY_UNKNOWN
+        if not key:
+            return KEY_NONE
+        if key == DEFAULT_PSK:
+            return KEY_DEFAULT
+        if len(key) == 1 and 2 <= key[0] <= 10:
+            return KEY_PUBLIC_VARIANT
+        if len(key) in (16, 32):
+            return KEY_PRIVATE
+        return KEY_UNKNOWN
     name = getattr(settings, "name", None)
     if primary and name is not None and not str(name).strip() and modem_preset == "LongFast":
-        return True
-    return None
+        return KEY_DEFAULT
+    return KEY_UNKNOWN
 
 
 def configured_channels(channels, modem_preset=None):
@@ -147,7 +160,7 @@ def configured_channels(channels, modem_preset=None):
         settings = getattr(ch, "settings", None)
         name = getattr(settings, "name", "") or ""
         found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY,
-                      "default_key": uses_default_key(settings, role == CHANNEL_PRIMARY, modem_preset)})
+                      "key": channel_key_kind(settings, role == CHANNEL_PRIMARY, modem_preset)})
     found.sort(key=lambda c: (not c["primary"], c["index"]))
     return found or None
 
