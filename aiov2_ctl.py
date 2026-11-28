@@ -5422,6 +5422,7 @@ BT_OP_EXT_SCAN_PARAMS, BT_OP_EXT_SCAN_ENABLE = 0x2041, 0x2042        # extended 
 BT_SCAN_PASSIVE = 0x00                   # the scan type that sends nothing. 0x01 (active) is never used here.
 BT_INTERVAL, BT_WINDOW = 0x0060, 0x0030  # listen 30 ms in every 60: the card shares its antenna time with Wi-Fi
 BT_STATUS_DISALLOWED = 0x0C
+BT_KEEP_BYTES = 27                       # at most this much of manufacturer or service data is kept, as hex
 
 # Company identifiers from the Bluetooth SIG's assigned numbers: only well known ones, the rest show as a number.
 BT_COMPANIES = {
@@ -5473,7 +5474,9 @@ def bt_addr_kind(addr_type, addr):
 
 
 def bt_parse_ad(data):
-    """The fields of one advertisement: {'name', 'company', 'services', 'tx_power', 'flags'}; only what was sent."""
+    """The fields of one advertisement: {'name', 'company', 'mfr_data', 'services', 'service_data', 'tx_power',
+    'flags'}; only what was sent. mfr_data and service_data keep the bytes that were already received (as hex,
+    keyed by company or service number as 4 hex digits) so the app can recognise known kinds of device."""
     out, i = {}, 0
     while i + 1 < len(data):
         length = data[i]
@@ -5486,11 +5489,14 @@ def bt_parse_ad(data):
                 out["name"] = "".join(c for c in name if c.isprintable())[:40]
         elif kind == 0xFF and len(body) >= 2:                             # manufacturer data: who made it
             out["company"] = struct.unpack_from("<H", body)[0]
+            out.setdefault("mfr_data", {})[f"{out['company']:04x}"] = body[2:2 + BT_KEEP_BYTES].hex()
         elif kind in (0x02, 0x03):                                        # 16 bit service numbers
             out.setdefault("services", [])
             out["services"] += [struct.unpack_from("<H", body, j)[0] for j in range(0, len(body) - 1, 2)]
         elif kind == 0x16 and len(body) >= 2:                             # service data starts with its service
-            out.setdefault("services", []).append(struct.unpack_from("<H", body)[0])
+            number = struct.unpack_from("<H", body)[0]
+            out.setdefault("services", []).append(number)
+            out.setdefault("service_data", {})[f"{number:04x}"] = body[2:2 + BT_KEEP_BYTES].hex()
         elif kind == 0x0A and len(body) == 1:
             out["tx_power"] = struct.unpack("<b", body)[0]
         elif kind == 0x01 and body:
@@ -5571,7 +5577,7 @@ class BtScan:
     def add(self, report, now):
         dev = self.devices.setdefault(report["addr"], {
             "addr": report["addr"], "kind": report["kind"], "name": "", "maker": "", "services": [],
-            "connectable": False, "rssi": None, "best": None, "count": 0, "first": now, "last": now})
+            "mfr_data": {}, "service_uuids": [], "service_data": {}, "connectable": False, "rssi": None, "best": None, "count": 0, "first": now, "last": now})
         dev["count"] += 1
         dev["last"] = now
         dev["connectable"] = dev["connectable"] or bool(report.get("connectable"))
@@ -5588,11 +5594,16 @@ class BtScan:
             label = BT_SERVICES.get(number, f"0x{number:04x}")
             if label not in dev["services"]:
                 dev["services"].append(label)
+            if f"{number:04x}" not in dev["service_uuids"]:
+                dev["service_uuids"].append(f"{number:04x}")
+        dev["mfr_data"].update(report.get("mfr_data") or {})            # the latest bytes each company sent
+        dev["service_data"].update(report.get("service_data") or {})
         return dev
 
     def snapshot(self, now, adapter, mode):
         rows = sorted(self.devices.values(), key=lambda d: (-(d["rssi"] if d["rssi"] is not None else -999), d["addr"]))
-        return {"t": round(now, 1), "adapter": adapter, "mode": mode, "devices": [dict(d) for d in rows]}
+        return {"t": round(now, 1), "adapter": adapter, "mode": mode, "devices": [dict(d, mfr_data=dict(d["mfr_data"]), service_uuids=list(d["service_uuids"]),
+                                          service_data=dict(d["service_data"])) for d in rows]}
 
 
 def _bt_wait(sock, opcode, timeout=2.0):

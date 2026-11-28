@@ -10,6 +10,8 @@ from a public address), what sort of address it uses and how strong its signal i
 device is, how far away it is, or who it belongs to, and it does not try. Phones, watches and earbuds change their
 address every few minutes for privacy, so one device can appear as several rows over time.
 The Known column and the line about several places come from bt_memory, which holds the rules and the wording.
+Item trackers (AirTag and other Find My accessories, SmartTag, Tile, Chipolo, Google Find My Device) are named from
+markers in the advertisement by bt_trackers. That only says what kind of device it claims to be.
 The helpers at the top are pure so they can be tested without a radio or a screen.
 """
 import json
@@ -18,7 +20,7 @@ import subprocess
 import threading
 import time
 
-from . import bt_memory, position, sense, survey
+from . import bt_memory, bt_trackers, position, sense, survey
 
 ADAPTER = "hci1"                         # the internal USB card's Bluetooth radio
 SECONDS = 600
@@ -73,9 +75,23 @@ def device_rows(snap, now=None, memory=None, travel=None, session_start=None):
             "name": d.get("name") or NO_NAME, "maker": d.get("maker") or "-", "addr": d["addr"],
             "kind": d.get("kind") or "-", "signal": dbm_text(d.get("rssi")), "best": dbm_text(d.get("best")),
             "count": str(d.get("count", 0)), "seen": ago(now, d.get("last", now)),
-            "what": ", ".join(d.get("services") or []) or "-",
+            "what": what_text(d),
         })
     return rows
+
+
+def what_text(device):
+    """The Says it is column: a tracker label first when the advertisement carries a known marker, then the
+    services it lists (without repeating the label)."""
+    found = bt_trackers.identify(device)
+    services = [s for s in (device.get("services") or []) if not found or s != found["label"]]
+    return ", ".join(([found["label"]] if found else []) + services) or "-"
+
+
+def tracker_tip(device):
+    """Why a row was named a tracker, for its tooltip. Empty when it was not."""
+    found = bt_trackers.identify(device)
+    return f"Named from the advertisement: {found['basis']}. {bt_trackers.NOTE}" if found else ""
 
 
 def summary(snap):
@@ -296,6 +312,10 @@ def build_page(win):
                     c, QHeaderView.ResizeMode.Stretch if c in (0, len(COLUMNS) - 1) else QHeaderView.ResizeMode.ResizeToContents)
             self.table.cellClicked.connect(self.pick_row)
             root.addWidget(self.table, 1)
+            self.tracker_note = QLabel(bt_trackers.NOTE)
+            self.tracker_note.setWordWrap(True)
+            self.tracker_note.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+            root.addWidget(self.tracker_note)
 
         def use_memory(self, loaded):
             """The file has been read. Anything heard in the moment before it arrived is kept."""
@@ -492,6 +512,8 @@ def build_page(win):
                     item = QTableWidgetItem(row[key])
                     if key == "known":
                         item.setToolTip(bt_memory.known_tip(self.row_info[r][1]))
+                    elif key == "what" and tracker_tip(snap["devices"][r]):
+                        item.setToolTip(tracker_tip(snap["devices"][r]))
                     self.table.setItem(r, c, item)
 
         def show_snapshot(self, snap):
