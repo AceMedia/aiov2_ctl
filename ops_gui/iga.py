@@ -485,3 +485,612 @@ def load_error_text(code_name):
             "certificate": "The site's certificate could not be trusted, so IGA did not open it.",
             }.get(code_name, "The page could not be loaded. Check the address, or whether this device is online.")
 
+
+
+# ---- the engine: loaded only when the tab is first shown
+# Settings of QWebEngineSettings.WebAttribute set on IGA's profile: nothing is fetched ahead of the person, no
+# plugins, local pages cannot reach the network or files, WebRTC does not give away local addresses. Each is set
+# only if this Qt has it, so an older or newer Qt does not stop the tab.
+ENGINE_SETTINGS = (
+    ("DnsPrefetchEnabled", False),
+    ("PluginsEnabled", False),
+    ("LocalContentCanAccessRemoteUrls", False),
+    ("LocalContentCanAccessFileUrls", False),
+    ("ScreenCaptureEnabled", False),
+    ("WebRTCPublicInterfacesOnly", True),
+    ("PlaybackRequiresUserGesture", True),
+    ("FullScreenSupportEnabled", False),
+    ("ErrorPageEnabled", False),            # IGA shows its own page, in the app's colours, when a page fails
+    ("JavascriptCanAccessClipboard", False),
+)
+QUIET_FLAG = "--disable-background-networking"
+
+
+def chromium_flags(existing):
+    """QTWEBENGINE_CHROMIUM_FLAGS with Chromium's background networking switched off. Whatever was there already is
+    kept as it is; nothing that weakens the sandbox or web security is ever added."""
+    words = (existing or "").split()
+    if QUIET_FLAG not in words:
+        words.append(QUIET_FLAG)
+    return " ".join(words)
+
+
+def error_kind(code):
+    """A Chromium network error number in IGA's words: 'dns', 'refused', 'timeout', 'certificate', 'other', or None
+    for a load the person stopped or left (which needs no page)."""
+    if code in (None, 0, -3):                  # -3: aborted, by Stop or by going somewhere else
+        return None
+    if code in (-105, -137):
+        return "dns"
+    if code in (-102, -104):
+        return "refused"
+    if code in (-7, -118):
+        return "timeout"
+    if -299 <= code <= -200:
+        return "certificate"
+    return "other"
+
+
+def prepare_app():
+    """Called before the QApplication is made, only when the feature is on. Qt WebEngine can only be loaded after
+    the application exists when OpenGL contexts are shared from the start; this sets that and loads nothing."""
+    from PyQt6.QtCore import QCoreApplication, Qt
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
+
+
+def load_engine():
+    """Import Qt WebEngine: the one place IGA does it. Tests replace this. Returns (QtWebEngineWidgets,
+    QtWebEngineCore) or raises."""
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = chromium_flags(os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS"))
+    from PyQt6 import QtWebEngineCore, QtWebEngineWidgets
+    return QtWebEngineWidgets, QtWebEngineCore
+
+
+def build(win):
+    """The IGA tab. It holds a light placeholder until it is first shown; only then is Qt WebEngine loaded. Every
+    control is an ordinary widget of the app, so it takes the app's style sheet, theme, contrast, feature colour
+    and fonts; only the web page itself is styled by the site."""
+    import time
+    from PyQt6.QtCore import Qt, QTimer, QUrl
+    from PyQt6.QtGui import QKeySequence, QShortcut
+    from PyQt6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu,
+                                 QMessageBox, QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+    from . import data, style
+    from .foldertabs import FolderTabBar
+
+    folder = user_folder()
+
+    def colours():
+        return page_colours(style.TOKENS["dark" if getattr(win, "theme", "dark") == "dark" else "light"])
+
+    def prefs():
+        return settings_from(getattr(win, "settings", None) or data.load_settings())
+
+    def button(text, slot, tip=""):
+        b = QPushButton(text)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)        # as on the other tabs: the D-pad highlight reaches it
+        b.setToolTip(tip)
+        b.clicked.connect(lambda *_: slot())
+        return b
+
+    def tell(text):
+        QMessageBox.information(page, "IGA", text)
+
+    class Page(QWidget):
+        def showEvent(self, event):
+            super().showEvent(event)
+            if not st["started"]:
+                st["started"] = True
+                QTimer.singleShot(0, start)
+
+    page = Page()
+    outer = QVBoxLayout(page)
+    outer.setContentsMargins(6, 6, 6, 6)
+    outer.setSpacing(4)
+    waiting = QLabel("IGA starts when this tab is first opened.")
+    waiting.setWordWrap(True)
+    waiting.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    waiting.setStyleSheet("font-size: 13pt;")
+    outer.addWidget(waiting, 1, Qt.AlignmentFlag.AlignTop)
+    st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False}
+    page.escape = lambda: None
+    page.recolour = lambda: None
+    page.stop = lambda: None
+
+    def start():
+        try:
+            widgets, core = load_engine()
+        except Exception as exc:                   # missing or broken: say so and leave the rest of the app be
+            waiting.setText(engine_missing_text(exc))
+            return
+        try:
+            assemble(widgets, core)
+        except Exception as exc:
+            waiting.setText(f"IGA could not start: {exc}")
+            return
+        waiting.hide()
+
+    def assemble(widgets, core):
+        QWebEngineView = widgets.QWebEngineView
+        QWebEngineProfile, QWebEnginePage = core.QWebEngineProfile, core.QWebEnginePage
+        QWebEngineSettings = core.QWebEngineSettings
+
+        _private_folder(folder)
+        _private_folder(profile_folder())
+        profile = QWebEngineProfile("aiov2-iga", page)          # one profile with a storage name of its own
+        profile.setPersistentStoragePath(profile_folder())
+        profile.setCachePath(os.path.join(profile_folder(), "cache"))
+        profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+        try:
+            profile.setSpellCheckEnabled(False)
+        except Exception:
+            pass
+        try:
+            profile.setDownloadPath(downloads_folder())
+        except Exception:
+            pass
+        es = profile.settings()
+        for name, value in ENGINE_SETTINGS:
+            attr = getattr(QWebEngineSettings.WebAttribute, name, None)
+            if attr is not None:
+                es.setAttribute(attr, value)
+        st["profile"] = profile
+        pages = Pages()
+        st["pages"] = pages
+
+        class WebPage(QWebEnginePage):
+            def createWindow(self, _kind):                       # a link that wants a new window: a new IGA page
+                pid = open_page(blank=True)
+                return st["views"][pid].page() if pid is not None else None
+
+        # ---- the row of controls
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        back_b = button("Back", lambda: act("back"), "Back (Alt+Left)")
+        fwd_b = button("Forward", lambda: act("forward"), "Forward (Alt+Right)")
+        reload_b = button("Reload", lambda: act("reload_or_stop"), "Reload (Ctrl+R), or Stop while loading")
+        address = QLineEdit()
+        address.setPlaceholderText("Address (Ctrl+L)")
+        address.setStyleSheet("font-size: 13pt; padding: 6px;")          # as the mesh message box
+        mark = QLabel("")
+        mark.setStyleSheet("font-size: 10pt; color: #9e9e9e;")           # the app's helper-text grey
+        mark_b = button("Bookmark", lambda: bookmark_this(), "Keep this page on the start page")
+        menu_b = QPushButton("Menu")
+        menu_b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu = QMenu(menu_b)
+        menu_b.setMenu(menu)
+        for w in (back_b, fwd_b, reload_b):
+            row.addWidget(w)
+        row.addWidget(address, 1)
+        row.addWidget(mark)
+        row.addWidget(mark_b)
+        row.addWidget(menu_b)
+        outer.addLayout(row)
+
+        strip = FolderTabBar()
+        strip.setObjectName("subtabs")
+        strip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        strip.setMovable(True)
+        strip.setExpanding(False)
+        holder = QWidget()
+        holder.setObjectName("subtabs")                  # so the strip takes the sub-tab look from the style sheet
+        hl = QVBoxLayout(holder)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(strip)
+        outer.addWidget(holder)
+
+        progress = QProgressBar()
+        progress.setTextVisible(False)
+        progress.setMaximumHeight(6)
+        progress.setRange(0, 100)
+        progress.hide()
+        outer.addWidget(progress)
+
+        stack = QStackedWidget()
+        outer.addWidget(stack, 1)
+
+        findrow = QWidget()
+        fr = QHBoxLayout(findrow)
+        fr.setContentsMargins(0, 0, 0, 0)
+        find_box = QLineEdit()
+        find_box.setPlaceholderText("Find in page")
+        find_box.setStyleSheet("font-size: 13pt; padding: 6px;")
+        fr.addWidget(find_box, 1)
+        fr.addWidget(button("Next", lambda: find(True), "Next match (Enter)"))
+        fr.addWidget(button("Previous", lambda: find(False), "Previous match"))
+        fr.addWidget(button("Close", lambda: close_find(), "Close (Escape)"))
+        findrow.hide()
+        outer.addWidget(findrow)
+
+        def current():
+            return st["views"].get(pages.current)
+
+        def info(pid=None):
+            return st["info"].setdefault(pages.current if pid is None else pid, {})
+
+        def shown_url(pid):
+            i = st["info"].get(pid, {})
+            if i.get("own"):
+                return i.get("shown", START)
+            view = st["views"].get(pid)
+            return view.url().toString() if view is not None else ""
+
+        def refresh_row():
+            view = current()
+            if view is None:
+                return
+            url = shown_url(pages.current)
+            if not address.hasFocus():
+                address.setText("" if url == "about:blank" else url)
+            mark.setText(security_mark(START if info().get("own") == "start" else url))
+            if info().get("own") == "notice":
+                mark.setText(security_mark(START))
+            h = view.history()
+            back_b.setEnabled(h.canGoBack())
+            fwd_b.setEnabled(h.canGoForward())
+            reload_b.setText("Stop" if info().get("loading") else "Reload")
+            mark_b.setEnabled(url.startswith(("http://", "https://")) and not info().get("own"))
+
+        def relabel(pid):
+            view = st["views"].get(pid)
+            if view is None or pid not in pages.order:
+                return
+            i = st["info"].get(pid, {})
+            title = "" if i.get("own") else view.title()
+            text = page_label(title, START if i.get("own") == "start" else shown_url(pid))
+            at = pages.index(pid)
+            if strip.tabText(at) != text:
+                strip.setTabText(at, text)
+            strip.setTabToolTip(at, shown_url(pid))
+
+        def show_own(pid, kind, title="", text="", shown=START):
+            view = st["views"][pid]
+            st["info"][pid] = dict(st["info"].get(pid, {}), own=kind, shown=shown, title=title, text=text)
+            if kind == "start":
+                body = start_page(load_bookmarks(folder), colours())
+            else:
+                body = notice_page(title, text, colours(), address=shown if shown != START else "")
+            view.setHtml(body, QUrl("about:blank"))
+            relabel(pid)
+            refresh_row()
+
+        def make_view(pid):
+            view = QWebEngineView()
+            view.setProperty("typing_zone", True)        # the app's letter shortcuts leave a web page alone
+            wp = WebPage(profile, view)
+            view.setPage(wp)
+            deny_permissions(wp, QWebEnginePage)
+            view.titleChanged.connect(lambda *_: (relabel(pid), refresh_row()))
+            view.urlChanged.connect(lambda u: url_changed(pid, u))
+            view.loadStarted.connect(lambda: loading(pid, True))
+            view.loadProgress.connect(lambda n: progress.setValue(n) if pid == pages.current else None)
+            view.loadFinished.connect(lambda ok: finished(pid, ok))
+            if hasattr(wp, "loadingChanged"):
+                wp.loadingChanged.connect(lambda li: failed(pid, li))
+            st["views"][pid] = view
+            st["info"][pid] = {}
+            stack.addWidget(view)
+            return view
+
+        def url_changed(pid, url):
+            i = st["info"].setdefault(pid, {})
+            if url.scheme() in ("http", "https"):
+                i["was_own"], i["own"] = i.get("own") or i.get("was_own"), None
+            elif not i.get("own") and i.get("was_own"):        # Back to one of the app's own pages
+                i["own"] = i["was_own"]
+            relabel(pid)
+            if pid == pages.current:
+                refresh_row()
+
+        def loading(pid, on):
+            st["info"].setdefault(pid, {})["loading"] = on
+            if pid == pages.current:
+                progress.setVisible(on)
+                if on:
+                    progress.setValue(0)
+                refresh_row()
+
+        def finished(pid, ok):
+            loading(pid, False)
+            view = st["views"].get(pid)
+            if ok and view is not None and not st["info"][pid].get("own"):
+                add_visit(folder, view.url().toString(), view.title(), time.time(), prefs()["iga_history"])
+
+        def failed(pid, li):
+            try:
+                if li.status() != li.LoadStatus.LoadFailedStatus:
+                    return
+                kind = error_kind(li.errorCode())
+                url = li.url().toString()
+            except Exception:
+                return
+            if kind is not None:
+                show_own(pid, "notice", "Not loaded", load_error_text(kind), shown=url)
+
+        def open_page(blank=False, url=None):
+            pid, why = pages.open()
+            if pid is None:
+                tell(why)
+                return None
+            make_view(pid)
+            strip.blockSignals(True)
+            strip.insertTab(pages.index(pid), "New page")
+            strip.blockSignals(False)
+            choose(pid)
+            if url:
+                go(url)
+            elif not blank:
+                show_own(pid, "start")
+            return pid
+
+        def choose(pid):
+            pages.select(pid)
+            view = st["views"][pid]
+            stack.setCurrentWidget(view)
+            strip.blockSignals(True)
+            strip.setCurrentIndex(pages.index(pid))
+            strip.blockSignals(False)
+            progress.setVisible(bool(info().get("loading")))
+            refresh_row()
+
+        def close_page(pid=None):
+            pid = pages.current if pid is None else pid
+            at = pages.index(pid)
+            fresh = pages.close(pid)
+            view = st["views"].pop(pid)
+            st["info"].pop(pid, None)
+            strip.blockSignals(True)
+            strip.removeTab(at)
+            strip.blockSignals(False)
+            stack.removeWidget(view)
+            view.page().deleteLater()            # the page goes first: Qt WebEngine warns if a profile outlives it
+            view.deleteLater()
+            if fresh is not None:
+                make_view(fresh)
+                strip.insertTab(0, "New page")
+                show_own(fresh, "start")
+            choose(pages.current)
+
+        def go(text=None):
+            text = address.text() if text is None else text
+            p = prefs()
+            meaning = to_url(text, search_template(p["iga_search"], p["iga_search_custom"]))
+            if meaning is None:
+                return
+            kind, where = meaning
+            view = current()
+            if kind == "refuse":
+                show_own(pages.current, "notice", "Not opened", where, shown=text.strip())
+            elif where == START:
+                show_own(pages.current, "start")
+            else:
+                info()["own"] = None
+                view.setUrl(QUrl(where))
+            view.setFocus()
+
+        def act(what):
+            view = current()
+            if view is None:
+                return
+            if what == "back":
+                view.back()
+            elif what == "forward":
+                view.forward()
+            elif what == "reload_or_stop":
+                if info().get("loading"):
+                    view.stop()
+                elif info().get("own") == "start":
+                    show_own(pages.current, "start")
+                else:
+                    view.reload()
+            elif what == "reload":
+                view.reload() if not info().get("own") else None
+            elif what == "stop":
+                view.stop()
+
+        def zoom(direction):
+            view = current()
+            if view is not None:
+                view.setZoomFactor(zoom_step(view.zoomFactor(), direction))
+
+        def find(forward=True):
+            view = current()
+            text = find_box.text()
+            if view is None or not text:
+                return
+            if forward:
+                view.findText(text)
+            else:
+                view.findText(text, QWebEnginePage.FindFlag.FindBackward)
+
+        def open_find():
+            st["finding"] = True
+            findrow.show()
+            find_box.setFocus()
+            find_box.selectAll()
+
+        def close_find():
+            st["finding"] = False
+            view = current()
+            if view is not None:
+                view.findText("")
+                view.setFocus()
+            findrow.hide()
+
+        def bookmark_this():
+            view = current()
+            if view is None or info().get("own"):
+                return
+            url = view.url().toString()
+            title, ok = QInputDialog.getText(page, "Bookmark", "Name for this page:", QLineEdit.EchoMode.Normal,
+                                             view.title() or url)
+            if ok and not add_bookmark(folder, title, url):
+                tell("Only web addresses (http and https) can be kept as bookmarks.")
+            refresh_start_pages()
+
+        def manage_bookmarks():
+            marks = load_bookmarks(folder)
+            if not marks:
+                tell("No bookmarks yet. Open a page and press Bookmark to keep it.")
+                return
+            names = [f"{b['title']}  ({b['url']})" for b in marks]
+            pick, ok = QInputDialog.getItem(page, "Bookmarks", "Choose a bookmark:", names, 0, False)
+            if not ok:
+                return
+            chosen = marks[names.index(pick)]
+            what, ok = QInputDialog.getItem(page, "Bookmarks", chosen["title"], ["Open", "Rename", "Remove"], 0,
+                                            False)
+            if not ok:
+                return
+            if what == "Open":
+                go(chosen["url"])
+            elif what == "Rename":
+                title, ok = QInputDialog.getText(page, "Rename bookmark", "New name:", QLineEdit.EchoMode.Normal,
+                                                 chosen["title"])
+                if ok:
+                    rename_bookmark(folder, chosen["url"], title)
+            elif win.ask(f"Remove the bookmark '{chosen['title']}'?"):
+                remove_bookmark(folder, chosen["url"])
+            refresh_start_pages()
+
+        def refresh_start_pages():
+            for pid in list(pages.order):
+                own = st["info"].get(pid, {}).get("own")
+                if own:
+                    i = st["info"][pid]
+                    show_own(pid, own, i.get("title", ""), i.get("text", ""), i.get("shown", START))
+            choose(pages.current)
+
+        def downloads_list():
+            lines = [download_line(d["name"], d["got"], d["total"], d["state"]) for d in st["downloads"]]
+            tell("\n".join(lines) if lines else "Nothing downloaded since the app started.")
+
+        def clear_now(ask=True):
+            if ask and not win.ask("Clear IGA's cookies, saved logins, cache and history now? Bookmarks are kept."):
+                return
+            clear_data()
+            if ask:
+                tell("Cookies, cache and history are cleared.")
+
+        def clear_data():
+            try:
+                profile.clearHttpCache()
+                profile.cookieStore().deleteAllCookies()
+                profile.clearAllVisitedLinks()
+            except Exception:
+                pass
+            clear_history(folder)
+
+        def download(req):
+            try:
+                suggested = req.downloadFileName()
+            except Exception:
+                suggested = ""
+            start_in = downloads_folder()
+            name = safe_name(suggested, start_in)
+            path, _ = QFileDialog.getSaveFileName(page, "Save download", os.path.join(start_in, name))
+            if not path:
+                req.cancel()
+                return
+            req.setDownloadDirectory(os.path.dirname(path))
+            req.setDownloadFileName(os.path.basename(path))
+            entry = {"name": os.path.basename(path), "got": 0, "total": 0, "state": "going"}
+            st["downloads"].append(entry)
+
+            def update(*_):
+                try:
+                    entry["got"], entry["total"] = req.receivedBytes(), req.totalBytes()
+                    s = req.state()
+                    D = type(s)
+                    entry["state"] = {D.DownloadCompleted: "done", D.DownloadCancelled: "cancelled",
+                                      D.DownloadInterrupted: "failed"}.get(s, "going")
+                except Exception:
+                    pass
+                if entry["state"] in ("done", "failed"):
+                    win.say(download_line(entry["name"], entry["got"], entry["total"], entry["state"]))
+            for sig in ("receivedBytesChanged", "stateChanged", "isFinishedChanged"):
+                if hasattr(req, sig):
+                    getattr(req, sig).connect(update)
+            req.accept()
+        profile.downloadRequested.connect(download)
+
+        # ---- the menu
+        def item(text, slot, keys=""):
+            a = menu.addAction(text + (f"\t{keys}" if keys else ""))
+            a.triggered.connect(lambda *_: slot())
+        item("New page", lambda: open_page(), "Ctrl+T")
+        item("Close page", lambda: close_page(), "Ctrl+W")
+        menu.addSeparator()
+        item("Start page", lambda: show_own(pages.current, "start"))
+        item("Bookmarks", manage_bookmarks)
+        item("Downloads", downloads_list)
+        item("Find in page", open_find, "Ctrl+F")
+        menu.addSeparator()
+        item("Zoom in", lambda: zoom(1), "Ctrl++")
+        item("Zoom out", lambda: zoom(-1), "Ctrl+-")
+        item("Zoom reset", lambda: zoom(0), "Ctrl+0")
+        menu.addSeparator()
+        item("Clear data now", clear_now)
+
+        # ---- signals and keys
+        address.returnPressed.connect(lambda: go())
+        find_box.returnPressed.connect(lambda: find(True))
+        strip.currentChanged.connect(lambda i: choose(pages.order[i]) if 0 <= i < len(pages.order) else None)
+        strip.tabMoved.connect(lambda frm, to: pages.move(pages.order[frm], to))
+
+        def key(seq, slot):
+            QShortcut(QKeySequence(seq), page, activated=slot, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        key("Ctrl+L", lambda: (address.setFocus(), address.selectAll()))
+        key("Ctrl+T", lambda: (open_page(), address.setFocus()))
+        key("Ctrl+W", lambda: close_page())
+        key("Ctrl+Tab", lambda: choose(pages.step(1)))
+        key("Ctrl+Shift+Tab", lambda: choose(pages.step(-1)))
+        key("Ctrl+R", lambda: act("reload"))
+        key("Ctrl+F", open_find)
+        for seq in ("Ctrl++", "Ctrl+="):
+            key(seq, lambda: zoom(1))
+        key("Ctrl+-", lambda: zoom(-1))
+        key("Ctrl+0", lambda: zoom(0))
+        key("Alt+Left", lambda: act("back"))
+        key("Alt+Right", lambda: act("forward"))
+
+        def escape():
+            focus = QApplication.focusWidget()
+            view = current()
+            in_page = focus is not None and view is not None and (focus is view or view.isAncestorOf(focus))
+            where = "page" if in_page else ("address" if focus is not None and page.isAncestorOf(focus) else None)
+            step_ = escape_step(st["finding"], bool(info().get("loading")), where)
+            if step_ == "find":
+                close_find()
+            elif step_ == "stop":
+                act("stop")
+            elif step_ == "address":
+                address.setFocus()
+                address.selectAll()
+            return step_
+
+        def stop():
+            if prefs()["iga_clear_on_close"]:
+                clear_data()
+
+        page.escape = escape
+        page.recolour = refresh_start_pages
+        page.stop = stop
+        st["ready"] = True
+        open_page()
+        address.setFocus()
+
+    return page
+
+
+def deny_permissions(web_page, QWebEnginePage):
+    """Location, camera, microphone, notifications and the rest are refused without asking, in this first version.
+    Newer Qt (6.8 and later) asks through permissionRequested; older Qt through featurePermissionRequested."""
+    if hasattr(web_page, "permissionRequested"):
+        web_page.permissionRequested.connect(lambda p: p.deny())
+    elif hasattr(web_page, "featurePermissionRequested"):
+        denied = QWebEnginePage.PermissionPolicy.PermissionDeniedByUser
+        web_page.featurePermissionRequested.connect(
+            lambda url, feature: web_page.setFeaturePermission(url, feature, denied))
+
