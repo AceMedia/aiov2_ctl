@@ -2210,3 +2210,49 @@ class ApplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoQuestionsTests(unittest.TestCase):
+    """Installing a package must never stop to ask: --yes and the installer window have nobody to answer."""
+
+    def test_the_command_keeps_a_settings_file_that_is_already_there(self):
+        argv = a.apt_install_argv(["readsb", "gpsd"])
+        self.assertEqual(argv[:3], ["apt-get", "install", "-y"])
+        self.assertEqual(argv[-2:], ["readsb", "gpsd"])
+        options = [argv[i + 1] for i, word in enumerate(argv) if word == "-o"]
+        self.assertEqual(options, ["Dpkg::Options::=--force-confdef", "Dpkg::Options::=--force-confold"])
+        self.assertLess(argv.index("Dpkg::Options::=--force-confold"), argv.index("readsb"), "options before names")
+
+    def test_the_environment_asks_for_no_set_up_questions_and_keeps_the_rest(self):
+        env = a.apt_quiet_env({"PATH": "/usr/bin", "DEBIAN_FRONTEND": "dialog"})
+        self.assertEqual(env, {"PATH": "/usr/bin", "DEBIAN_FRONTEND": "noninteractive"})
+
+    def test_the_package_step_uses_them_and_gives_it_nothing_to_read_from(self):
+        calls = []
+
+        def call(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return 0
+        step = {"packages": ["readsb"]}
+        with mock.patch.object(a.subprocess, "call", side_effect=call), \
+                mock.patch.object(a, "package_installed", return_value=False), \
+                mock.patch.object(a, "package_available", return_value=True):
+            a._act_apt(step, {"apt_updated": True})
+        installs = [(cmd, kw) for cmd, kw in calls if cmd[:2] == ["apt-get", "install"]]
+        self.assertEqual(len(installs), 1)
+        cmd, kw = installs[0]
+        self.assertEqual(cmd, a.apt_install_argv(["readsb"]))
+        self.assertEqual(kw["env"]["DEBIAN_FRONTEND"], "noninteractive")
+        self.assertIs(kw["stdin"], subprocess.DEVNULL)
+
+    def test_when_the_lot_fails_each_package_is_tried_alone_the_same_way(self):
+        calls = []
+
+        def call(cmd, **kwargs):
+            calls.append(cmd)
+            return 1 if len(cmd) > len(a.apt_install_argv(["x"])) else 0
+        with mock.patch.object(a.subprocess, "call", side_effect=call), \
+                mock.patch.object(a, "package_installed", return_value=False), \
+                mock.patch.object(a, "package_available", return_value=True):
+            a._act_apt({"packages": ["one", "two"]}, {"apt_updated": True})
+        self.assertEqual(calls, [a.apt_install_argv(["one", "two"]), a.apt_install_argv(["one"]), a.apt_install_argv(["two"])])

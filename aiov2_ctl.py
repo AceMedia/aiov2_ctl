@@ -5731,7 +5731,7 @@ def ensure_system_packages(say=print):
         return True
     say(f"Installing required packages: {', '.join(missing)}\n")
     try:
-        subprocess.check_call(["apt-get", "install", "-y", *missing])
+        subprocess.check_call(apt_install_argv(missing), env=apt_quiet_env(), stdin=subprocess.DEVNULL)
         return True
     except (OSError, subprocess.CalledProcessError):
         say(f"Could not install {', '.join(missing)}. Run: sudo apt install {' '.join(missing)}\n")
@@ -7954,6 +7954,20 @@ def _write_system_file(path, text, mode=0o644):
     return True
 
 
+def apt_install_argv(packages):
+    """The command that installs packages without ever stopping to ask. `-y` answers apt's own question, but
+    not the package tool's when a package brings a settings file and one is already there (left by an earlier
+    install, or edited): that one waits for a key, and a run with --yes, or one inside the installer window,
+    waited for ever. The two options tell it to keep the file that is there and carry on."""
+    return ["apt-get", "install", "-y", "-o", "Dpkg::Options::=--force-confdef",
+            "-o", "Dpkg::Options::=--force-confold", *packages]
+
+
+def apt_quiet_env(environ=None):
+    """The environment for it: no package's own set-up questions either."""
+    return dict(os.environ if environ is None else environ, DEBIAN_FRONTEND="noninteractive")
+
+
 def _act_apt(step, ctx):
     missing = [p for p in step["packages"] if not package_installed(p)]
     if not missing:
@@ -7963,12 +7977,13 @@ def _act_apt(step, ctx):
         subprocess.call(["apt-get", "update"])
     absent = [p for p in missing if not package_available(p)]
     wanted = [p for p in missing if p not in absent]
-    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    env = apt_quiet_env()
     failed = []
-    if wanted and subprocess.call(["apt-get", "install", "-y", *wanted], env=env) != 0:
+    if wanted and subprocess.call(apt_install_argv(wanted), env=env, stdin=subprocess.DEVNULL) != 0:
         # One at a time, so one broken package does not keep the others out.
         for pkg in wanted:
-            if not package_installed(pkg) and subprocess.call(["apt-get", "install", "-y", pkg], env=env) != 0:
+            if not package_installed(pkg) and subprocess.call(apt_install_argv([pkg]), env=env,
+                                                               stdin=subprocess.DEVNULL) != 0:
                 failed.append(pkg)
     ctx.setdefault("added", set()).update(p for p in wanted if p not in failed)
     hard = [p for p in absent if p not in step.get("optional", ())]
