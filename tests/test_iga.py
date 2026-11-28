@@ -91,6 +91,29 @@ class AddressTests(unittest.TestCase):
         self.assertEqual(iga.to_url("example.org", DDG), ("url", "https://example.org"))
 
 
+class SavingSettingsTests(unittest.TestCase):
+    def test_opening_the_page_writes_nothing(self):
+        self.assertIsNone(iga.setting_to_save({}, "iga_search", "none", opening=True))
+        self.assertIsNone(iga.setting_to_save({}, "iga_search", "duckduckgo", opening=True))
+
+    def test_the_value_it_already_has_writes_nothing(self):
+        self.assertIsNone(iga.setting_to_save({}, "iga_search", "none"))            # the default, unsaved
+        self.assertIsNone(iga.setting_to_save({}, "iga_search_custom", ""))
+        self.assertIsNone(iga.setting_to_save({"iga_search": "duckduckgo"}, "iga_search", "duckduckgo"))
+
+    def test_a_change_is_written(self):
+        self.assertEqual(iga.setting_to_save({}, "iga_search", "duckduckgo"), ("iga_search", "duckduckgo"))
+        self.assertEqual(iga.setting_to_save({"iga_history": True}, "iga_history", False), ("iga_history", False))
+        self.assertIsNone(iga.setting_to_save({}, "something_else", 1))
+
+    def test_the_settings_page_opens_with_opening_set(self):
+        import os
+        with open(os.path.join(os.path.dirname(iga.__file__), "settings_ui.py")) as f:
+            text = f.read()
+        self.assertIn('pick_search(cur["iga_search"], opening=True)', text)
+        self.assertIn("iga.setting_to_save(", text)
+
+
 class SearchSettingTests(unittest.TestCase):
     def test_no_search_is_the_default(self):
         s = iga.settings_from({})

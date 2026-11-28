@@ -242,15 +242,8 @@ def build_window():
         """The sun or moon bitmap in `colour`, scaled by a whole number with no smoothing."""
         rows = {"sun": data.SUN, "moon": data.MOON, "terminal": data.TERMINAL,
                 "fullscreen": data.FULLSCREEN}[kind]
-        img = QImage(16, 16, QImage.Format.Format_ARGB32)
-        img.fill(0)
-        for y, row in enumerate(rows):
-            for x, cell in enumerate(row):
-                if cell == "#":
-                    img.setPixelColor(x, y, colour)
-        img = img.scaled(32, 32, Qt.AspectRatioMode.IgnoreAspectRatio,
-                         Qt.TransformationMode.FastTransformation)
-        return QIcon(QPixmap.fromImage(img))
+        from . import pixelicon
+        return pixelicon.bitmap_icon(rows, colour, 2)            # the same renderer IGA's row icons use
 
     def pixelise_titles(root):
         """Put headings, big numbers and short captions in the pixel font. Body text is left as it is."""

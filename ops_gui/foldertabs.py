@@ -26,6 +26,11 @@ DRAG_START = 12      # a press has to move this many pixels before it is a drag 
 DRAG_STEP = 70       # and then every this many pixels of drag scrolls the bar by one tab
 
 
+def glass_opacity(high_contrast):
+    """How solid the tab shapes are laid down: the app's glass, or fully solid in high contrast."""
+    return 1.0 if high_contrast else GLASS_ALPHA / 255
+
+
 def paint_order(count, current):
     """The order to draw tab indexes in: unselected from the right to the left, then the selected one on top."""
     return [i for i in reversed(range(count)) if i != current] + ([current] if 0 <= current < count else [])
@@ -251,7 +256,11 @@ class FolderTabBar(QTabBar):
                 shapes.drawControl(QStyle.ControlElement.CE_TabBarTabShape, self.arrow_option(button, rect))
         shapes.end()
         painter = QStylePainter(self)
-        painter.setOpacity(GLASS_ALPHA / 255)
+        try:
+            from . import style
+            painter.setOpacity(glass_opacity(style.HIGH_CONTRAST))
+        except Exception:
+            painter.setOpacity(GLASS_ALPHA / 255)
         painter.drawPixmap(0, 0, layer)
         painter.setOpacity(1.0)
         painter.save()

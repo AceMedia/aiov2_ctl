@@ -120,6 +120,10 @@ class FullScreenWiringTests(unittest.TestCase):
         text = source("ops_gui", "iga.py")
         build = text[text.index("def build(win):"):]
         self.assertIn("row_layout(", build)
+        self.assertIn("FolderTabWidget()", build)                  # the app's own folder tabs, not buttons
+        self.assertIn("class PageBar(FolderTabBar)", build)
+        self.assertNotIn("setCheckable(True)", build)
+        self.assertNotIn("address_html", build)
         self.assertIn("panel_spec(", build)
         for stock in ("QInputDialog", "QFileDialog", "QMessageBox", "QMenu", "QToolBar", "standardIcon"):
             self.assertNotIn(stock, build, stock)
