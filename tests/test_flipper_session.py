@@ -219,6 +219,119 @@ class DateCommandTests(unittest.TestCase):
             a.flipper_clock(cli, ["bogus"], yes=True)
 
 
+# Small capture files written by hand in the documented Flipper formats.
+SUB_KEY = """Filetype: Flipper SubGhz Key File
+Version: 1
+Frequency: 433920000
+Preset: FuriHalSubGhzPresetOok650Async
+Protocol: Princeton
+Bit: 24
+Key: 00 00 00 00 00 95 D5 D4
+TE: 400
+"""
+SUB_RAW = """Filetype: Flipper SubGhz RAW File
+Version: 1
+Frequency: 868350000
+Preset: FuriHalSubGhzPreset2FSKDev476Async
+Protocol: RAW
+RAW_Data: 97 -264 165 -98 99 -1312
+RAW_Data: 131 -66 263 -100
+"""
+IR = """Filetype: IR signals file
+Version: 1
+#
+name: Power
+type: parsed
+protocol: NEC
+address: 07 00 00 00
+command: 02 00 00 00
+#
+name: Vol_up
+type: raw
+frequency: 38000
+duty_cycle: 0.330000
+data: 9024 4512 579 552
+"""
+NFC = """Filetype: Flipper NFC device
+Version: 4
+# Device type can be ISO14443-3A, NTAG/Ultralight, Mifare Classic
+Device type: NTAG/Ultralight
+UID: 04 A2 3B 1C 55 66 80
+ATQA: 00 44
+SAK: 00
+Page 0: 04 A2 3B 1C
+"""
+RFID = """Filetype: Flipper RFID key
+Version: 1
+Key type: EM4100
+Data: 1A 2B 3C 4D 5E
+"""
+SECRETS = ("95 D5", "97 -264", "07 00", "9024", "04 A2", "1A 2B")
+
+
+class CaptureTests(unittest.TestCase):
+    def check_no_secrets(self, line):
+        for secret in SECRETS:
+            self.assertNotIn(secret, line)
+
+    def test_sub_key(self):
+        line = s.summarise_capture(SUB_KEY)
+        self.assertEqual(line, "Sub-GHz key file: 433.92 MHz, AM650 (OOK), protocol Princeton, 24 bit. "
+                               "Contains key data, not shown.")
+        self.check_no_secrets(line)
+
+    def test_sub_raw(self):
+        line = s.summarise_capture(SUB_RAW)
+        self.assertEqual(line, "Sub-GHz raw samples: 868.35 MHz, FM476 (2-FSK). The samples are not shown.")
+        self.check_no_secrets(line)
+
+    def test_ir(self):
+        line = s.summarise_capture(IR)
+        self.assertEqual(line, "Infrared file: 2 signals (Power, Vol_up), protocols NEC, 1 raw. "
+                               "The codes are not shown.")
+        self.check_no_secrets(line)
+
+    def test_nfc_and_rfid(self):
+        nfc, rfid = s.summarise_capture(NFC), s.summarise_capture(RFID)
+        self.assertEqual(nfc, "NFC file: type NTAG/Ultralight. Contains key data, not shown.")
+        self.assertEqual(rfid, "125 kHz RFID file: type EM4100. Contains key data, not shown.")
+        self.check_no_secrets(nfc + rfid)
+
+    def test_unknown_preset_is_shown_as_written(self):
+        line = s.summarise_capture(SUB_KEY.replace("FuriHalSubGhzPresetOok650Async", "Odd"))
+        self.assertIn(", Odd,", line)
+
+    def test_empty_garbled_and_other_files(self):
+        for bad in ("", None, "\x00\x01\x02", "Version: 1\nFiletype: Flipper SubGhz Key File\n",
+                    "hello world"):
+            self.assertEqual(s.summarise_capture(bad), "Not a Flipper capture file this can read.", repr(bad))
+        self.assertIn("not a capture", s.summarise_capture("Filetype: Flipper iButton key\nKey: 01 02\n"))
+        self.assertIn("Sub-GHz key file.", s.summarise_capture("Filetype: Flipper SubGhz Key File\n"
+                                                                "Frequency: lots\n"))
+
+    def test_paths(self):
+        self.assertEqual(s.saved_path("Saved 120 bytes to /home/u/aiov2-captures/flipper/a b.sub"),
+                         "/home/u/aiov2-captures/flipper/a b.sub")
+        self.assertEqual(s.saved_path("Copied."), "")
+        self.assertTrue(s.is_capture("/x/Remote.IR"))
+        self.assertFalse(s.is_capture("/x/notes.txt"))
+        self.assertFalse(s.is_capture(None))
+
+    def test_preview_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "door.sub")
+            with open(path, "w") as f:
+                f.write(SUB_KEY)
+            self.assertTrue(s.preview_file(path).startswith("Sub-GHz key file: 433.92 MHz"))
+            big = os.path.join(tmp, "big.sub")
+            with open(big, "w") as f:
+                f.write("Filetype: Flipper SubGhz RAW File\n" + "RAW_Data: 1 -1\n" * 30000)
+            self.assertEqual(s.preview_file(big), "Too big to preview.")
+            self.assertEqual(s.preview_file(os.path.join(tmp, "missing.sub")), "")
+            self.assertEqual(s.preview_file(os.path.join(tmp, "notes.txt")), "")
+
+
 if __name__ == "__main__":
     unittest.main()
 

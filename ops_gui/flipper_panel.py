@@ -551,7 +551,9 @@ def build_panel(win, Switch):
                     self.list_dir(self.path)
                     return
             elif tag == "get":
-                self.note.setText(why or saved_line(text) or "Copied.")
+                line = saved_line(text)
+                preview = "" if why else fs.preview_file(fs.saved_path(line))   # reads the local copy only
+                self.note.setText(why or " ".join(x for x in (line or "Copied.", preview) if x))
             elif tag == "open":
                 self.note.setText(why or "Asked the Flipper to open it.")
             elif tag in ("clock", "clockset"):

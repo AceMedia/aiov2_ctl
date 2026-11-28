@@ -221,3 +221,121 @@ def clock_set_args():
 CLOCK_SET_QUESTION = ("Set the Flipper's clock to this computer's local time? The Flipper keeps local time "
                       "with no time zone. The clock is read again afterwards to check.")
 
+
+
+# ---- 4. Previews of capture files copied to the uConsole -----------------------------------------------------
+# Flipper capture files are 'Key: value' text with a 'Filetype:' first line. The preview only states plain facts
+# from the header (frequency, preset, protocol, signal names, the stated card or tag type). Keys, UIDs, codes and
+# raw samples are never shown. Nothing here runs, sends or re-sends anything: it reads a local copy.
+CAPTURE_EXTENSIONS = (".sub", ".ir", ".nfc", ".rfid")
+MAX_PREVIEW_BYTES = 256 * 1024
+NOT_SHOWN = "Contains key data, not shown."
+_SAVED_RE = re.compile(r"^Saved \d+ bytes to (.+)$")
+SUBGHZ_PRESETS = {
+    "FuriHalSubGhzPresetOok270Async": "AM270 (OOK)",
+    "FuriHalSubGhzPresetOok650Async": "AM650 (OOK)",
+    "FuriHalSubGhzPreset2FSKDev238Async": "FM238 (2-FSK)",
+    "FuriHalSubGhzPreset2FSKDev476Async": "FM476 (2-FSK)",
+    "FuriHalSubGhzPresetMSK99_97KbAsync": "MSK 99.97 kbit/s",
+    "FuriHalSubGhzPresetGFSK9_99KbAsync": "GFSK 9.99 kbit/s",
+    "FuriHalSubGhzPresetCustom": "custom preset",
+}
+
+
+def is_capture(path):
+    return isinstance(path, str) and path.lower().endswith(CAPTURE_EXTENSIONS)
+
+
+def saved_path(line):
+    """The local path from aiov2_ctl's 'Saved N bytes to PATH' line, or ''."""
+    m = _SAVED_RE.match((line or "").strip())
+    return m.group(1) if m else ""
+
+
+def _pairs(text):
+    """[(key, value)] from the file, or None when the first real line is not 'Filetype:'."""
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    if not lines or not lines[0].startswith("Filetype:"):
+        return None
+    out = []
+    for line in lines:
+        if line.startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        out.append((key.strip(), _clean(value, 60)))
+    return out
+
+
+def _first(pairs, key):
+    return next((v for k, v in pairs if k == key), "")
+
+
+def _has(pairs, *keys):
+    return any(k in keys for k, _ in pairs)
+
+
+def _mhz(value):
+    try:
+        hz = int(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{hz / 1e6:.3f}".rstrip("0").rstrip(".") + " MHz" if 0 < hz < 10**10 else ""
+
+
+def _sentence(head, facts, tail=""):
+    body = head + (": " + ", ".join(f for f in facts if f) if any(facts) else "")
+    return body + "." + (" " + tail if tail else "")
+
+
+def summarise_capture(text):
+    """One honest preview line for a Flipper capture file's text."""
+    pairs = _pairs(text)
+    if pairs is None:
+        return "Not a Flipper capture file this can read."
+    filetype = _first(pairs, "Filetype")
+    low = filetype.lower()
+    if "subghz" in low:
+        protocol = _first(pairs, "Protocol")
+        raw = "raw" in low or protocol.upper() == "RAW" or _has(pairs, "RAW_Data")
+        preset = _first(pairs, "Preset")
+        bits = _first(pairs, "Bit")
+        facts = [_mhz(_first(pairs, "Frequency")), SUBGHZ_PRESETS.get(preset, preset),
+                 f"protocol {protocol}" if protocol and protocol.upper() != "RAW" else "",
+                 f"{bits} bit" if bits.isdigit() else ""]
+        if raw:
+            return _sentence("Sub-GHz raw samples", facts, "The samples are not shown.")
+        return _sentence("Sub-GHz key file", facts, NOT_SHOWN if _has(pairs, "Key", "Data", "Secplus_packet_1")
+                         else "")
+    if low.startswith("ir "):
+        names = [v for k, v in pairs if k == "name" and v]
+        protocols = sorted({v for k, v in pairs if k == "protocol" and v})
+        raw = sum(1 for k, v in pairs if k == "type" and v == "raw")
+        shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        facts = [f"{len(names)} signal{'s' if len(names) != 1 else ''}" + (f" ({shown})" if shown else ""),
+                 f"protocols {', '.join(protocols)}" if protocols else "", f"{raw} raw" if raw else ""]
+        return _sentence("Infrared file", facts, "The codes are not shown." if names else "")
+    if "nfc" in low:
+        kind = _first(pairs, "Device type")
+        return _sentence("NFC file", [f"type {kind}" if kind else "type not stated"],
+                         NOT_SHOWN if _has(pairs, "UID", "ATQA", "SAK") or any(
+                             k.startswith(("Block ", "Page ", "Sector ")) for k, _ in pairs) else "")
+    if "rfid" in low:
+        kind = _first(pairs, "Key type")
+        return _sentence("125 kHz RFID file", [f"type {kind}" if kind else "type not stated"],
+                         NOT_SHOWN if _has(pairs, "Data") else "")
+    return f"A Flipper file of type “{filetype or 'unknown'}”, not a capture this can preview."
+
+
+def preview_file(path):
+    """The preview line for a capture copied to this computer, or '' when it cannot be read."""
+    if not is_capture(path):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(MAX_PREVIEW_BYTES + 1)
+    except OSError:
+        return ""
+    if len(data) > MAX_PREVIEW_BYTES:
+        return "Too big to preview."
+    return summarise_capture(data.decode("utf-8", errors="replace"))
+
