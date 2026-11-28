@@ -222,6 +222,14 @@ def new_star(rng, far=False):
     return [rng.uniform(-1, 1), rng.uniform(-1, 1), rng.uniform(0.6, 1.0) if far else rng.uniform(0.05, 1.0)]
 
 
+def star_ink(index, text, accent, accent2):
+    """The colour a star shines in: most are the plain text colour, one in four the feature colour and one in
+    twelve its partner, so the sky belongs to the same look as everything else."""
+    if index % 12 == 6:
+        return accent2
+    return accent if index % 4 == 0 else text
+
+
 def star_step(star, dt, rng, speed=0.22):
     """Move a star towards the viewer; one that has passed starts again far away."""
     star[2] -= speed * dt
@@ -538,11 +546,12 @@ def build(win):
                 p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
                 self.words(p, 16, h - 34, f"MANDELBROT  x{ZOOM ** s['zoom']:,.0f}", 16, pal["dim"])
             elif self.kind == "stars":
-                for star in s.get("stars", ()):
+                for i, star in enumerate(s.get("stars", ())):
                     at = star_at(star, w, h)
                     if at:
                         x, y, size, bright = at
-                        p.fillRect(x, y, size, size, QColor(mix(pal["bg"], pal["text"], bright)))
+                        ink = star_ink(i, pal["text"], pal["accent"], pal["accent2"])
+                        p.fillRect(x, y, size, size, QColor(mix(pal["bg"], ink, bright)))
             elif self.kind == "rain":
                 cell = s["cell"]
                 p.setFont(style.pixel_font(16))
