@@ -1,5 +1,6 @@
 import collections
 import copy
+import math
 import os
 import subprocess
 import threading
@@ -167,6 +168,25 @@ def modem_preset_name(lora_config):
     return MODEM_PRESETS[number] if 0 <= number < len(MODEM_PRESETS) else None
 
 
+SERIES_LIMIT = 60                   # readings kept per node and per figure, in memory only
+
+
+def append_reading(series, when, value, limit=SERIES_LIMIT):
+    """A node's short history of one figure with a new reading added: a list of (time, value), oldest first, at
+    most `limit` long. A missing or unusable reading (None, not a number, not finite) changes nothing; a reading
+    that arrives out of order goes in its place by time; a second reading at the same time replaces the first."""
+    points = [p for p in (series or []) if isinstance(p, (list, tuple)) and len(p) == 2]
+    try:
+        when, value = float(when), float(value)
+    except (TypeError, ValueError):
+        return points[-limit:] if limit > 0 else []
+    if not (math.isfinite(when) and math.isfinite(value)):
+        return points[-limit:] if limit > 0 else []
+    points = [p for p in points if p[0] != when] + [(when, value)]
+    points.sort(key=lambda p: p[0])
+    return points[-limit:] if limit > 0 else []
+
+
 def explain_tcp_failure(exc, host, port):
     """A short, useful status line for a failed Meshtastic TCP connection."""
     local = host in ("localhost", "127.0.0.1", "::1")
@@ -198,6 +218,7 @@ class LoRa:
         self.max_chat = 300
         self.node_info = {}
         self.node_history = {}
+        self.node_series = {}               # node -> {"battery": [(time, %)], "snr": [(time, dB)]}, as heard here
         self.max_track_points = 8
         self.recent_alerts = []
         self.max_alerts = 6
@@ -250,6 +271,7 @@ class LoRa:
                 "chat": copy.deepcopy(self.chat),
                 "node_info": copy.deepcopy(self.node_info),
                 "node_history": copy.deepcopy(self.node_history),
+                "node_series": copy.deepcopy(self.node_series),
                 "recent_alerts": copy.deepcopy(self.recent_alerts),
                 "recent_checkins": copy.deepcopy(self.recent_checkins),
                 "channel_activity": copy.deepcopy(self.channel_activity),
@@ -753,6 +775,25 @@ class LoRa:
             if isinstance(entry, dict):
                 entry["telemetryReceived"] = received
 
+    def _remember_readings(self, packet):
+        """Add this packet's signal-to-noise as heard here, and the battery level the node reported in it, to the
+        node's short history. A level over 100 means external power, not a level, and is not kept."""
+        node_id = packet.get("fromId") if isinstance(packet, dict) else None
+        if node_id is None:
+            return
+        when = packet.get("rxTime") or time.time()
+        battery = self._extract_metrics(packet).get("batteryLevel")
+        try:
+            if battery is not None and float(battery) > 100:
+                battery = None
+        except (TypeError, ValueError):
+            battery = None
+        with self.lock:
+            series = self.node_series.setdefault(str(node_id), {})
+            for name, value in (("snr", packet.get("rxSnr")), ("battery", battery)):
+                if value is not None:
+                    series[name] = append_reading(series.get(name), when, value, SERIES_LIMIT)
+
     def _remember_link_metrics(self, node_id, packet):
         if node_id is None or not isinstance(packet, dict):
             return
@@ -1143,6 +1184,7 @@ class LoRa:
             with self.lock:
                 activity = self._build_activity(packet, sent=False)
                 self._remember_link_metrics(packet.get("fromId"), packet)
+                self._remember_readings(packet)
                 self._remember_channel_activity(activity["channel"], sent=False)
                 self.last_rx_time = time.time()
                 self.last_rx_summary = f"{activity['from']}: {activity['summary']}"

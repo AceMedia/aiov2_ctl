@@ -551,6 +551,27 @@ def channel_busy_text(node_info, self_id, now=None):
     return text + " (when it reported this is not known)"
 
 
+SPARK_RANGES = {"battery": (0.0, 100.0), "snr": (-20.0, 12.0)}   # what each small chart spans, top to bottom
+
+
+def series_values(points):
+    """The values of a node's history, oldest first, for pixel.spark_columns()."""
+    return [p[1] for p in points or [] if isinstance(p, (list, tuple)) and len(p) == 2]
+
+
+def series_caption(name, points, now=None):
+    """The words beside a small chart: "Battery heard here, 12 readings: 80% to 76%, latest 2m ago"."""
+    label, fmt = {"battery": ("Battery", lambda v: f"{v:.0f}%"),
+                  "snr": ("SNR", lambda v: f"{v:+.1f} dB")}[name]
+    values = series_values(points)
+    if not values:
+        return f"{label}: no readings heard here yet"
+    latest = age_text(points[-1][0], now)
+    if len(values) == 1:
+        return f"{label} heard here, 1 reading: {fmt(values[0])}, {latest}"
+    return f"{label} heard here, {len(values)} readings: {fmt(values[0])} to {fmt(values[-1])}, latest {latest}"
+
+
 def picked_node(row_ids, current_row):
     """The node chosen in the table: the id on the current row, or None when no row is current."""
     if isinstance(current_row, int) and 0 <= current_row < len(row_ids or []):
@@ -643,6 +664,7 @@ def build_panel(win, Switch):
                                  QLineEdit, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem,
                                  QTabWidget, QTextBrowser, QVBoxLayout, QWidget)
     from .foldertabs import FolderTabWidget
+    from . import pixel
 
     class Signals(QObject):
         ready = pyqtSignal(object)
@@ -694,6 +716,27 @@ def build_panel(win, Switch):
                 p.setPen(QPen(QColor("#111111"), 1))
             p.setPen(text)
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
+            p.end()
+
+    class Spark(QWidget):
+        """A small pixel line chart of one figure over its last readings, drawn as the Home screen draws its own
+        (pixel.spark_columns)."""
+
+        def __init__(self, name):
+            super().__init__()
+            self.name, self.values = name, []
+            self.setFixedHeight(26)
+
+        def paintEvent(self, _):
+            lo, hi = SPARK_RANGES[self.name]
+            p = QPainter(self)
+            colour = QColor("#3fe0d0" if self.name == "snr" else "#37b24d")
+            prev = None
+            for x, y in pixel.spark_columns(self.values, lo, hi, self.width(), self.height()):
+                p.fillRect(x, y, 4, 2, colour)
+                if prev is not None and prev != y:
+                    p.fillRect(x, min(prev, y), 2, abs(prev - y) + 2, colour)
+                prev = y
             p.end()
 
     class NodeTable(QTableWidget):
@@ -791,6 +834,16 @@ def build_panel(win, Switch):
             nl.addWidget(cap)
             nl.addWidget(self.table, 1)
             nl.addWidget(self.details)
+            self.sparks = {}
+            for name in ("battery", "snr"):
+                caption = QLabel("")
+                caption.setStyleSheet("font-size: 10pt; color: #9e9e9e;")
+                chart = Spark(name)
+                self.sparks[name] = (caption, chart)
+                nl.addWidget(caption)
+                nl.addWidget(chart)
+                caption.hide()
+                chart.hide()
             mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
@@ -934,6 +987,16 @@ def build_panel(win, Switch):
             text = "\n".join(node_details(info, self.picked, self_id=snap.get("self_id"))) if info else DETAILS_PROMPT
             if text != self.details.text():
                 self.details.setText(text)
+            series = ((snap.get("node_series") or {}).get(self.picked) or {}) if info else None
+            for name, (caption, chart) in self.sparks.items():
+                points = (series or {}).get(name) or []
+                caption.setVisible(series is not None)
+                caption.setText(series_caption(name, points) if series is not None else "")
+                chart.setVisible(len(points) >= 2)
+                values = series_values(points)
+                if values != chart.values:
+                    chart.values = values
+                    chart.update()
 
         # ---- channels and export
         def sync_channels(self, snap):
