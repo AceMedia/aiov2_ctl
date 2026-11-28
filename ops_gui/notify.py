@@ -15,10 +15,11 @@ SOURCES = (("mesh", "Mesh messages and check-ins"), ("nodes", "New mesh nodes he
            ("netsec", "Networks: security that changes, or a known name with none"),
            ("netnew", "Networks: ones never heard before"),
            ("btplaces", "Bluetooth: an address heard at several places along your way"),
+           ("bttrackers", "Bluetooth: a tracker's address heard at several places over 30 minutes"),
            ("updates", "Updates waiting to be installed"),
            ("crashes", "A crash report was saved"))
 DEFAULTS = {"toasts": True, "system": False, "mesh": True, "nodes": False, "gps": True, "rails": False, "warnings": True, "sense": False, "survey": False,
-            "netsec": True, "netnew": False, "btplaces": True, "updates": True,
+            "netsec": True, "netnew": False, "btplaces": True, "bttrackers": False, "updates": True,
             "crashes": True}
 LEVELS = ("info", "good", "warn", "hot")
 HISTORY = 60
