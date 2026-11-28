@@ -223,7 +223,7 @@ class ChannelActivityTests(unittest.TestCase):
 class SurveyRunTimingTests(unittest.TestCase):
     """survey_run with a fake radio and clock: time goes to the channel the radio was really on."""
 
-    def run_survey(self, fail_channels=()):
+    def run_survey(self, fail_channels=(), band=(1, 6, 11), tried=None):
         import subprocess
         clock = [100.0]
 
@@ -239,6 +239,8 @@ class SurveyRunTimingTests(unittest.TestCase):
                 pass
 
         def cmd(*args, check=True):
+            if tried is not None:
+                tried.append(args[-1])
             if args[-1] in {str(c) for c in fail_channels}:
                 raise subprocess.CalledProcessError(1, args)
             return mock.Mock(stdout="")
@@ -247,7 +249,7 @@ class SurveyRunTimingTests(unittest.TestCase):
                 mock.patch.object(a, "monitor_setup", return_value=Sock()), \
                 mock.patch.object(a, "monitor_restore"), mock.patch.object(a, "_tool", return_value="/x"), \
                 mock.patch.object(a, "_monitor_cmd", side_effect=cmd), \
-                mock.patch.dict(a.SURVEY_BANDS, {"t": (1, 6, 11)}), \
+                mock.patch.dict(a.SURVEY_BANDS, {"t": band}), \
                 mock.patch.object(a.time, "monotonic", side_effect=monotonic):
             a.survey_run("wlan1", "t", 12.0, snaps.append)
         return snaps
@@ -266,6 +268,22 @@ class SurveyRunTimingTests(unittest.TestCase):
         self.assertNotIn("6", ch)
         self.assertGreater(ch["1"]["seconds"], 1.0)
         self.assertGreater(ch["11"]["seconds"], 1.0)
+
+    def test_a_failed_change_moves_on_to_the_next_channel_without_skipping_one(self):
+        tried = []
+        ch = self.run_survey(fail_channels=(6,), band=(1, 6, 11, 13), tried=tried)[-1]["channels"]
+        first = tried.index("6")
+        self.assertEqual(tried[first + 1], "11", tried)
+        self.assertEqual(tried[first:first + 4], ["6", "11", "13", "1"], tried)
+        self.assertNotIn("6", ch)
+        for c in ("1", "11", "13"):
+            self.assertGreater(ch[c]["seconds"], 1.0, c)
+
+    def test_a_failed_last_channel_wraps_round_to_the_first(self):
+        tried = []
+        self.run_survey(fail_channels=(11,), tried=tried)
+        first = tried.index("11")
+        self.assertEqual(tried[first + 1], "1", tried)
 
 
 class SignalOwnerTests(unittest.TestCase):

@@ -5527,10 +5527,11 @@ def survey_run(iface, band, seconds, emit, pcap=False):
                         tuned, tuned_at = channels[index], time.monotonic()
                         break
                     except subprocess.CalledProcessError:
-                        channels.pop(index)         # this radio or region cannot use it
+                        channels.pop(index)         # this radio or region cannot use it: it gets no time
                         if not channels:
                             raise OSError("The radio accepted none of the channels.")
-                        index %= len(channels)
+                        # step back one, so the next pass tries the channel that followed it rather than skipping it
+                        index = (index - 1) % len(channels)
                 hop_at = now + SURVEY_DWELL
             if now >= report_at:
                 now = time.monotonic()
