@@ -804,6 +804,8 @@ class LoRa:
             "rx_rssi": packet.get("rxRssi"),
             "hop_limit": packet.get("hopLimit"),
             "hop_start": packet.get("hopStart"),
+            "packet_id": packet.get("id"),          # the radio's id for this packet, when it gave one
+            "stamp": time.time(),                   # exact time, so two events in one second differ
         }
         return activity
 

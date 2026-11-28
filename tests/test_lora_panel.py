@@ -217,3 +217,29 @@ class ColumnWidthTests(unittest.TestCase):
         self.assertEqual(lp.column_widths(500, []), [])
         self.assertEqual(lp.column_widths(-5, [0, 10]), [0, 0])
         self.assertEqual(lp.column_widths(100, [0, 0]), [100, 0])
+
+
+class RowIdentityTests(unittest.TestCase):
+    def test_two_messages_that_differ_only_by_channel_differ(self):
+        acts = [{"kind": "text", "time": "09:00:00", "from": "Ann", "from_id": "!a", "summary": "hi", "channel": c}
+                for c in (0, 1)]
+        rows = lp.message_rows(acts)
+        self.assertNotEqual(lp.row_signature(rows[0]), lp.row_signature(rows[1]))
+        self.assertEqual(lp.unread_count(rows, lp.row_signature(rows[0])), 1)
+
+    def test_packet_id_and_exact_time_are_used(self):
+        base = {"kind": "text", "time": "09:00:00", "from": "Ann", "from_id": "!a", "summary": "hi", "channel": 0}
+        rows = lp.message_rows([dict(base, packet_id=1, stamp=10.1), dict(base, packet_id=2, stamp=10.1),
+                                dict(base, stamp=10.2), dict(base, stamp=10.3)])
+        self.assertEqual(len({lp.row_signature(r) for r in rows}), 4)
+        self.assertEqual(lp.row_signature(rows[0]), lp.row_signature(lp.message_rows([dict(base, packet_id=1, stamp=10.1)])[0]))
+        self.assertIsNone(lp.row_signature(None))
+
+    def test_the_engine_records_the_packet_id(self):
+        from ops_agent import lora
+        engine = lora.LoRa()
+        engine._handle_packet({"fromId": "!0000abcd", "id": 4242, "channel": 2,
+                               "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "hello"}})
+        act = engine.snapshot()["activities"][-1]
+        self.assertEqual(act["packet_id"], 4242)
+        self.assertIsInstance(act["stamp"], float)

@@ -76,13 +76,23 @@ def message_rows(activities, channel=None, limit=CHAT_LIMIT):
         rows.append({"time": a.get("time", ""), "who": "Me" if a.get("sent") else a.get("from") or "Unknown",
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
-                     "snr": a.get("rx_snr")})
+                     "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
+                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp")})
     return rows[-limit:]
 
 
 def row_signature(row):
-    """A row's identity, stable across refreshes, for marking how far the user has read."""
-    return (row["time"], row["who"], row["text"]) if row else None
+    """A row's identity, stable across refreshes, for marking how far the user has read: the sender (node id when
+    known), the radio's packet id when it gave one, the channel and the time (exact when known, else the clock
+    text). Without a packet id the text is part of it too. The channel matters: the same words on two channels in
+    the same second are two messages."""
+    if not row:
+        return None
+    sender = row.get("from_id") or row.get("who")
+    when = row.get("stamp") or row.get("time")
+    if row.get("packet_id") is not None:
+        return (sender, row["packet_id"], row.get("channel", 0), when)
+    return (sender, None, row.get("channel", 0), when, row.get("text"))
 
 
 def unread_count(rows, read_mark):
@@ -649,7 +659,7 @@ def build_panel(win, Switch):
                 self.channel.setCurrentIndex(max(0, idx))
                 self.channel.blockSignals(False)
             self.rows = message_rows(acts, self.channel.currentData())
-            sig = tuple((r["time"], r["who"], r["text"]) for r in self.rows)
+            sig = tuple(row_signature(r) for r in self.rows)
             if sig == self.last_sig:
                 return
             self.last_sig = sig
