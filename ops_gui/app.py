@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 
 from ops_agent import handoff
 
@@ -17,6 +18,7 @@ from . import fieldlog
 from . import startup
 from . import runtime
 from . import focusnav, navring
+from . import screensaver
 from . import (dither, helpview, controls, dashboard, data, drawer, flipper_panel, gps_panel, home_panel, lora_panel, marauder_panel, registry,
                     mesh_hub, net_panel, notify, pixel, reports, sdr_panel, settings_ui, skin, statusbar, style, wifi_panel)
 
@@ -853,7 +855,59 @@ def build_window():
             return isinstance(w, (QLineEdit, QPlainTextEdit, QTextEdit))
 
         def guard(self, fn):
-            return lambda *a: None if self.typing() else fn()
+            """A single-letter shortcut does nothing while a box is being typed in, while the screensaver is
+            showing, or in the moment after the key that took it away."""
+            return lambda *a: None if self.typing() or self.saver_blocks() else fn()
+
+        # ---- the screensaver (screensaver.py)
+        def saver_showing(self):
+            saver = getattr(self, "saver", None)
+            return saver is not None and saver.isVisible()
+
+        def saver_blocks(self):
+            return self.saver_showing() or time.monotonic() - getattr(self, "saver_woke", 0.0) < 0.4
+
+        def saver_start(self, kind=None):
+            """Cover the window with a screensaver: the chosen one, or `kind` to try another."""
+            self.nav_drop()
+            self.saver.start(kind or self.settings.get("saver_kind"))
+
+        def saver_stop(self):
+            if self.saver_showing():
+                self.saver.stop()
+                self.saver_woke = time.monotonic()
+            self.last_input = time.monotonic()
+
+        def saver_wake(self):
+            """Someone touched something. True when that took the screensaver away, so the touch is used up."""
+            if self.saver_showing():
+                self.saver_stop()
+                return True
+            self.last_input = time.monotonic()
+            return False
+
+        def idle_tick(self):
+            """Every few seconds: has the pointer moved, and has nothing been touched for long enough?"""
+            from PyQt6.QtGui import QCursor
+            pos = QCursor.pos()
+            here = (pos.x(), pos.y())
+            if here != getattr(self, "idle_pos", None):
+                self.idle_pos = here
+                if not self.saver_showing():
+                    self.last_input = time.monotonic()
+            if self.saver_showing() or not self.isVisible() or self.isMinimized() or \
+                    QApplication.activeWindow() is not self or QApplication.activeModalWidget() is not None or \
+                    QApplication.activePopupWidget() is not None:
+                return
+            if screensaver.due(time.monotonic() - self.last_input, self.settings.get("saver_on"),
+                               self.settings.get("saver_minutes")):
+                self.saver_start()
+
+        def set_saver(self, key, value):
+            """Remember a screensaver setting: saver_on, saver_kind or saver_minutes."""
+            self.settings[key] = value
+            data.save_settings(dict(data.load_settings(), **{key: value}))
+            self.last_input = time.monotonic()
 
         def back(self):
             """One level back at a time (the order is focusnav.back_step): close the terminal drawer, leave a
@@ -1141,6 +1195,8 @@ def build_window():
             return True
 
         def act(self, action):
+            if self.saver_wake():                       # the button that wakes the app does nothing else
+                return
             if self.pad_to_dialog(action):
                 return
             if action in ("left", "right", "up", "down"):
@@ -1159,6 +1215,17 @@ def build_window():
             """The arrow keys move the highlight and Enter presses it (see nav); the trackball's right button
             goes back and its middle button refreshes."""
             kind = event.type()
+            if kind in (QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.Wheel,
+                        QEvent.Type.TouchBegin, QEvent.Type.ShortcutOverride):
+                if self.saver_showing():
+                    # The touch that takes the screensaver away does nothing else. A shortcut is claimed here
+                    # so that it arrives as an ordinary key press, which is then used up the same way.
+                    if kind == QEvent.Type.ShortcutOverride:
+                        event.accept()
+                    else:
+                        self.saver_stop()
+                    return True
+                self.last_input = time.monotonic()
             if kind == QEvent.Type.KeyPress and not self.nav_sending and QApplication.activeWindow() is self and \
                     QApplication.activePopupWidget() is None and QApplication.activeModalWidget() is None and \
                     obj is (QApplication.focusWidget() or self) and \
@@ -1200,6 +1267,11 @@ def build_window():
             from PyQt6.QtWidgets import QLayout
             if self.layout() is not None:
                 self.layout().setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+            self.saver = screensaver.build(self)
+            self.last_input, self.saver_woke, self.idle_pos = time.monotonic(), 0.0, None
+            self.idle_timer = QTimer(self)
+            self.idle_timer.timeout.connect(self.idle_tick)
+            self.idle_timer.start(5000)
             self.peek = {"peeking": False, "count": 0}
             self.peek_timer = QTimer(self)
             self.peek_timer.timeout.connect(self.peek_tick)
@@ -1584,6 +1656,8 @@ def build_window():
         def resizeEvent(self, event):
             super().resizeEvent(event)
             self.reflow()
+            if self.saver_showing():
+                self.saver.setGeometry(self.rect())
             if hasattr(self, "drawer"):
                 self.drawer.reposition()
 
@@ -1757,6 +1831,8 @@ def build_window():
             self.comp_text.setText("\n".join(comps))
 
         def closeEvent(self, event):
+            if getattr(self, "saver", None) is not None:
+                self.saver.stop()
             self.pages["Everything"].shutdown()               # a running session gets its last line written
             for listener in closing_listeners(self):            # each stop saves its log and frees its radio
                 try:
