@@ -13,7 +13,7 @@ Looks on the USB bus for a Flipper Zero (`0483:5740`) and ESP32-style boards (Es
 
 The `flipper` feature of the installer adds `/etc/udev/rules.d/99-aiov2-companions.rules`. It gives the logged-in user access to the port (no world-writable devices), tells ModemManager to leave it alone, and adds stable names: `/dev/aiov2-flipper` and `/dev/aiov2-esp32`. Replug the device after installing.
 
-The ops console looks for a LoRa radio on `ttyACM0`, `ttyUSB0` and `ttyACM1`. A Flipper plugged in first can take `ttyACM0`, so use the `/dev/aiov2-*` names and check `--companions` if LoRa will not connect.
+The ops console and app look for a LoRa radio on `ttyACM0`, `ttyUSB0`, `ttyACM1` and `ttyUSB1`, skip a Flipper's or ESP32 board's port, and open a port only when its USB identity is a chip Meshtastic boards use (see [LoRa Mesh](LoRa-Mesh)). If LoRa will not connect, check `--companions` and use the `/dev/aiov2-*` names.
 
 ## Flipper Zero
 
@@ -22,9 +22,11 @@ aiov2_ctl --flipper info
 aiov2_ctl --flipper ls [/ext]
 aiov2_ctl --flipper apps
 aiov2_ctl --flipper open <APP>
+aiov2_ctl --flipper clock [set --yes]
 ```
 
 - `info` shows hardware, firmware and battery; `ls` lists files (the SD card by default); `apps` lists what can be launched; `open` starts one.
+- `clock` prints the Flipper's clock beside this computer's local time. `clock set --yes` sets the Flipper's clock to this computer's local time and reads it again. Without `--yes` it changes nothing.
 - It talks to the Flipper's own serial command line with the Python standard library, so there is nothing extra to install.
 - Add `--port /dev/ttyACMx` to pick a port.
 - Close qFlipper first: the port is opened exclusively.
@@ -43,7 +45,7 @@ aiov2_ctl --flipper mkdir /ext/mine
 - `get` never overwrites a local file and saves with mode 600.
 - Files are limited to 64 MiB.
 
-In the Ops app, a Flipper tab appears while a Flipper is plugged in, and the `I` key shows the Flipper's display (read only).
+In the Ops app, a Flipper tab appears while a Flipper is plugged in, and the `I` key shows the Flipper's display (read only). See [Ops App](Ops-App) for what the tab shows.
 
 ## ESP32 Marauder (passive only)
 

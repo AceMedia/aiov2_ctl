@@ -12,6 +12,8 @@ Run it as yourself, not with `sudo`. It lists what is waiting, installs it, and 
 
 In the ops app, Settings, Features has an Update button, and the app shows a notice with "Update now" and "Dismiss" when an update is waiting.
 
+If an update was left unfinished, Settings, Features says which kind it is: a newer version fetched into the checkout but never put in place, so the old one is still running, or a new version in place whose installer has not run. Update finishes either.
+
 ## Channels
 
 | Channel | What you get |

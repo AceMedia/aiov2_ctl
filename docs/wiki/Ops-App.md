@@ -2,6 +2,8 @@
 
 The ops app is the full-screen window for the uConsole: the rails, vitals, radios and settings in one place. It is the `app` feature of the installer and opens from the start menu as "uConsole Ops", or from the tray's menu. Its code is `ops_gui/` in this repository.
 
+While the window is being built, a loading screen shows the app's name in large pixels over a strip in the feature colour, in your saved theme. The strip is decoration: it does not show progress. To start without it, add `--no-splash`, for example `python3 -m ops_gui --no-splash` from the checkout.
+
 The app sends nothing anywhere by itself. Logs and crash reports are off until you turn them on, stay on the uConsole, and are only ever shared by you.
 
 Click a picture to see it full size.
@@ -108,10 +110,12 @@ One session that records what every source that is already on can hear, side by 
 - It starts the Wi-Fi survey and the Bluetooth scan if they are not running. Stop only stops the scans the session started.
 - It is passive. Nothing is sent.
 - What is recorded is counts and readings, each with the time and, with a GPS fix, where the uConsole was.
-- "What changed together" means two counts changed in the same minute, and nothing more.
+- "What changed together" means two counts changed in the same minute, and nothing more. Beside each pair is a plain line: whether the two rose or fell together or one rose as the other fell, over how many minutes and readings, and "strongly" (in half the minutes compared or more) or "loosely", with the figure. With fewer than 12 readings behind a pair it says there are too few to compare. The list ends by saying that readings that change together are not shown to be connected: both can follow a third thing, such as the time of day or the uConsole being moved.
 - It cannot say where anything else is, which way it is, whether a device is a person, or whether two addresses are the same device, and it does not try.
 
 After Stop, or for a saved session, there is a map of the uConsole's own track with a mark for each network or address from a log saved during the session. A mark is where the uConsole was when it heard that thing strongest, not where the thing is. There are no map tiles and nothing is fetched. The track and marks can be saved as GPX or GeoJSON beside the session, privately.
+
+**Bookmark** (or `Ctrl`+`B` on this tab) keeps the last five minutes of readings as a small saved session of its own, with a note if you want one. While recording, that is the five minutes up to now; for a saved session you have opened, the five minutes up to the moment picked on the chart, or up to its end. It takes no reading and starts nothing, and with no readings it saves nothing. A bookmark is private like a session, opens from the saved sessions like any other, and is never deleted by itself.
 
 [![Everything](img/app/app-03-everything.webp)](img/app/app-03-everything.webp)
 
@@ -126,7 +130,7 @@ Passive listening only. Five pages:
 - **Networks.** Press Scan (or `S`) to list networks, strongest first, with what each radio heard of them. Filter by name or address.
 - **Channels.** Networks per channel, with plain advice: the quietest of 1, 6 and 11, and empty 5 GHz channels.
 - **Radios and saved.** The Wi-Fi radios, and saved scans (private, in `~/aiov2-captures`).
-- **Survey.** What the internal radio hears in monitor mode: access points, devices, probing devices, deauthentication bursts (detection only) and how busy each channel is. It can save a capture with data payloads cut off, and a wardriving log exported as a WiGLE CSV. It never transmits and always puts the radio back.
+- **Survey.** What the internal radio hears in monitor mode: access points, devices, probing devices, deauthentication bursts (detection only) and how busy each channel is. It can save a capture that keeps no data payload, no key-exchange (EAPOL) frame and no authentication body, and a wardriving log exported as a WiGLE CSV. It never transmits and always puts the radio back.
 - **Sense.** Notices when the Wi-Fi signals near the uConsole vary more than their baseline. Movement near a path is one cause; interference and a transmitter changing power are others. It is a coarse sensor, not a camera: it cannot see who, what or where.
 
 Survey and Sense need the USB rail on and the `listening` feature. See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
@@ -142,6 +146,7 @@ The Bluetooth Low Energy devices advertising around you, heard passively on the 
 - Phones, watches and earbuds change their address every few minutes, so one device can appear as several rows.
 - It remembers fixed addresses heard on other days, and you can mark addresses as your own. Addresses that change are never stored.
 - **Log with position** keeps a log with where the uConsole was. It needs the GPS rail on and a fix.
+- Item trackers are named in the Says it is column from markers in their advertisement: Apple Find My accessories such as AirTags, Samsung SmartTag, Tile, Chipolo and Google Find My Device trackers. The tooltip says which marker matched. The label only names the kind of device the advertisement says it is. It says nothing about whose it is, where it is or whether it is following anyone, and hearing a tracker nearby is normal.
 - Item trackers heard at several places: while a scan runs with a GPS fix, the app notes where the uConsole itself was each time an address named as a tracker is heard. If the same address is heard for 30 minutes or more at 3 places at least 100 m apart (the rule Kismet documents), its row's Known column says so, for example "3 places in 47 min", and its tooltip gives the facts. It may belong to someone travelling the same way. It says nothing about where the tracker is or whose it is. Trackers change their address, some every 15 minutes or so, and different addresses are never joined up, so a tracker that changes its address is not noticed and seeing no note means little. These notes are kept in memory only, never on disk, are forgotten after 48 hours without hearing the address, and go with Clear local data. A notification for it can be switched on in Settings; it is off to begin with.
 
 See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
@@ -165,7 +170,14 @@ Each has its own page, with pictures: [GPS](GPS), [LoRa Mesh](LoRa-Mesh), [SDR](
 
 ### Flipper and Marauder
 
-The Flipper tab has the status, the live screen, the SD card (Files), the apps it can launch (Apps, Get apps) and GPIO. The Marauder tab runs the passive Wi-Fi scans of an ESP32 Marauder board; no attack, spoofing or portal commands exist in it. See [Companion Devices](Companion-Devices).
+The Flipper tab has the status, the live screen, the SD card (Files), the apps it can launch (Apps, Get apps) and GPIO.
+
+- **About this Flipper** shows what the Flipper reports about itself: hardware, firmware version and build date, branch, origin (stock or a fork, as the Flipper states it, never guessed) and radio stack.
+- A feature the plugged-in Flipper cannot do is greyed, with the reason in its tooltip and under the About block: everything while it is in USB-UART Bridge mode, the file browser and transfers when it reports no SD card, and the live display and transfers when its firmware reports no RPC version. If the Flipper has not described itself, nothing is greyed.
+- On Refresh the tab reads the Flipper's clock and says how far it is ahead of or behind this computer. **Set Flipper clock from this computer** asks first, then sets it to this computer's local time (the Flipper keeps no time zone) and reads it back. The clock is never set any other way.
+- When a `.sub`, `.ir`, `.nfc` or `.rfid` file is copied to the uConsole, the message adds one line from the copy's header, such as the frequency and protocol, the signal names or the stated card type. Keys, UIDs, codes and raw samples are never shown.
+
+The Marauder tab runs the passive Wi-Fi scans of an ESP32 Marauder board; no attack, spoofing or portal commands exist in it. See [Companion Devices](Companion-Devices).
 
 ### Settings
 
@@ -226,7 +238,7 @@ System shows the processor, temperature, memory and disk, with the last three mi
 
 [![The system screensaver](img/app/saver-system.webp)](img/app/saver-system.webp)
 
-Starfield, falling code, a clock that drifts so nothing stays lit in one place, and Signals, which draws what the Wi-Fi, Bluetooth, mesh and GPS radios are already hearing as bars of signal strength (it starts nothing, and the SDR is left out):
+Starfield (most stars plain, one in four in the feature colour and one in twelve in its partner colour), falling code, a clock that drifts so nothing stays lit in one place, and Signals, which draws what the Wi-Fi, Bluetooth, mesh and GPS radios are already hearing as bars of signal strength (it starts nothing, and the SDR is left out):
 
 [![The starfield screensaver](img/app/saver-stars.webp)](img/app/saver-stars.webp)
 
@@ -256,6 +268,8 @@ Which rails come on at boot, and the measured power of each rail, with **Clear m
 
 How `meshtasticd` starts: with the LoRa rail by default, or also at boot with `aiov2_ctl --mesh-on-boot`.
 
+**Ask for acknowledgement** is off unless you switch it on. When it is on, each message you send asks for an acknowledgement and the mesh retries a message that is not acknowledged, so the radio sends more. See [LoRa Mesh](LoRa-Mesh).
+
 [![Settings, LoRa](img/app/settings-05-lora.webp)](img/app/settings-05-lora.webp)
 
 ### Wi-Fi
@@ -272,7 +286,7 @@ Everything Flipper related is optional and only appears when one is plugged in.
 
 ### Features
 
-What the installer has set up, with a button to add or remove each feature. Adding or removing one runs the same installer as the command line and asks first. Removing never uninstalls a package, switches a rail or deletes your saved settings. **Open the installer window** does several at once and repairs what is missing. The update channel is here too: **Switch channel** moves between stable and beta, and switching to beta turns on crash saving. See [Installation](Installation) and [Updates and Channels](Updates-and-Channels).
+What the installer has set up, with a button to add or remove each feature. Adding or removing one runs the same installer as the command line and asks first. Removing never uninstalls a package, switches a rail or deletes your saved settings. **Open the installer window** does several at once and repairs what is missing. The update channel is here too: **Switch channel** moves between stable and beta, and switching to beta turns on crash saving. If an update was left unfinished, a note says which kind: a newer version fetched into the checkout but never put in place (the old one is still running), or a new version in place whose installer has not run. Update finishes either. See [Installation](Installation) and [Updates and Channels](Updates-and-Channels).
 
 [![Settings, Features](img/app/settings-08-features.webp)](img/app/settings-08-features.webp)
 
