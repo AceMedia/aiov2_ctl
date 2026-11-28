@@ -133,6 +133,12 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(f.back_step(False, False, False, False, False), "first")
         self.assertIsNone(f.back_step(False, False, False, False, True))
 
+    def test_the_iga_tab_takes_its_place_in_the_back_chain(self):
+        self.assertEqual(f.back_step(True, False, True, False, False, web="address"), "drawer")
+        for web in ("find", "stop", "address", "tabs"):
+            self.assertEqual(f.back_step(False, False, True, True, False, web=web), "web")
+        self.assertEqual(f.back_step(False, False, False, True, False, web=None), "window")
+
     def test_the_apps_own_hand_drawn_controls_are_found_and_qts_are_not(self):
         Drawn = type("Drawn", (object,), {"mousePressEvent": lambda self, e: None, "__module__": "ops_gui.home_panel"})
         Child = type("Child", (Drawn,), {"__module__": "ops_gui.other"})

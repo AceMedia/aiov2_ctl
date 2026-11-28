@@ -332,6 +332,8 @@ class OwnPagesTests(unittest.TestCase):
         self.assertIn("href=\"https://a.org/?x=&quot;&gt;&lt;b&gt;\"", page)
         self.assertNotIn("javascript:", page)
         self.assertIn("loads only what you ask for", page)
+        self.assertIn("Escape from a page goes to the address bar, and from the address bar to the app's row of "
+                      "tabs", page.replace("&#x27;", "'"))
         self.assertIn("part of the uConsole Ops app", page)
 
     def test_an_empty_start_page_says_how_to_add_one(self):

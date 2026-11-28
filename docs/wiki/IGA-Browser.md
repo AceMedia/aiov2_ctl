@@ -49,13 +49,17 @@ sudo apt install python3-pyqt6.qtwebengine
 While a web page or the address bar has the keyboard, the app's single-letter and number shortcuts do nothing,
 so you can type. Inside a web page Tab moves between the page's links and boxes.
 
-**Getting out of a page: Escape twice.** Escape goes back one step at a time, as it does everywhere in the app:
+**Getting out of a page: Escape, one step per press.** Escape goes back one step at a time, as it does
+everywhere in the app:
 
-1. it closes the find bar, if it is open;
-2. from a page that is loading it stops the loading;
-3. from a page it moves you to the address bar;
-4. from the address bar it moves you to the app's row of tabs, where the letters, numbers and Tab switch tabs
-   again.
+1. with the find bar open, it closes the find bar;
+2. in a page that is loading, it stops the loading;
+3. otherwise, in a page, it moves the keyboard to the address bar;
+4. from the address bar (or any other IGA control) it moves the keyboard to the app's row of tabs. IGA stays the
+   selected tab; there the letters, numbers and Tab switch tabs again.
+
+From the row of tabs, a further Escape is the app's own, as on every tab: it leaves full screen, then goes to the
+first tab. IGA itself never changes which tab is selected.
 
 The other controls (Back, Forward, Reload, Bookmark and the Menu) are reached with the D-pad highlight like the
 buttons on every other tab. The Menu holds New page, Close page, Start page, Bookmarks, Downloads, Find in page,

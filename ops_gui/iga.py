@@ -193,10 +193,10 @@ def page_label(title, url, most=18):
 
 
 def escape_step(finding, loading, where):
-    """What Escape does on the IGA tab, one level at a time. `where` is 'page' (a web page has the keyboard),
-    'address' (the address bar or another IGA control has it) or anything else. Returns 'find' (close the find
-    bar), 'stop' (stop loading), 'address' (out of the page to the address bar), 'tabs' (out of IGA to the app's
-    row of tabs), or None to leave Escape to the app."""
+    """What one Escape does on the IGA tab. `where` is 'page' (a web page has the keyboard), 'address' (the address
+    bar or any other IGA control has it) or anything else (the row of tabs, say). Returns 'find' (close the find
+    bar), 'stop' (stop loading), 'address' (out of the page to the address bar), 'tabs' (to the app's row of tabs,
+    IGA still selected), or None: Escape is then the app's own next step (focusnav.back_step), as on any tab."""
     if finding:
         return "find"
     if where == "page":
@@ -490,7 +490,8 @@ def start_page(bookmarks, colours):
     marks = f"<ul>{''.join(rows)}</ul>" if rows else \
         "<p class='muted'>No bookmarks yet. Open a page and press Bookmark to keep it here.</p>"
     body = (f"<h1>IGA</h1>{marks}<p class='muted'>IGA is part of the uConsole Ops app. It loads only what you ask "
-            f"for. Ctrl+L goes to the address bar; Escape twice goes back to the app's tabs.</p>")
+            f"for. Ctrl+L goes to the address bar. Escape from a page goes to the address bar, and from the address bar to "
+            f"the app's row of tabs.</p>")
     return _page("Start", body, colours)
 
 
@@ -636,7 +637,8 @@ def build(win):
     outer.addWidget(waiting, 1, Qt.AlignmentFlag.AlignTop)
     st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False,
           "actions": {}}
-    page.escape = lambda: None
+    page.escape_plan = lambda: None            # until the engine is there, Escape is the app's as on any tab
+    page.escape_do = lambda _step: None
     page.recolour = lambda: None
     page.stop = lambda: None
 
@@ -1104,12 +1106,14 @@ def build(win):
             sc.activated.connect(st["actions"][what])
             st.setdefault("shortcuts", []).append(sc)
 
-        def escape():
+        def escape_plan():
             focus = QApplication.focusWidget()
             view = current()
             in_page = focus is not None and view is not None and (focus is view or view.isAncestorOf(focus))
             where = "page" if in_page else ("address" if focus is not None and page.isAncestorOf(focus) else None)
-            step_ = escape_step(st["finding"], bool(info().get("loading")), where)
+            return escape_step(st["finding"], bool(info().get("loading")), where)
+
+        def escape_do(step_):
             if step_ == "find":
                 close_find()
             elif step_ == "stop":
@@ -1117,13 +1121,13 @@ def build(win):
             elif step_ == "address":
                 address.setFocus()
                 address.selectAll()
-            return step_
 
         def stop():
             if prefs()["iga_clear_on_close"]:
                 clear_data()
 
-        page.escape = escape
+        page.escape_plan = escape_plan
+        page.escape_do = escape_do
         page.recolour = refresh_start_pages
         page.stop = stop
         st["ready"] = True

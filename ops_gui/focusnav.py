@@ -103,12 +103,16 @@ def custom_clickable(cls, package="ops_gui"):
     return False
 
 
-def back_step(drawer_open, reading, in_page, full_screen, first_tab):
+def back_step(drawer_open, reading, in_page, full_screen, first_tab, web=None):
     """What B, Esc or the trackball's right button does, one level at a time: 'drawer' (close it), 'reading'
-    (a page of the wiki back to its list), 'tabs' (out of the page to the row of tabs), 'window' (leave full
-    screen), 'first' (to the first tab) or None when there is nowhere further back."""
+    (a page of the wiki back to its list), 'web' (the IGA tab's own step, `web`, from iga.escape_step: leave
+    find, stop loading, page to address bar, or address bar to the row of tabs with IGA still selected), 'tabs'
+    (out of the page to the row of tabs), 'window' (leave full screen), 'first' (to the first tab) or None when
+    there is nowhere further back."""
     if drawer_open:
         return "drawer"
+    if web:
+        return "web"
     if reading:
         return "reading"
     if in_page:

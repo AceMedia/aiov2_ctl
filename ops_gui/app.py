@@ -947,18 +947,17 @@ def build_window():
             """One level back at a time (the order is focusnav.back_step): close the terminal drawer, leave a
             wiki page for its list, leave the page for the row of tabs, leave full screen, go to the first tab."""
             iga_page = self.pages.get("IGA") if getattr(self, "iga_on", False) else None
-            if iga_page is not None and self.current_name() == "IGA" and not self.drawer.isVisible():
-                done = iga_page.escape()            # find bar, stop, out of the page, then out to the tabs
-                if done == "tabs":
-                    self.nav_to(self.tabs.tabBar())
-                if done:
-                    return
+            web = iga_page.escape_plan() if iga_page is not None and self.current_name() == "IGA" else None
             step = focusnav.back_step(self.drawer.isVisible(),
                                       self.current_name() == "Wiki" and self.pages["Wiki"].page.hasFocus(),
                                       self.nav_on and self.nav_in_page(), self.isFullScreen(),
-                                      not self.names or self.current_name() == self.names[0])
+                                      not self.names or self.current_name() == self.names[0], web=web)
             if step == "drawer":
                 self.drawer.close_drawer()
+            elif step == "web":                     # one IGA step; IGA never changes which tab is selected
+                iga_page.escape_do(web)
+                if web == "tabs":
+                    self.nav_to(self.tabs.tabBar())
             elif step == "reading":
                 self.pages["Wiki"].back()
             elif step == "tabs":
