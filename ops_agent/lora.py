@@ -243,6 +243,9 @@ class LoRa:
         self._bus = None                    # the bus this is subscribed on, while it is
         self._seen_packets = collections.deque(maxlen=200)
         self.deliveries = {}                # packet id -> the delivery record of a sent message still awaiting an answer
+        # answers that came before send_message() had registered the message they answer (the library's reader
+        # thread can publish one while sendText() is still returning): packet id -> reason, the newest few only
+        self._early_answers = collections.OrderedDict()
 
         if not bootstrap.MESHTASTIC_AVAILABLE:
             debug("LoRa: meshtastic library not available")
@@ -368,6 +371,9 @@ class LoRa:
             with self.lock:
                 record = self.deliveries.get(request)
                 if record is None:
+                    self._early_answers[request] = reason
+                    while len(self._early_answers) > 20:
+                        self._early_answers.popitem(last=False)
                     return
                 record.update(delivery.after_routing(record, reason))
                 if delivery.can_forget(record, time.time()):
@@ -1354,7 +1360,11 @@ class LoRa:
             activity["delivery"] = record           # the same record: an answer shows wherever the message does
             self._append_activity(activity)
             if record["state"] == delivery.WAITING:
-                self.deliveries[sent_id] = record
+                early = self._early_answers.pop(sent_id, None)
+                if early is not None:
+                    record.update(delivery.after_routing(record, early))
+                else:
+                    self.deliveries[sent_id] = record
         self._set_tx_status(True, f"Handed to the radio, ch{selected_channel}: {text[:20]}"
                                   + (" (asking for an acknowledgement)" if record["state"] == delivery.WAITING else ""))
 
