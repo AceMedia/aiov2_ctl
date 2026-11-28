@@ -26,6 +26,23 @@ class TrackerStoreTests(unittest.TestCase):
         newest = tracker(count - 1, 0)["addr"]
         self.assertIn(newest, travel.trackers, "the ones heard most recently are kept")
 
+    def test_sightings_carry_on_after_the_clock_jumps_back_an_hour(self):
+        travel = bm.Travel()
+        t0 = 100000.0
+        for i in range(3):
+            t = t0 + i * 60
+            travel.add_trackers({"t": t, "devices": [tracker(7, t)]}, FIX)
+        back = t0 + 120 - 3600                       # a GPS time correction sets the clock back an hour
+        for i in range(3):
+            t = back + i * 60
+            travel.add_trackers({"t": t, "devices": [tracker(7, t)]}, FIX)
+        sightings = travel.trackers[tracker(7, 0)["addr"]]["sightings"]
+        self.assertEqual(len(sightings), 6)
+        self.assertEqual(sightings[-1][0], back + 120, "the earlier time is taken as the new latest")
+        t = back + 130                               # still at most one sighting per 30 seconds afterwards
+        travel.add_trackers({"t": t, "devices": [tracker(7, t)]}, FIX)
+        self.assertEqual(len(sightings), 6)
+
     def test_the_48_hours_still_forget(self):
         travel = bm.Travel()
         travel.add_trackers({"t": 1000.0, "devices": [tracker(1, 1000.0)]}, FIX)
