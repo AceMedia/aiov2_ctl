@@ -254,3 +254,34 @@ class SharedReadingTests(unittest.TestCase):
         self.assertIsNone(out["wifi"])
         self.assertNotIn("sdr", out)
 
+
+
+class TabWordsTests(unittest.TestCase):
+    def test_the_buttons_say_what_they_will_do(self):
+        self.assertEqual(ghost.button_labels(False, False, False), {"record": "Record", "play": "Play", "live": "Live"})
+        self.assertEqual(ghost.button_labels(True, True, True),
+                         {"record": "Stop recording", "play": "Pause", "live": "Back to live"})
+
+    def test_the_status_line_says_live_or_replay_and_whether_it_is_recording(self):
+        self.assertIn("LIVE", ghost.status_text(False, "", False))
+        self.assertIn("nothing is being received", ghost.status_text(False, "", True))
+        self.assertIn("on this device only", ghost.status_text(True, "", False))
+        replay = ghost.status_text(False, "REPLAY  28 Nov 2026 14:03:22  +00:42", True)
+        self.assertTrue(replay.startswith("REPLAY"))
+        self.assertNotIn("LIVE", replay)
+
+    def test_a_replayed_file_always_gives_four_sound_meters(self):
+        meters = ghost.shown_meters([{"name": "ENERGY", "value": 7, "says": "x", "really": "Really: y"},
+                                     {"name": "PRESENCES", "value": True}, "junk"])
+        self.assertEqual([m["name"] for m in meters], list(ghost.INSTRUMENTS))
+        self.assertEqual(meters[0]["value"], 1.0)
+        self.assertEqual(meters[1]["really"], ghost.NOTHING_REALLY)
+
+    def test_the_tab_never_runs_a_command_or_touches_the_sdr_or_a_rail(self):
+        with open(ghost.__file__, encoding="utf-8") as f:
+            source = f.read()
+        for bad in ("subprocess", "os.system", "Popen", "set_rail", "aiov2_ctl.py", "start_scan", "sdr_panel",
+                    "requests", "urllib", "socket"):
+            self.assertNotIn(bad, source, bad)
+        self.assertIn("ss.read_heard(win)", source)
+

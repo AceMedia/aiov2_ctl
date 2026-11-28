@@ -367,6 +367,10 @@ def build_window():
             self.wiki_on = wiki.enabled()
             if self.wiki_on:
                 self.pages["Wiki"] = wiki.build(self)
+            from . import ghost
+            self.ghost_on = ghost.wanted()          # the optional, for-fun add-on: only when it is installed
+            if self.ghost_on:
+                self.pages[ghost.TAB] = ghost.build(self)
             from . import bt_panel
             self.bt_available = bt_panel.adapter_available
             self.pages["Bluetooth"] = bt_panel.build_page(self)
@@ -701,7 +705,7 @@ def build_window():
             names = data.tab_names(self.snap, self.flip_shown, self.marauder_shown,
                                   self.settings.get("home_tab") is not False, data.has_ethernet(),
                                   self.bt_available(), everything=True,
-                                  wiki=getattr(self, "wiki_on", False),
+                                  wiki=getattr(self, "wiki_on", False), ghost=getattr(self, "ghost_on", False),
                                   apps=bool(self.settings.get("apps_tab") or self.settings.get("games_tab")))
             if getattr(self, "names", None) == names:
                 self.refresh_help()

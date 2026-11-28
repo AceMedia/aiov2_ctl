@@ -369,3 +369,316 @@ def replay_mark(head, record):
     e = int(record["elapsed"])
     return f"REPLAY  {time.strftime('%d %b %Y %H:%M:%S', time.localtime(record['time']))}  +{e // 60:02d}:{e % 60:02d}"
 
+
+
+# ---- what the tab's words and buttons say
+def button_labels(recording, replaying, playing):
+    """The changing buttons' words."""
+    return {"record": "Stop recording" if recording else "Record",
+            "play": "Pause" if playing else "Play",
+            "live": "Back to live" if replaying else "Live"}
+
+
+def status_text(recording, replay_text, nothing, error=""):
+    """The line under the visualiser: what is on screen, whether a session is being recorded, and any problem."""
+    parts = [replay_text] if replay_text else ["LIVE: only what the app's radios are already hearing"]
+    if not replay_text and nothing:
+        parts.append("nothing is being received")
+    if recording:
+        parts.append("recording, on this device only")
+    if error:
+        parts.append(error)
+    return ".  ".join(parts) + "."
+
+
+def shown_meters(meters):
+    """Four meters to draw, whatever a session file held: any missing one says nothing is being received."""
+    by_name = {m.get("name"): m for m in meters or () if isinstance(m, dict)}
+    out = []
+    for name in INSTRUMENTS:
+        m = by_name.get(name)
+        if not m or not isinstance(m.get("value"), (int, float)) or isinstance(m.get("value"), bool):
+            out.append(_quiet(name))
+        else:
+            out.append({"name": name, "value": max(0.0, min(1.0, float(m["value"]))),
+                        "says": str(m.get("says", "")), "really": str(m.get("really", ""))})
+    return out
+
+
+METER_SEGMENTS = 24
+
+
+def build(win):
+    """The Ghost hunt page. Qt is imported here; what to show is decided by the plain functions above. It only
+    reads what the app's pages already hold (screensaver.read_heard) and never starts or switches anything."""
+    from PyQt6.QtCore import QPoint, Qt, QTimer
+    from PyQt6.QtGui import QColor, QPainter
+    from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout,
+                                 QWidget)
+    from . import pixel, style
+
+    pal = pixel.palette("dark")             # drawn dark like the Signals screensaver, whatever the theme
+    folder = sessions_folder()
+    st = {"history": [], "bands": ss.signal_bands({}), "meters": instruments([]), "lit": {}, "error": "",
+          "rec": None, "rec_started": None, "rec_last": None,
+          "records": None, "head": None, "pos": 0.0, "playing": False, "shown": None}
+
+    def words(p, x, y, text, px, colour, align="left", width=0):
+        p.setFont(style.pixel_font(px))
+        p.setPen(QColor(colour))
+        w = p.fontMetrics().horizontalAdvance(text)
+        if align == "right":
+            x = x + width - w
+        elif align == "centre":
+            x = x + (width - w) // 2
+        p.drawText(QPoint(int(x), int(y + px - max(2, px // 8))), text)
+
+    class Visual(QWidget):
+        """The antenna visualiser, laid out by screensaver.signal_layout; a bar that just jumped is brighter."""
+        def __init__(self):
+            super().__init__()
+            self.setMinimumSize(520, 380)
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        def paintEvent(self, _event):
+            p = QPainter(self)
+            w, h = self.width(), self.height()
+            p.fillRect(self.rect(), QColor(pal["bg"]))
+            layout = ss.signal_layout(st["bands"], w, h - 28, 0.0, margin=16)
+            pitch = ss.SIGNAL_SEGMENT + ss.SIGNAL_SEGMENT_GAP
+            for band in (layout or {}).get("bands", ()):
+                dim = band["dim"]
+                x, y, text = band["caption"]
+                words(p, x, y, text, 16, ss.mix(pal["bg"], pal["dim"], 0.6) if dim else pal["label"])
+                if band["note"]:
+                    x, y, text = band["note"]
+                    words(p, x, y, text, 16, pal["dim"])
+                p.fillRect(*band["baseline"], QColor(pal["off"] if dim else pal["line"]))
+                for x, y, sw, text in band["scale"]:
+                    words(p, x, y, text, 16, pal["off"] if dim else pal["dim"], "right", sw)
+                total = band["segments"]
+                for j, (x, base, bw, on, k) in enumerate(band["bars"]):
+                    flare = (band["key"], j) in st["lit"]
+                    for i in range(on):
+                        ink = pal["text"] if flare else ss.segment_colour(i, total, k, pal["bg"], pal["accent2"],
+                                                                         pal["accent"])
+                        p.fillRect(x, base - (i + 1) * pitch + ss.SIGNAL_SEGMENT_GAP, bw, ss.SIGNAL_SEGMENT,
+                                   QColor(ink))
+            if layout and layout["message"]:
+                x, y, mw, text = layout["message"]
+                words(p, x, y, text, 24, pal["dim"], "centre", mw)
+            if st["records"] is not None:                   # a replay is always marked as one
+                words(p, 16, h - 26, replay_mark(st["head"], st["shown"]), 16, pal["accent"])
+            elif st["rec"] is not None:
+                words(p, 16, h - 26, "REC", 16, pal["warn"])
+            p.end()
+
+    class Needle(QWidget):
+        """One meter's pixel bar."""
+        def __init__(self):
+            super().__init__()
+            self.value = 0.0
+            self.setFixedHeight(16)
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        def paintEvent(self, _event):
+            p = QPainter(self)
+            p.fillRect(self.rect(), QColor(pal["bg"]))
+            gap = 3
+            sw = max(2, (self.width() - gap * (METER_SEGMENTS - 1)) // METER_SEGMENTS)
+            on = ss.lit(self.value, 1.0, METER_SEGMENTS)
+            for i in range(METER_SEGMENTS):
+                ink = ss.mix(pal["accent2"], pal["accent"], i / (METER_SEGMENTS - 1)) if i < on else pal["off"]
+                p.fillRect(i * (sw + gap), 2, sw, 12, QColor(ink))
+            p.end()
+
+    page = QWidget()
+    root = QVBoxLayout(page)
+    root.setContentsMargins(8, 6, 8, 6)
+    root.setSpacing(6)
+    fun = QLabel(FOR_FUN)                                   # always there, whatever else is on screen
+    fun.setWordWrap(True)
+    fun.setFont(style.pixel_font(16))
+    root.addWidget(fun)
+
+    middle = QHBoxLayout()
+    visual = Visual()
+    middle.addWidget(visual, 3)
+    right = QVBoxLayout()
+    right.setSpacing(2)
+    meter_widgets = []
+    for name in INSTRUMENTS:
+        head = QLabel(name)
+        head.setFont(style.pixel_font(16))
+        needle = Needle()
+        really = QLabel("")
+        really.setWordWrap(True)
+        really.setFont(style.pixel_font(16))
+        for widget in (head, needle, really):
+            right.addWidget(widget)
+        right.addSpacing(6)
+        meter_widgets.append((head, needle, really))
+    sessions = QListWidget()
+    sessions.setVisible(False)
+    right.addWidget(sessions, 1)
+    right.addStretch(1)
+    middle.addLayout(right, 2)
+    root.addLayout(middle, 1)
+
+    status = QLabel("")
+    status.setWordWrap(True)
+    root.addWidget(status)
+    row = QHBoxLayout()
+    buttons = {}
+    for key, text in (("record", "Record"), ("open", "Open session"), ("play", "Play"), ("back", "Step back"),
+                      ("next", "Step on"), ("live", "Live")):
+        b = QPushButton(text)
+        b.setMinimumHeight(40)
+        row.addWidget(b)
+        buttons[key] = b
+    row.addStretch(1)
+    root.addLayout(row)
+
+    def replaying():
+        return st["records"] is not None
+
+    def refresh():
+        for (head, needle, really), m in zip(meter_widgets, shown_meters(st["meters"])):
+            head.setText(f"{m['name']}   {m['says']}")
+            needle.value = m["value"]
+            needle.update()
+            really.setText(m["really"])
+        labels = button_labels(st["rec"] is not None, replaying(), st["playing"])
+        for key in ("record", "play", "live"):
+            buttons[key].setText(labels[key])
+        for key in ("play", "back", "next", "live"):
+            buttons[key].setEnabled(replaying())
+        status.setText(status_text(st["rec"] is not None, replay_mark(st["head"], st["shown"]) if replaying() else "",
+                                   ss.nothing_heard(st["bands"]), st["error"]))
+        visual.update()
+
+    def show(bands, meters, now):
+        before, st["bands"], st["meters"] = st["bands"], bands, meters
+        st["lit"] = keep_flares(st["lit"], flares(before, bands), now)
+
+    def show_replay(now):
+        record = frame_at(st["records"], st["pos"])
+        if record is not st["shown"]:
+            st["shown"] = record
+            show(record["bands"] if record else ss.signal_bands({}), record["instruments"] if record else [], now)
+
+    def tick():
+        now = time.time()
+        frame = make_frame(ss.read_heard(win), now)        # read only: what the pages already hold
+        remember(st["history"], frame)
+        live_meters = instruments(st["history"])
+        if st["rec"] is not None and due(st["rec_last"], now):
+            try:
+                st["rec"].write(session_line(frame, live_meters, st["rec_started"]) + "\n")
+                st["rec"].flush()
+                st["rec_last"] = now
+            except (OSError, ValueError) as e:
+                stop_recording()
+                st["error"] = f"Recording stopped: {e}"
+        if replaying():
+            if st["playing"]:
+                st["pos"] += SAMPLE_SECONDS
+                if st["pos"] >= replay_length(st["records"]):
+                    st["pos"], st["playing"] = replay_length(st["records"]), False
+            show_replay(now)
+        else:
+            show(frame["bands"], live_meters, now)
+        refresh()
+
+    def stop_recording():
+        if st["rec"] is not None:
+            try:
+                st["rec"].close()
+            except OSError:
+                pass
+        st["rec"], st["rec_last"] = None, None
+
+    def record():
+        st["error"] = ""
+        if st["rec"] is not None:
+            stop_recording()
+        else:
+            started = time.time()
+            try:
+                _path, f = open_session(folder, started)
+                f.write(header_line(started) + "\n")
+                f.flush()
+                st["rec"], st["rec_started"], st["rec_last"] = f, started, None
+            except OSError as e:
+                st["error"] = f"Could not start a recording: {e.strerror or e}"
+        refresh()
+
+    def open_list():
+        st["error"] = ""
+        if sessions.isVisible():
+            sessions.setVisible(False)
+            buttons["open"].setFocus()
+            return
+        sessions.clear()
+        for name in list_sessions(folder):
+            item = QListWidgetItem(session_title(name))
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            sessions.addItem(item)
+        if not sessions.count():
+            st["error"] = "No saved sessions yet"
+            refresh()
+            return
+        sessions.setVisible(True)
+        sessions.setCurrentRow(0)
+        sessions.setFocus()
+
+    def load(item):
+        name = item.data(Qt.ItemDataRole.UserRole)
+        try:
+            with open(os.path.join(folder, name), encoding="utf-8") as f:
+                head, records = parse_session(f.read())
+        except (OSError, ValueError) as e:
+            st["error"] = f"Could not open that session: {e}"
+            refresh()
+            return
+        st["head"], st["records"], st["pos"], st["playing"], st["shown"] = head, records, 0.0, False, None
+        sessions.setVisible(False)
+        buttons["play"].setFocus()
+        show_replay(time.time())
+        refresh()
+
+    def play():
+        if replaying():
+            if not st["playing"] and st["pos"] >= replay_length(st["records"]):
+                st["pos"] = 0.0
+            st["playing"] = not st["playing"]
+            refresh()
+
+    def stepped(direction):
+        if replaying():
+            st["playing"] = False
+            st["pos"] = step(st["records"], st["pos"], direction)
+            show_replay(time.time())
+            refresh()
+
+    def live():
+        st["records"], st["head"], st["playing"], st["shown"] = None, None, False, None
+        buttons["record"].setFocus()
+        refresh()
+
+    buttons["record"].clicked.connect(record)
+    buttons["open"].clicked.connect(open_list)
+    buttons["play"].clicked.connect(play)
+    buttons["back"].clicked.connect(lambda: stepped(-1))
+    buttons["next"].clicked.connect(lambda: stepped(1))
+    buttons["live"].clicked.connect(live)
+    sessions.itemActivated.connect(load)
+
+    timer = QTimer(page)
+    timer.timeout.connect(tick)
+    timer.start(int(SAMPLE_SECONDS * 1000))
+    page.ghost_timer = timer
+    page.stop_recording = stop_recording
+    refresh()
+    return page
+
