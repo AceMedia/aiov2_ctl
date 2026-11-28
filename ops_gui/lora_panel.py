@@ -207,6 +207,28 @@ def _row_distance(info, node_id, self_id, own):
     return distance_text(haversine_km(own[0], own[1], where[0], where[1]))
 
 
+NAME_MIN_PX = 160                    # the name column never gets less than this, so names stay readable
+
+
+def column_widths(total, needs, stretch=0, minimum=NAME_MIN_PX):
+    """Pixel widths for the node table's columns. Every column but `stretch` (the name) gets what its header and
+    cells need, and the name gets all the rest, never less than `minimum`. When the table is too narrow for that,
+    the other columns give up width in proportion to what they need, so the name is the last to be cut."""
+    total = max(0, int(total))
+    needs = [max(0, int(n)) for n in needs]
+    if not needs:
+        return []
+    others = sum(n for i, n in enumerate(needs) if i != stretch)
+    if total - others >= minimum:
+        widths = list(needs)
+    else:
+        room = max(0, total - minimum)
+        scale = room / others if others else 0.0
+        widths = [int(n * scale) for n in needs]
+    widths[stretch] = max(0, total - sum(w for i, w in enumerate(widths) if i != stretch))
+    return widths
+
+
 def node_rows(node_info, self_id=None, now=None, own=None):
     """Rows for the node table: this node first, then the rest by when they were last heard."""
     rows = []
@@ -317,6 +339,21 @@ def build_panel(win, Switch):
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
             p.end()
 
+    class NodeTable(QTableWidget):
+        """The nodes table. The name column takes the spare width and the others only what they need
+        (see column_widths); Qt's own stretch mode let content-sized columns squeeze names to a few letters."""
+
+        def resizeEvent(self, event):
+            super().resizeEvent(event)
+            self.fit_columns()
+
+        def fit_columns(self):
+            head = self.horizontalHeader()
+            needs = [0] + [max(self.sizeHintForColumn(c), head.sectionSizeHint(c)) + 12
+                           for c in range(1, self.columnCount())]
+            for c, w in enumerate(column_widths(self.viewport().width(), needs)):
+                head.resizeSection(c, w)
+
     class MeshPage(QWidget):
         def __init__(self):
             super().__init__()
@@ -373,17 +410,17 @@ def build_panel(win, Switch):
             nl = QVBoxLayout(nodes)
             cap = QLabel("Nodes heard")
             cap.setStyleSheet("font-size: 13pt; color: #9e9e9e;")
-            self.table = QTableWidget(0, 6)
+            self.table = NodeTable(0, 6)
             self.table.setHorizontalHeaderLabels(["Name", "Signal", "Distance", "Heard", "Battery", "Hops"])
             self.table.verticalHeader().setVisible(False)
             self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
             self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-            self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            for c in range(1, 6):
-                self.table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            self.table.horizontalHeader().setStretchLastSection(False)
+            self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
             nl.addWidget(cap)
             nl.addWidget(self.table)
-            mid.addWidget(nodes, 3)
+            mid.addWidget(nodes, 3)          # the nodes table gets the larger share: names need the room
             feed = QFrame()
             feed.setObjectName("card")
             fl = QVBoxLayout(feed)
@@ -394,7 +431,7 @@ def build_panel(win, Switch):
             self.feed.setStyleSheet("font-size: 11pt;")
             fl.addWidget(cap)
             fl.addWidget(self.feed)
-            mid.addWidget(feed, 4)
+            mid.addWidget(feed, 2)
             root.addLayout(mid, 1)
 
             row = QHBoxLayout()
@@ -477,6 +514,7 @@ def build_panel(win, Switch):
                 for c, key in enumerate(("name", "signal", "distance", "heard", "battery", "hops")):
                     text = row[key] + (" (this node)" if key == "name" and row["self"] else "")
                     self.table.setItem(r, c, QTableWidgetItem(text))
+            self.table.fit_columns()
             lines = [activity_line(a) for a in snap["activities"][-40:]]
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)

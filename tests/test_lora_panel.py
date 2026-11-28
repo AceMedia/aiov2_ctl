@@ -196,3 +196,24 @@ class MessageTests(unittest.TestCase):
         mark = lp.row_signature(lp.message_rows(acts, limit=5)[0])          # read up to the very first message
         rows = lp.message_rows(acts, limit=3)                               # a window that no longer contains it
         self.assertEqual(lp.unread_count(rows, mark), len(rows))            # safer than getting stuck at 0
+
+
+class ColumnWidthTests(unittest.TestCase):
+    NEEDS = [0, 90, 70, 80, 80, 50]                   # name, signal, distance, heard, battery, hops
+
+    def test_the_name_gets_the_spare_width(self):
+        widths = lp.column_widths(800, self.NEEDS)
+        self.assertEqual(widths[1:], self.NEEDS[1:])
+        self.assertEqual(widths[0], 800 - sum(self.NEEDS[1:]))
+        self.assertEqual(sum(widths), 800)
+
+    def test_a_narrow_table_keeps_the_name_readable(self):
+        widths = lp.column_widths(400, self.NEEDS)
+        self.assertGreaterEqual(widths[0], lp.NAME_MIN_PX)
+        self.assertEqual(sum(widths), 400)
+        self.assertTrue(all(w < n for w, n in zip(widths[1:], self.NEEDS[1:])))
+
+    def test_odd_input(self):
+        self.assertEqual(lp.column_widths(500, []), [])
+        self.assertEqual(lp.column_widths(-5, [0, 10]), [0, 0])
+        self.assertEqual(lp.column_widths(100, [0, 0]), [100, 0])
