@@ -13,6 +13,8 @@ import re
 import subprocess
 import threading
 
+from . import flipper_session as fs
+
 SD_ROOT = "/ext"
 ROW_RE = re.compile(r"^([d-])\s{2}(.+?)(?:\s{2}(\d+\s*\w*))?$")
 SAFE_RE = re.compile(r"^[A-Za-z0-9_./ +()\-]{1,200}$")
@@ -225,6 +227,13 @@ def build_panel(win, Switch):
             self.text.setAlignment(Qt.AlignmentFlag.AlignTop)
             il.addWidget(self.text)
             left.addWidget(info, 1)
+            about, abl = card("About this Flipper")
+            self.about = QLabel("")
+            self.about.setTextFormat(Qt.TextFormat.RichText)
+            self.about.setWordWrap(True)
+            self.about.setStyleSheet("font-size: 11pt;")
+            abl.addWidget(self.about)
+            left.addWidget(about)
             root.addLayout(left, 0)
 
             right, rl = card("On the Flipper")
@@ -341,6 +350,8 @@ def build_panel(win, Switch):
             from . import data
             self.text.setText(data.facts_html(data.flipper_facts(status, with_apps=True),
                                               data.flipper_tips(status)))
+            self.record = fs.parse_device_info((status or {}).get("device"))
+            self.about.setText(data.facts_html(fs.about_rows(self.record)))
             note = mode_note(status)
             if note or was != self.ok:          # do not wipe a result message on every poll
                 self.note.setText(note)
