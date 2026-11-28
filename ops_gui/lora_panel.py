@@ -561,6 +561,21 @@ def activity_line(a, self_id=None, node_info=None):
     return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {who}: {summary}{sig}"
 
 
+DEFAULT_KEY_WARNING = ("This channel uses Meshtastic's public default key: anyone with a Meshtastic radio nearby "
+                       "can read what is sent on it.")
+
+
+def default_key_line(snapshot):
+    """The standing warning by the message box when the channel being sent on uses the public default key, else "".
+    Nothing is said when the radio's channel list is not available or the key cannot be told: no guessing."""
+    snap = snapshot or {}
+    sel = snap.get("selected_channel") or 0
+    for c in snap.get("configured_channels") or []:
+        if isinstance(c, dict) and c.get("index", 0) == sel:
+            return DEFAULT_KEY_WARNING if c.get("default_key") is True else ""
+    return ""
+
+
 def composer_line(snapshot):
     """Where the message being typed will go. This app only sends to everyone on the chosen channel: "To everyone
     on channel 0 (LongFast)". The channel's own name, or for a primary with an empty name the radio's preset; the
@@ -762,6 +777,11 @@ def build_panel(win, Switch):
             self.where.setStyleSheet("font-size: 11pt; color: #9e9e9e;")
             self.where.setWordWrap(True)
             root.addWidget(self.where)
+            self.keywarn = QLabel("")                    # a quiet standing line, never a pop-up
+            self.keywarn.setStyleSheet("font-size: 11pt; color: #f59f00;")
+            self.keywarn.setWordWrap(True)
+            self.keywarn.hide()
+            root.addWidget(self.keywarn)
             row = QHBoxLayout()
             self.allow = Switch()
             self.allow.clicked.connect(self.toggle_allow)
@@ -861,6 +881,9 @@ def build_panel(win, Switch):
             self.feed.setPlainText("\n".join(reversed(lines)))
             self.sync_channels(snap)
             self.where.setText(composer_line(snap))
+            warning = default_key_line(snap)
+            self.keywarn.setText(warning)
+            self.keywarn.setVisible(bool(warning))
             if own:
                 e.update_proximity({"lat": own[0], "lon": own[1]}, haversine_km)
             if self.on_snap:

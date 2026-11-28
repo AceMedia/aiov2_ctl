@@ -98,7 +98,32 @@ def choose_serial_port(devices, identify):
 CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role values (SECONDARY is 2)
 
 
-def configured_channels(channels):
+DEFAULT_PSK = b"\x01"           # the library's shorthand for Meshtastic's well-known default key
+
+
+def uses_default_key(settings, primary=False, modem_preset=None):
+    """Whether a channel uses Meshtastic's public default key, from the library's channel settings
+    (Channel.settings), or None when that cannot be told.
+
+    Assumption, from the library's protobuf and not checked on a radio: `psk` is bytes, and a single byte 1 stands for
+    the default key (the key everyone with Meshtastic has). Single bytes 2 to 10 are variants of the same public key
+    and are not counted here; an empty psk means no encryption at all, also not counted. When the settings carry no
+    psk, a primary channel with an empty name on the LongFast preset is the out-of-the-box channel and so counts."""
+    if settings is None:
+        return None
+    psk = getattr(settings, "psk", None)
+    if psk is not None:
+        try:
+            return bytes(psk) == DEFAULT_PSK
+        except (TypeError, ValueError):
+            return None
+    name = getattr(settings, "name", None)
+    if primary and name is not None and not str(name).strip() and modem_preset == "LongFast":
+        return True
+    return None
+
+
+def configured_channels(channels, modem_preset=None):
     """The channels set up on the radio, from the library's channel objects (interface.localNode.channels): a list
     of {"index", "name", "primary"}, the primary first and then by index, disabled ones left out. The primary's name
     may be empty, which means the radio's default. None when there is nothing usable, so the caller can fall back
@@ -116,8 +141,10 @@ def configured_channels(channels):
             continue
         if role == CHANNEL_DISABLED:
             continue
-        name = getattr(getattr(ch, "settings", None), "name", "") or ""
-        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY})
+        settings = getattr(ch, "settings", None)
+        name = getattr(settings, "name", "") or ""
+        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY,
+                      "default_key": uses_default_key(settings, role == CHANNEL_PRIMARY, modem_preset)})
     found.sort(key=lambda c: (not c["primary"], c["index"]))
     return found or None
 
@@ -1152,17 +1179,17 @@ class LoRa:
                 return
             nodes = copy.deepcopy(getattr(self.interface, "nodes", None))
             try:
-                self.configured_channels = configured_channels(
-                    getattr(getattr(self.interface, "localNode", None), "channels", None))
-            except Exception as e:                      # reading only; a library without it keeps the fallback
-                debug(f"LoRa: could not read the configured channels: {e}")
-                self.configured_channels = None
-            try:
                 self.modem_preset = modem_preset_name(getattr(getattr(getattr(
                     self.interface, "localNode", None), "localConfig", None), "lora", None))
             except Exception as e:
                 debug(f"LoRa: could not read the modem preset: {e}")
                 self.modem_preset = None
+            try:
+                self.configured_channels = configured_channels(
+                    getattr(getattr(self.interface, "localNode", None), "channels", None), self.modem_preset)
+            except Exception as e:                      # reading only; a library without it keeps the fallback
+                debug(f"LoRa: could not read the configured channels: {e}")
+                self.configured_channels = None
         if isinstance(nodes, dict) and nodes:
             merged_nodes = {}
             for node_id, info in nodes.items():
