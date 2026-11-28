@@ -287,9 +287,25 @@ def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
     return found, span
 
 
+def channel_label(channel):
+    """ "0: LongFast (primary)", or "0: default name (primary)" when the primary's name is empty."""
+    name = channel.get("name") or ("default name" if channel.get("primary") else f"channel {channel.get('index', 0)}")
+    return f"{channel.get('index', 0)}: {name}" + (" (primary)" if channel.get("primary") else "")
+
+
 def channel_choices(snapshot):
-    """[(channel number, label)] for the channels with recent activity, plus the selected one."""
+    """[(channel number, label)] for the "Send on" list. The channels set up on the radio when the connection gives
+    them (configured_channels in the snapshot: the primary first, disabled ones already left out); otherwise, as
+    before, the channels with recent activity. The selected channel is always listed, and said not to be set up
+    when the radio's list does not have it."""
     snap = snapshot or {}
+    configured = [c for c in snap.get("configured_channels") or [] if isinstance(c, dict)]
+    sel = snap.get("selected_channel")
+    if configured:
+        out = [(c.get("index", 0), channel_label(c)) for c in configured]
+        if sel is not None and sel not in [n for n, _ in out]:
+            out.append((sel, f"Channel {sel} (not set up on this radio)"))
+        return out
     items = {}
     for c in snap.get("active_channels") or []:
         items[c["channel"]] = f"Channel {c['channel']}  ({c.get('count', 0)} packets)"

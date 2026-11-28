@@ -21,6 +21,33 @@ def _pubsub():
         return None
 
 
+CHANNEL_DISABLED, CHANNEL_PRIMARY = 0, 1          # the library's Channel.Role values (SECONDARY is 2)
+
+
+def configured_channels(channels):
+    """The channels set up on the radio, from the library's channel objects (interface.localNode.channels): a list
+    of {"index", "name", "primary"}, the primary first and then by index, disabled ones left out. The primary's name
+    may be empty, which means the radio's default. None when there is nothing usable, so the caller can fall back
+    to the channels heard lately. Only reads the objects: the radio's configuration is never changed."""
+    try:
+        items = list(channels or [])
+    except TypeError:
+        return None
+    found = []
+    for ch in items:
+        try:
+            role = int(getattr(ch, "role", CHANNEL_DISABLED) or 0)
+            index = int(getattr(ch, "index", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if role == CHANNEL_DISABLED:
+            continue
+        name = getattr(getattr(ch, "settings", None), "name", "") or ""
+        found.append({"index": index, "name": str(name).strip(), "primary": role == CHANNEL_PRIMARY})
+    found.sort(key=lambda c: (not c["primary"], c["index"]))
+    return found or None
+
+
 def explain_tcp_failure(exc, host, port):
     """A short, useful status line for a failed Meshtastic TCP connection."""
     local = host in ("localhost", "127.0.0.1", "::1")
@@ -58,6 +85,7 @@ class LoRa:
         self.recent_checkins = []
         self.max_checkins = 6
         self.channel_activity = {}
+        self.configured_channels = None     # the radio's own channel list, when the connection gives it
         self.selected_channel = 0
         self.auto_follow_channel = False
         self.channel_locked = False
@@ -103,6 +131,7 @@ class LoRa:
                 "recent_alerts": copy.deepcopy(self.recent_alerts),
                 "recent_checkins": copy.deepcopy(self.recent_checkins),
                 "channel_activity": copy.deepcopy(self.channel_activity),
+                "configured_channels": copy.deepcopy(self.configured_channels),
                 "active_channels": active_channels,
                 "selected_channel": selected_channel,
                 "best_channel": best_channel,
@@ -966,6 +995,12 @@ class LoRa:
             if not self.active or not self.interface:
                 return
             nodes = copy.deepcopy(getattr(self.interface, "nodes", None))
+            try:
+                self.configured_channels = configured_channels(
+                    getattr(getattr(self.interface, "localNode", None), "channels", None))
+            except Exception as e:                      # reading only; a library without it keeps the fallback
+                debug(f"LoRa: could not read the configured channels: {e}")
+                self.configured_channels = None
         if isinstance(nodes, dict) and nodes:
             merged_nodes = {}
             for node_id, info in nodes.items():
