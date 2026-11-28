@@ -5243,10 +5243,53 @@ class Survey:
         }
 
 
-class PcapWriter:
-    """A classic pcap file of radiotap frames. Data frames are cut after the header so no payload is kept."""
+_KEEP_WHOLE = (4, 5, 8)            # probe request, probe response, beacon: what lists networks and devices
+_KEEP_REASON = (10, 12)            # disassociation, deauthentication: the header and the two-byte reason code
+_EAPOL_SNAP = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
 
-    HEADER_KEEP = 34
+
+def capture_keep(frame):
+    """The part of one 802.11 frame (without radiotap) that may be written to a capture file, or None to drop it.
+
+    Beacons, probe requests and probe responses are kept whole, as they are what lists networks and devices.
+    Deauthentication and disassociation frames keep their header and reason code. Every other management frame,
+    authentication and association included, keeps its header only, so no authentication body reaches the file.
+    Control frames carry no body and are kept. Data frames keep their header only, and a data frame carrying
+    EAPOL (the key exchange, where the PMKID and handshake live) is dropped entirely. Anything malformed, or of
+    the reserved or extension type, is dropped."""
+    if len(frame) < 10:
+        return None
+    fc0, fc1 = frame[0], frame[1]
+    if fc0 & 3:
+        return None
+    ftype, sub = (fc0 >> 2) & 3, fc0 >> 4
+    if ftype == 1:
+        return bytes(frame)
+    if ftype == 0:
+        if len(frame) < 24:
+            return None
+        if sub in _KEEP_WHOLE:
+            return bytes(frame)
+        if sub in _KEEP_REASON:
+            return bytes(frame[:26])
+        return bytes(frame[:24])
+    if ftype == 2:
+        qos = bool(sub & 8)
+        hdr = 24 + (6 if fc1 & 3 == 3 else 0) + (2 if qos else 0) + (4 if qos and fc1 & 0x80 else 0)
+        if len(frame) < hdr:
+            return None
+        body = frame[hdr:hdr + 8]
+        if not fc1 & 0x40 and (body == _EAPOL_SNAP or (len(body) < 8 and _EAPOL_SNAP.startswith(body) and body)):
+            return None
+        return bytes(frame[:hdr])
+    return None
+
+
+class PcapWriter:
+    """A classic pcap file of radiotap frames, created private to the user (mode 0600). What is kept of each frame
+    is decided by capture_keep: no data payload, no EAPOL frame and no authentication body is ever written."""
+
+    SNAPLEN = 4096
 
     def __init__(self, path, owner=None, dir_fd=None):
         self.fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
@@ -5255,14 +5298,20 @@ class PcapWriter:
                 os.chown(self.fd, owner.pw_uid, owner.pw_gid)
             except OSError:
                 pass
-        os.write(self.fd, struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 262144, 127))
+        os.write(self.fd, struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, self.SNAPLEN, 127))
 
     def write(self, raw, now):
+        """Write what capture_keep allows of one radiotap frame. A frame whose radiotap header cannot be read is
+        not written at all. Returns True if anything was written."""
         fields = radiotap_fields(raw)
-        keep = len(raw)
-        if fields and len(raw) > fields[2] and ((raw[fields[2]] >> 2) & 3) == 2:
-            keep = min(len(raw), fields[2] + self.HEADER_KEEP)
-        os.write(self.fd, struct.pack("<IIII", int(now), int((now % 1) * 1e6), keep, len(raw)) + raw[:keep])
+        if not fields:
+            return False
+        kept = capture_keep(raw[fields[2]:])
+        if kept is None:
+            return False
+        out = (bytes(raw[:fields[2]]) + kept)[:self.SNAPLEN]
+        os.write(self.fd, struct.pack("<IIII", int(now), int((now % 1) * 1e6), len(out), len(raw)) + out)
+        return True
 
     def close(self):
         os.close(self.fd)
@@ -5374,7 +5423,7 @@ def survey_command(args):
     usage = (
         "Usage: aiov2_ctl --wifi-survey [--iface wlan1] [--band 2g|5g|all] [--seconds 3600] [--pcap] [--json]   (passive, needs root)\n"
         "Hops between channels and lists the access points, stations, probe requests, deauthentication floods and\n"
-        "channel use it hears. --pcap also saves a capture (data frames cut after their header) under ~/aiov2-captures.\n"
+        "channel use it hears. --pcap also saves a capture (data frames header only, no EAPOL or authentication bodies) under ~/aiov2-captures.\n"
         "Never transmits; the radio is returned to normal when it stops."
     )
     args = list(args)

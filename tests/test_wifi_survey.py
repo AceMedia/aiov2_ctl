@@ -183,7 +183,83 @@ class FrameTests(unittest.TestCase):
                          [1, 6, 14, 36, 149, None, None, None])
 
 
+class CaptureKeepTests(unittest.TestCase):
+    """What capture_keep lets into a capture file, from hand-built frames."""
+
+    def eapol_qos(self):
+        # QoS data, to the access point, unprotected, LLC/SNAP with ethertype 0x888E, then an EAPOL-Key body
+        snap = b"\xaa\xaa\x03\x00\x00\x00\x88\x8e"
+        return bytes([0x88, 0x01]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" + b"\x00\x00" + snap + b"\x02\x03" + b"\x11" * 95
+
+    def test_a_beacon_is_kept_whole(self):
+        b = beacon()
+        self.assertEqual(a.capture_keep(b), b)
+
+    def test_probes_are_kept_whole(self):
+        req = mgmt(4, BROADCAST, STA, BROADCAST, ie(0, b"HomeNet"))
+        resp = mgmt(5, STA, AP, AP, b"\x00" * 12 + ie(0, b"HomeNet"))
+        self.assertEqual(a.capture_keep(req), req)
+        self.assertEqual(a.capture_keep(resp), resp)
+
+    def test_a_data_frame_comes_back_header_only(self):
+        d = data()
+        self.assertEqual(a.capture_keep(d), d[:24])
+        self.assertNotIn(b"secret", a.capture_keep(d))
+
+    def test_a_four_address_qos_data_frame_keeps_its_longer_header_only(self):
+        d = bytes([0x88, 0x03]) + b"\x00\x00" + AP + STA + AP + b"\x00\x00" + STA + b"\x00\x00" + b"secret" * 10
+        self.assertEqual(a.capture_keep(d), d[:32])
+
+    def test_a_qos_data_frame_carrying_eapol_is_dropped(self):
+        self.assertIsNone(a.capture_keep(self.eapol_qos()))
+
+    def test_a_plain_data_frame_carrying_eapol_is_dropped(self):
+        d = data(payload=b"\xaa\xaa\x03\x00\x00\x00\x88\x8e" + b"\x01\x03" + b"\x22" * 95)
+        self.assertIsNone(a.capture_keep(d))
+
+    def test_an_authentication_frame_comes_back_header_only(self):
+        auth = mgmt(11, AP, STA, AP, b"\x03\x00\x01\x00\x00\x00" + b"\x33" * 100)
+        self.assertEqual(a.capture_keep(auth), auth[:24])
+
+    def test_association_and_action_frames_come_back_header_only(self):
+        for sub in (0, 1, 2, 3, 13):
+            f = mgmt(sub, AP, STA, AP, b"\x31\x04\x0a\x00" + ie(0, b"HomeNet") + ie(48, rsn(2)))
+            self.assertEqual(a.capture_keep(f), f[:24], sub)
+
+    def test_deauthentication_keeps_only_its_reason_code(self):
+        f = mgmt(12, STA, AP, AP, b"\x07\x00" + b"\x44" * 20)
+        self.assertEqual(a.capture_keep(f), f[:26])
+
+    def test_truncated_and_malformed_frames_do_not_raise(self):
+        e = self.eapol_qos()
+        for f in (b"", b"\x08", data()[:20], beacon()[:23], e[:26], e[:28], e[:33], b"\x0c\x00" + b"\x00" * 30,
+                  b"\x81\x00" + b"\x00" * 30):
+            out = a.capture_keep(f)
+            self.assertTrue(out is None or isinstance(out, bytes))
+        self.assertIsNone(a.capture_keep(e[:28]))          # the start of an EAPOL header is not kept either
+        self.assertIsNone(a.capture_keep(b"\x0c\x00" + b"\x00" * 30))   # extension type
+        self.assertIsNone(a.capture_keep(b"\x81\x00" + b"\x00" * 30))   # protocol version not 0
+
+    def test_control_frames_are_kept(self):
+        rts = bytes([0xb4, 0]) + b"\x00\x00" + AP + STA
+        self.assertEqual(a.capture_keep(rts), rts)
+
+
 class PcapTests(unittest.TestCase):
+    def test_eapol_authentication_and_unreadable_frames_never_reach_the_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.pcap")
+            w = a.PcapWriter(path)
+            self.assertFalse(w.write(frame(CaptureKeepTests().eapol_qos()), 1.0))
+            self.assertTrue(w.write(frame(mgmt(11, AP, STA, AP, b"SAEsecret" * 5)), 2.0))
+            self.assertFalse(w.write(b"\x05" + data(), 3.0))          # no readable radiotap header
+            w.close()
+            blob = open(path, "rb").read()
+            self.assertNotIn(b"\x88\x8e", blob)
+            self.assertNotIn(b"SAEsecret", blob)
+            self.assertNotIn(b"secret payload", blob)
+            self.assertEqual(len(blob), 24 + 16 + len(radiotap()) + 24)
+
     def test_data_payload_is_cut_and_the_file_is_private(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "x.pcap")
@@ -194,7 +270,7 @@ class PcapTests(unittest.TestCase):
             w.close()
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             blob = open(path, "rb").read()
-            self.assertEqual(struct.unpack_from("<IHHiIII", blob), (0xA1B2C3D4, 2, 4, 0, 0, 262144, 127))
+            self.assertEqual(struct.unpack_from("<IHHiIII", blob), (0xA1B2C3D4, 2, 4, 0, 0, 4096, 127))
             self.assertNotIn(b"secret payload", blob)
             caplen, origlen = struct.unpack_from("<II", blob, 24 + 8)
             self.assertEqual(origlen, len(raw))

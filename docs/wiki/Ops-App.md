@@ -127,7 +127,7 @@ Passive listening only. Five pages:
 - **Channels.** Networks per channel, with plain advice: the quietest of 1, 6 and 11, and empty 5 GHz channels.
 - **Radios and saved.** The Wi-Fi radios, and saved scans (private, in `~/aiov2-captures`).
 - **Survey.** What the internal radio hears in monitor mode: access points, devices, probing devices, deauthentication bursts (detection only) and how busy each channel is. It can save a capture with data payloads cut off, and a wardriving log exported as a WiGLE CSV. It never transmits and always puts the radio back.
-- **Sense.** Notices movement near the uConsole from how Wi-Fi signals wobble. It is a coarse "is something moving" sensor, not a camera: it cannot see who, what or where.
+- **Sense.** Notices when the Wi-Fi signals near the uConsole vary more than their baseline. Movement near a path is one cause; interference and a transmitter changing power are others. It is a coarse sensor, not a camera: it cannot see who, what or where.
 
 Survey and Sense need the USB rail on and the `listening` feature. See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
 

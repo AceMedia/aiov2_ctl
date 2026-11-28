@@ -72,7 +72,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(reds, sorted(reds))
 
     def test_event_text_and_csv(self):
-        self.assertIn("movement started", s.event_text("movement_start", 0))
+        self.assertIn("signal started varying", s.event_text("movement_start", 0))
         self.assertIn("room learned", s.event_text("learned", 0))
         self.assertEqual(s.csv_line(10.0, "quiet", 1.234, {"b": None, "a": -60.0}), "10.00,quiet,1.23,-60.0,")
 
@@ -180,14 +180,14 @@ class ActivityTests(unittest.TestCase):
         log = s.ActivityLog()
         self.assertEqual(log.text(0.0), "Still learning the room.")
         log.update("quiet", 0.0)
-        self.assertIn("Nothing has moved", log.text(1.0))
+        self.assertIn("No variation above the baseline", log.text(1.0))
         log.update("movement", 10.0)
-        self.assertEqual(log.text(12.0).split(".")[0], "Moving now")
+        self.assertEqual(log.text(12.0).split(".")[0], "Varying now")
         log.update("quiet", 20.0)
         log.update("quiet", 50.0)
         txt = log.text(50.0)
-        self.assertIn("Nothing moving for 30s", txt)
-        self.assertIn("1 stretch of movement, 10s in all", txt)
+        self.assertIn("Steady for 30s", txt)
+        self.assertIn("1 stretch of variation, 10s in all", txt)
 
     def test_old_movement_ages_out(self):
         log = s.ActivityLog()
