@@ -61,6 +61,24 @@ class RowLayoutTests(unittest.TestCase):
         self.assertIsNone(iga.mark_icon("about:blank"))
 
 
+class FieldHeightTests(unittest.TestCase):
+    def test_the_address_field_drops_the_general_minimum_and_padding_in_every_look(self):
+        for mode in ("dark", "light"):
+            sheet = style.stylesheet(mode)
+            rule = "QLineEdit#rowfield { min-height: 0px; padding-top: 0px; padding-bottom: 0px; }"
+            self.assertIn(rule, sheet, mode)
+            self.assertGreater(sheet.index(rule), sheet.rindex("QLineEdit, QComboBox, QAbstractSpinBox {"))
+            self.assertGreater(sheet.index(rule), sheet.rindex("QLineEdit {{ min-height".replace("{{", "{"))
+                               if "QLineEdit { min-height" in sheet else 0)
+
+    def test_the_tab_uses_it_at_the_rows_height(self):
+        import os
+        with open(os.path.join(os.path.dirname(iga.__file__), "iga.py")) as f:
+            text = f.read()
+        self.assertEqual(text.count('setObjectName("rowfield")'), 2)
+        self.assertEqual(iga.ROW_HEIGHT, 28)
+
+
 class IconTests(unittest.TestCase):
     def test_every_icon_is_sixteen_by_sixteen_of_two_characters(self):
         for name in ("back", "forward", "reload", "stop", "new", "menu", "bookmark", "lock", "unlock", "app",

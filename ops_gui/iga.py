@@ -1015,7 +1015,8 @@ def build(win):
         field = AddressField()
         field.setPlaceholderText("Type an address, then Enter")
         field.setAccessibleName("Address of the current page")
-        field.setFixedHeight(ROW_HEIGHT)
+        field.setObjectName("rowfield")         # style.py: no minimum height or padding above and below,
+        field.setFixedHeight(ROW_HEIGHT)        # so it is exactly as high as the row's buttons
         field.hide()
         tabs_box = QWidget()
         tl = QHBoxLayout(tabs_box)
@@ -1242,6 +1243,7 @@ def build(win):
             box = None
             if spec["field"] is not None:
                 box = QLineEdit(spec["field"])
+                box.setObjectName("rowfield")
                 box.setFixedHeight(ROW_HEIGHT)
                 pl.addWidget(box)
             lst = None
