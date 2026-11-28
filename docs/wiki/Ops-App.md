@@ -142,6 +142,7 @@ The Bluetooth Low Energy devices advertising around you, heard passively on the 
 - Phones, watches and earbuds change their address every few minutes, so one device can appear as several rows.
 - It remembers fixed addresses heard on other days, and you can mark addresses as your own. Addresses that change are never stored.
 - **Log with position** keeps a log with where the uConsole was. It needs the GPS rail on and a fix.
+- Item trackers heard at several places: while a scan runs with a GPS fix, the app notes where the uConsole itself was each time an address named as a tracker is heard. If the same address is heard for 30 minutes or more at 3 places at least 100 m apart (the rule Kismet documents), its row's Known column says so, for example "3 places in 47 min", and its tooltip gives the facts. It may belong to someone travelling the same way. It says nothing about where the tracker is or whose it is. Trackers change their address, some every 15 minutes or so, and different addresses are never joined up, so a tracker that changes its address is not noticed and seeing no note means little. These notes are kept in memory only, never on disk, are forgotten after 48 hours without hearing the address, and go with Clear local data. A notification for it can be switched on in Settings; it is off to begin with.
 
 See [Wi-Fi and Bluetooth](Wi-Fi-and-Bluetooth).
 
