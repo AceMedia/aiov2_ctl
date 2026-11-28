@@ -169,7 +169,11 @@ class InstallTests(unittest.TestCase):
         with mock.patch.object(a.os.path, "exists", return_value=False), \
                 mock.patch.object(a.subprocess, "check_call") as run:
             self.assertTrue(a.ensure_system_packages(say=lambda *_: None))
-        run.assert_called_once_with(["apt-get", "install", "-y", "iw"])
+        run.assert_called_once()
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], a.apt_install_argv(["iw"]))
+        self.assertEqual(kwargs["env"]["DEBIAN_FRONTEND"], "noninteractive")
+        self.assertIs(kwargs["stdin"], a.subprocess.DEVNULL)
 
     def test_nothing_to_do_when_present(self):
         with mock.patch.object(a.os.path, "exists", return_value=True), \
