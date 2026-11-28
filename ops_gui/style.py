@@ -194,6 +194,19 @@ def set_feature(hex_colour):
     return hx
 
 
+def readable_text(hex_colour):
+    """Black or white, whichever reads better on `hex_colour` (for selected text on the feature colour)."""
+    try:
+        r, g, b = (int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    except (TypeError, ValueError, IndexError):
+        return "#ffffff"
+
+    def lin(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    lum = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    return "#000000" if (lum + 0.05) / 0.05 > 1.05 / (lum + 0.05) else "#ffffff"
+
+
 def stylesheet(mode, skin=None):
     """The stylesheet for a theme. With `skin` (name -> image path, see skin.py) cards, buttons, fields and tabs
     get the pixel cut corners; without it they fall back to plain rounded boxes."""
@@ -257,6 +270,9 @@ QTabBar::tab:last {{ margin-right: 0px; }}
 QTabBar::scroller {{ width: 72px; }}
 #subtabs QTabBar::tab {{ {pixel_sub} padding: 0px 16px 0px 10px; margin: 4px -6px 0px 0px; }}
 #subtabs QTabBar::tab:selected {{ padding: 3px 16px 1px 10px; margin: 0px -6px -2px 0px; }}
+#igatabs QTabBar::tab {{ {pixel_sub} padding: 0px 14px 0px 10px; margin: 4px -4px 0px 0px; }}
+#igatabs QTabBar::tab:selected {{ padding: 0px 14px 0px 10px; margin: 0px -4px -2px 0px; }}
+#igatabs QTabBar::tab:last {{ margin-right: 0px; }}
 
 #statusbar {{ border: none; background: transparent; }}
 QTableWidget::item {{ border-bottom: 1px dotted {t['border']}; padding: 0px 4px; }}
@@ -287,6 +303,8 @@ QCheckBox::indicator:checked {{ background: {t['accent']}; border-color: {t['acc
 
 QLineEdit, QComboBox, QAbstractSpinBox {{ {field} color: {t['text']}; {field_pad} }}
 QLineEdit#rowfield {{ min-height: 0px; padding-top: 0px; padding-bottom: 0px; }}
+QLineEdit#tabfield, QLineEdit#tabfield:focus {{ border: none; {no_img} background: {t['field']}; min-height: 0px;
+    padding: 0px 4px; selection-background-color: {t['accent']}; selection-color: {readable_text(t['accent'])}; }}
 QComboBox QAbstractItemView {{ background: {t['card']}; color: {t['text']};
                                selection-background-color: {t['accent']}; border: 1px solid {t['border']}; }}
 QPlainTextEdit, QTextBrowser, QTableWidget, QListWidget {{ {field} color: {t['text']};
