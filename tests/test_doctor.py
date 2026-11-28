@@ -252,5 +252,102 @@ class CommandTests(unittest.TestCase):
             self.assertNotIn(word, src)
 
 
+
+IW_PHY_MONITOR = """Wiphy phy0
+	wiphy index: 0
+	max # scan SSIDs: 4
+	Supported interface modes:
+		 * managed
+		 * AP
+		 * P2P-client
+		 * P2P-GO
+		 * monitor
+	Band 1:
+		Capabilities: 0x1ff
+"""
+
+IW_PHY_NO_MONITOR = """Wiphy phy1
+	Supported interface modes:
+		 * IBSS
+		 * managed
+		 * AP
+	software interface modes (can always be added):
+		 * monitor
+	Band 1:
+"""
+
+IW_LINK_CONNECTED = """Connected to aa:bb:cc:dd:ee:ff (on wlan1)
+	SSID: HomeNet
+	freq: 2437
+	RX: 1234 bytes (10 packets)
+	signal: -51 dBm
+"""
+
+
+class WifiMonitorTests(unittest.TestCase):
+    def test_parse_modes(self):
+        self.assertEqual(a.parse_iw_modes(IW_PHY_MONITOR), ["managed", "ap", "p2p-client", "p2p-go", "monitor"])
+        self.assertEqual(a.parse_iw_modes(IW_PHY_NO_MONITOR), ["ibss", "managed", "ap"])   # software list ignored
+        self.assertIsNone(a.parse_iw_modes(""))
+        self.assertIsNone(a.parse_iw_modes(None))
+        self.assertIsNone(a.parse_iw_modes("command failed: No such device (-19)"))
+
+    def test_parse_link(self):
+        self.assertEqual(a.parse_iw_link_freq(IW_LINK_CONNECTED), 2437)
+        self.assertIsNone(a.parse_iw_link_freq("Not connected."))
+        self.assertIsNone(a.parse_iw_link_freq(None))
+        self.assertEqual(a.parse_iw_link_freq("Connected to aa:bb:cc:dd:ee:ff (on wlan1)"), 0)
+
+    def test_card_absent_is_not_an_error(self):
+        out = a.check_wifi_monitor(None, "", "", False, None, None)
+        self.assertEqual([l for l, _ in out], ["info"])
+        self.assertIn("not present", out[0][1])
+
+    def test_no_iw(self):
+        out = a.check_wifi_monitor("wlan1", "mt7921u", "6.12.25", False, None, None)
+        self.assertEqual(out[0][0], "info")
+        self.assertIn("'iw' is not installed", out[0][1])
+
+    def test_monitor_advertised(self):
+        out = a.check_wifi_monitor("wlan1", "mt7921u", "6.12.25-v8+", True, IW_PHY_MONITOR, "Not connected.")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], "ok")
+        for word in ("mt7921u", "6.12.25-v8+", "advertises monitor mode"):
+            self.assertIn(word, out[0][1])
+
+    def test_monitor_not_advertised(self):
+        out = a.check_wifi_monitor("wlan1", "mt7921u", "6.12", True, IW_PHY_NO_MONITOR, "Not connected.")
+        self.assertEqual(out[0][0], "warn")
+
+    def test_unreadable_modes(self):
+        self.assertEqual(a.check_wifi_monitor("wlan1", "", "6.12", True, None, None)[0][0], "info")
+
+    def test_connected_says_listening_follows_the_channel(self):
+        out = a.check_wifi_monitor("wlan1", "mt7921u", "6.12", True, IW_PHY_MONITOR, IW_LINK_CONNECTED)
+        self.assertEqual([l for l, _ in out], ["ok", "info"])
+        self.assertIn("channel 6", out[1][1])
+        self.assertIn("follows that channel", out[1][1])
+
+    def test_gathering_changes_nothing(self):
+        calls = []
+        radios = [{"name": "wlan1", "kind": "internal-usb", "driver": "mt7921u", "up": True}]
+        with mock.patch.object(a, "detect_wifi_radios", return_value=radios), \
+                mock.patch.object(a, "_tool", return_value="/usr/sbin/iw"), \
+                mock.patch.object(a, "read_sysfs", return_value="phy0\n"), \
+                mock.patch.object(a, "_doctor_cmd", side_effect=lambda args, timeout=10: calls.append(args) or
+                                  (IW_PHY_MONITOR if "phy" in args else "Not connected.")), \
+                mock.patch.object(a, "_monitor_cmd") as changer:
+            out = a._doctor_wifi_monitor()
+        self.assertEqual(out[0][0], "ok")
+        self.assertEqual(calls, [["/usr/sbin/iw", "phy", "phy0", "info"], ["/usr/sbin/iw", "dev", "wlan1", "link"]])
+        changer.assert_not_called()
+
+    def test_gathering_with_the_card_off(self):
+        with mock.patch.object(a, "detect_wifi_radios", return_value=[]), \
+                mock.patch.object(a, "_doctor_cmd") as run:
+            out = a._doctor_wifi_monitor()
+        self.assertIn("not present", out[0][1])
+        run.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

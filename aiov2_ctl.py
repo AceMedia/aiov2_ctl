@@ -6157,6 +6157,83 @@ def check_mesh(known, active, rail, spi_node):
                      "start meshtasticd, to use it.")]
 
 
+def parse_iw_modes(text):
+    """The interface modes listed under 'Supported interface modes:' in 'iw phy' output, as a list of lower case
+    names (for example ['managed', 'monitor']), or None when the output has no such list."""
+    modes, inside = None, False
+    for line in (text or "").splitlines():
+        if re.match(r"^\s*Supported interface modes:", line):
+            modes, inside = [], True
+            continue
+        if inside:
+            m = re.match(r"^\s*\*\s*(.+?)\s*$", line)
+            if not m:
+                inside = False
+                continue
+            modes.append(m.group(1).lower())
+    return modes
+
+
+def parse_iw_link_freq(text):
+    """The frequency in MHz from 'iw dev <iface> link' when connected, or None when not connected."""
+    if not text or "Connected to" not in text:
+        return None
+    m = re.search(r"^\s*freq:\s*(\d+)", text, re.M)
+    return int(float(m.group(1))) if m else 0
+
+
+def check_wifi_monitor(iface, driver, kernel, iw_found, phy_text, link_text):
+    """
+    What can be told about listening (monitor mode) on the internal card without changing anything.
+    iface: its interface name, or None when the card is not present (it is on a switchable power rail and is
+    often off). phy_text: 'iw phy <phy> info' output, link_text: 'iw dev <iface> link' output. Advertising
+    monitor mode does not prove it works on this kernel; only a real listen shows that.
+    """
+    if not iface:
+        return [("info", "Wi-Fi listening: the internal card (USB 0e8d:7961) is not present, so there is nothing "
+                         "to check. It is on a switchable power rail and is often off.")]
+    about = f"{iface}, driver {driver or 'unknown'}, kernel {kernel or 'unknown'}"
+    if not iw_found:
+        return [("info", f"Wi-Fi listening: {about}. 'iw' is not installed, so monitor mode support cannot be read. "
+                         "Install it with: sudo apt install iw")]
+    modes = parse_iw_modes(phy_text)
+    out = []
+    if modes is None:
+        out.append(("info", f"Wi-Fi listening: {about}. Could not read the card's supported modes from 'iw phy'."))
+    elif "monitor" in modes:
+        out.append(("ok", f"Wi-Fi listening: {about}. The card advertises monitor mode. That it works on this "
+                          "kernel is only shown by a real listen (Survey or Sense)."))
+    else:
+        out.append(("warn", f"Wi-Fi listening: {about}. The card does not advertise monitor mode, so Survey and "
+                            "Sense cannot listen with it."))
+    freq = parse_iw_link_freq(link_text)
+    if freq is not None:
+        where = f" on channel {freq_to_channel(freq)} ({freq} MHz)" if freq and freq_to_channel(freq) else ""
+        out.append(("info", f"Wi-Fi listening: {iface} is connected to a network{where}. While it is connected the "
+                            "card stays on that network's channel, so listening follows that channel; Survey and "
+                            "Sense ask for it to be disconnected first."))
+    return out
+
+
+def _doctor_wifi_monitor():
+    """Gather check_wifi_monitor's inputs. Reads only: sysfs, 'iw dev', 'iw phy ... info' and 'iw dev ... link'."""
+    iface, driver = None, ""
+    for radio in detect_wifi_radios():
+        if radio["kind"] == "internal-usb":
+            iface, driver = radio["name"], radio["driver"]
+            break
+    if not iface:
+        return check_wifi_monitor(None, "", "", False, None, None)
+    iw = _tool("iw")
+    phy_text = link_text = None
+    if iw:
+        phy = (read_sysfs(os.path.join(SYS_NET, iface, "phy80211", "name")) or "").strip()
+        if re.match(r"^[A-Za-z0-9_.-]{1,32}$", phy):
+            phy_text = _doctor_cmd([iw, "phy", phy, "info"])
+        link_text = _doctor_cmd([iw, "dev", iface, "link"])
+    return check_wifi_monitor(iface, driver, os.uname().release, bool(iw), phy_text, link_text)
+
+
 def doctor_command():
     config = None
     try:
@@ -6211,6 +6288,7 @@ def doctor_command():
     results += check_tray_autostart(autostart_text, tray_up)
     results += check_mesh("meshtasticd.service" in units, state == "active", lora_rail,
                           os.path.exists("/dev/spidev1.0"))
+    results += _doctor_wifi_monitor()
 
     print("aiov2_ctl doctor (read only)")
     print("----------------------------")
