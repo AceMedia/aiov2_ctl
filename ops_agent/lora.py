@@ -535,6 +535,26 @@ class LoRa:
             if len(history) > self.max_track_points:
                 del history[:-self.max_track_points]
 
+    def _remember_position_received(self, node_id, position, packet):
+        """Note when this app received a node's position, apart from when the node was last heard: a node heard a
+        minute ago may still be showing a position it sent hours ago. When the new position carries no time of its
+        own, a time kept from an older position must not go on standing for it, so it is removed."""
+        if node_id is None:
+            return
+        received = packet.get("rxTime") if isinstance(packet, dict) else None
+        try:
+            received = float(received) if received else time.time()
+        except (TypeError, ValueError):
+            received = time.time()
+        with self.lock:
+            entry = self.node_info.get(str(node_id))
+            if not isinstance(entry, dict):
+                return
+            entry["positionReceived"] = received
+            stored = entry.get("position")
+            if isinstance(stored, dict) and not position.get("time"):
+                stored.pop("time", None)
+
     def _remember_link_metrics(self, node_id, packet):
         if node_id is None or not isinstance(packet, dict):
             return
@@ -747,6 +767,7 @@ class LoRa:
             position = decoded.get("position")
             if isinstance(position, dict) and position:
                 self._remember_node_info(from_id, position=position)
+                self._remember_position_received(from_id, position, packet)
                 lat = position.get("latitude")
                 lon = position.get("longitude")
                 alt = position.get("altitude")

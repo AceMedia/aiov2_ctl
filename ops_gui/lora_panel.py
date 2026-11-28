@@ -230,11 +230,37 @@ def distance_text(km):
     return f"{km * 1000:.0f} m" if km < 1 else f"{km:.1f} km"
 
 
+def position_time(info):
+    """When a node's position is from, in seconds since the epoch, or None when nobody knows: the position's own
+    time when it carries one, otherwise when this app received it (the engine's "positionReceived"). Never when the
+    node was last heard: a node heard a minute ago may be sending nothing but a position from hours ago."""
+    info = info if isinstance(info, dict) else {}
+    position = info.get("position") if isinstance(info.get("position"), dict) else {}
+    for value in (position.get("time"), info.get("positionReceived")):
+        value = _number(value)
+        if value and value > 0:
+            return value / 1000.0 if value > 1_000_000_000_000 else value
+    return None
+
+
+def position_age_text(when, now=None):
+    """The age of a position for the radar: "position 2h ago", or "position of unknown age"."""
+    return f"position {age_text(when, now)}" if when else "position of unknown age"
+
+
+def radar_tooltip(points):
+    """One line per node on the radar: name, distance and how old its position is."""
+    return "\n".join(f"{p['name']}: {distance_text(p['km'])}, {p['position_age']}" for p in points or []) \
+        or "No other node has a position."
+
+
 def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
     """Nodes with a position as plot coordinates around `own`, plus the range plotted in km.
 
     x runs east and y runs north, both scaled so the edge of the plot is 1. The range is twice the
     proximity ring or the farthest node, whichever is larger, so the ring is always visible.
+    A dot is stale when its POSITION is older than `stale_after`, or of unknown age, however recently the node
+    was heard (position_time()).
     """
     now = now or time.time()
     found = []
@@ -246,11 +272,13 @@ def radar_points(node_info, self_id, own, radius_km, now=None, stale_after=900):
             if not where:
                 continue
             km = haversine_km(own[0], own[1], where[0], where[1])
-            heard = (info or {}).get("lastHeard")
+            fixed = position_time(info)
             found.append({"id": str(node_id), "name": node_name(info, node_id), "km": km,
                           "bearing": bearing_deg(own[0], own[1], where[0], where[1]),
                           "inside": km <= radius_km,
-                          "stale": bool(heard) and now - heard >= stale_after})
+                          "position_time": fixed,
+                          "position_age": position_age_text(fixed, now),
+                          "stale": fixed is None or now - fixed >= stale_after})
     span = max([radius_km * 2] + [p["km"] * 1.1 for p in found]) or 1.0
     for p in found:
         rad = math.radians(p["bearing"])
@@ -426,7 +454,8 @@ def build_panel(win, Switch):
                 x, y = cx + n["x"] * r, cy - n["y"] * r
                 p.drawEllipse(QPointF(x, y), 5, 5)
                 p.setPen(text)
-                p.drawText(QPointF(x + 8, y + 4), n["name"][:14])
+                p.drawText(QPointF(x + 8, y + 4), f"{n['name'][:14]}  {age_text(n['position_time'])}"
+                           if n.get("position_time") else n["name"][:14])
                 p.setPen(QPen(QColor("#111111"), 1))
             p.setPen(text)
             p.drawText(QPointF(10, self.height() - 8), f"Edge of the plot: {distance_text(self.span)}")
@@ -803,7 +832,9 @@ def build_panel(win, Switch):
             self.alerts = QPlainTextEdit()
             self.alerts.setReadOnly(True)
             self.alerts.setStyleSheet("font-size: 11pt;")
-            self.legend = QLabel("Green: inside the ring.  Amber: outside.  Grey: not heard for 15 minutes.")
+            self.legend = QLabel("Green: inside the ring.  Amber: outside.  Grey: the position is more than "
+                                 "15 minutes old, or of unknown age, even if the node was heard since. Each dot "
+                                 "says how old its position is; rest the pointer on the radar for the list.")
             self.legend.setWordWrap(True)
             self.legend.setStyleSheet("font-size: 11pt; color: #9e9e9e;")
             rl.addWidget(cap)
@@ -822,6 +853,7 @@ def build_panel(win, Switch):
             points, span = radar_points(snap["node_info"], snap.get("self_id"), own, radius)
             self.radar.points, self.radar.span, self.radar.radius = points, span, radius
             self.radar.waiting = own is None
+            self.radar.setToolTip(radar_tooltip(points))
             self.radar.update()
             lines = alert_lines(snap.get("recent_alerts"), engine.stale_nodes(), snap["node_info"])
             self.alerts.setPlainText("\n".join(lines) if lines else "No alerts.")

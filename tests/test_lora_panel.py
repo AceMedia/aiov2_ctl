@@ -76,8 +76,10 @@ if __name__ == "__main__":
 class RadarTests(unittest.TestCase):
     NODES = {
         "1": {"user": {"longName": "Me"}, "position": {"latitude": 51.0, "longitude": 0.0}},
-        "2": {"user": {"longName": "North"}, "position": {"latitude": 51.01, "longitude": 0.0}, "lastHeard": 1000},
-        "3": {"user": {"longName": "East"}, "position": {"latitudeI": 510000000, "longitudeI": 100000}, "lastHeard": 99999},
+        "2": {"user": {"longName": "North"}, "position": {"latitude": 51.01, "longitude": 0.0, "time": 1000},
+              "lastHeard": 1000},
+        "3": {"user": {"longName": "East"}, "position": {"latitudeI": 510000000, "longitudeI": 100000},
+              "positionReceived": 99999, "lastHeard": 99999},
         "4": {"user": {"longName": "NoPos"}},
         "5": {"user": {"longName": "Null"}, "position": {"latitude": 0, "longitude": 0}},
     }
@@ -118,6 +120,44 @@ class RadarTests(unittest.TestCase):
         self.assertGreater(east["x"], 0)
         self.assertGreaterEqual(span, 2.0)                 # at least twice the ring
         self.assertTrue(all(abs(p["x"]) <= 1 and abs(p["y"]) <= 1 for p in pts))
+
+    def test_a_node_heard_a_minute_ago_with_a_two_hour_old_position_is_stale(self):
+        now = 1_000_000
+        nodes = {"1": {"position": {"latitude": 51.0, "longitude": 0.0}},
+                 "2": {"user": {"longName": "Hill"}, "lastHeard": now - 60,
+                       "position": {"latitude": 51.001, "longitude": 0.0, "time": now - 7200}}}
+        (hill,), _ = lp.radar_points(nodes, "1", (51.0, 0.0), 1.0, now=now)
+        self.assertTrue(hill["stale"], "heard lately, but the position is two hours old")
+        self.assertEqual(hill["position_age"], "position 2h ago")
+        self.assertIn("Hill: 111 m, position 2h ago", lp.radar_tooltip([hill]))
+
+    def test_the_time_the_app_received_it_counts_when_the_position_has_none(self):
+        now = 1_000_000
+        nodes = {"2": {"lastHeard": now - 60, "positionReceived": now - 7200,
+                       "position": {"latitude": 51.001, "longitude": 0.0}},
+                 "3": {"lastHeard": now - 7200, "positionReceived": now - 30,
+                       "position": {"latitude": 51.002, "longitude": 0.0}},
+                 "4": {"lastHeard": now - 10, "position": {"latitude": 51.003, "longitude": 0.0}}}
+        pts = {p["id"]: p for p in lp.radar_points(nodes, None, (51.0, 0.0), 1.0, now=now)[0]}
+        self.assertTrue(pts["2"]["stale"])
+        self.assertFalse(pts["3"]["stale"], "a fresh position from a node otherwise quiet is fresh")
+        self.assertTrue(pts["4"]["stale"], "a position of unknown age is not drawn as fresh")
+        self.assertEqual(pts["4"]["position_age"], "position of unknown age")
+        self.assertEqual(lp.position_time({"position": {"time": 1_700_000_000_000}}), 1_700_000_000.0)
+        self.assertIsNone(lp.position_time(None))
+        self.assertEqual(lp.radar_tooltip([]), "No other node has a position.")
+
+    def test_the_engine_records_when_it_received_a_position(self):
+        from ops_agent import lora
+        e = lora.LoRa()
+        e.node_info["!0000beef"] = {"lastHeard": 5, "position": {"latitude": 51.0, "longitude": 0.0, "time": 5}}
+        e._handle_packet({"fromId": "!0000beef", "id": 9, "rxTime": 123456,
+                          "decoded": {"portnum": "POSITION_APP",
+                                      "position": {"latitude": 51.1, "longitude": 0.1}}})
+        info = e.snapshot()["node_info"]["!0000beef"]
+        self.assertEqual(info["positionReceived"], 123456)
+        self.assertNotIn("time", info["position"], "the old position's time must not stand for the new one")
+        self.assertEqual(lp.position_time(info), 123456)
 
     def test_radar_without_own_position(self):
         self.assertEqual(lp.radar_points(self.NODES, "1", None, 1.0)[0], [])
