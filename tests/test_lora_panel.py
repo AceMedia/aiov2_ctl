@@ -268,3 +268,12 @@ class SignalFigureTests(unittest.TestCase):
         row = lp.node_rows(info, now=1000)[0]
         self.assertEqual(row["signal"], "SNR +2.0 dB  RSSI -100 dBm  1m ago")
         self.assertNotIn("km", row["signal"])
+
+
+class ScrollTests(unittest.TestCase):
+    def test_stick_to_bottom(self):
+        self.assertTrue(lp.stick_to_bottom(500, 500))            # at the bottom: follow new messages
+        self.assertTrue(lp.stick_to_bottom(497, 500, slack=4))   # near enough
+        self.assertFalse(lp.stick_to_bottom(200, 500))           # reading older messages: stay put
+        self.assertTrue(lp.stick_to_bottom(0, 0))                # nothing to scroll yet
+        self.assertTrue(lp.stick_to_bottom(None, 10))

@@ -131,6 +131,15 @@ def row_signature(row):
     return (sender, None, row.get("channel", 0), when, row.get("text"))
 
 
+def stick_to_bottom(position, maximum, slack=4):
+    """Whether a refresh should scroll to the newest message: only when the reader was already at the bottom
+    (within `slack` pixels). Someone reading older messages keeps their place."""
+    try:
+        return position >= maximum - slack
+    except TypeError:
+        return True
+
+
 def unread_count(rows, read_mark):
     """Incoming messages after the row last marked as read. Our own messages never count.
 
@@ -706,8 +715,10 @@ def build_panel(win, Switch):
                 tag = " checked in" if r["checkin"] else ""
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '
                                  f'<b style="color:{colour}">{who}</b>{tag}<br>{html.escape(r["text"])}</p>')
+            bar = self.view.verticalScrollBar()
+            follow, keep = stick_to_bottom(bar.value(), bar.maximum()), bar.value()
             self.view.setHtml("".join(html_rows) or "<p style='color:#9a90a6'>Nothing heard on the mesh yet.</p>")
-            self.view.verticalScrollBar().setValue(self.view.verticalScrollBar().maximum())
+            bar.setValue(bar.maximum() if follow else keep)
             incoming = sum(1 for r in self.rows if not r["sent"])
             self.count.setText(f"{len(self.rows)} messages, {incoming} heard" if self.rows else "No messages yet.")
 
