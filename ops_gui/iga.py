@@ -212,6 +212,29 @@ def page_keeps(escape, function_key, ctrl, alt, meta):
     return not (escape or function_key or ctrl or alt or meta)
 
 
+# IGA's own keys. Every one has Ctrl or Alt, so none clashes with the main window's shortcuts (single letters,
+# Shift+letter, the numbers, F1 to F6, F11, Escape and Tab).
+SHORTCUTS = (("Ctrl+L", "address"), ("Ctrl+T", "new"), ("Ctrl+W", "close"), ("Ctrl+Tab", "next"),
+             ("Ctrl+Shift+Tab", "previous"), ("Ctrl+R", "reload"), ("Ctrl+F", "find"), ("Ctrl++", "zoom_in"),
+             ("Ctrl+=", "zoom_in"), ("Ctrl+-", "zoom_out"), ("Ctrl+0", "zoom_reset"), ("Alt+Left", "back"),
+             ("Alt+Right", "forward"))
+
+
+def key_action(key, ctrl=False, shift=False, alt=False):
+    """Which IGA action a key press is, or None. `key` is the key's name: a letter, a digit, '+', '=', '-',
+    'Tab', 'Backtab', 'Left' or 'Right'. Used for a key that reaches the IGA tab without its shortcut firing."""
+    if alt and not ctrl:
+        return {"Left": "back", "Right": "forward"}.get(key)
+    if not ctrl or alt:
+        return None
+    if key == "Backtab" or (key == "Tab" and shift):
+        return "previous"
+    if key == "Tab":
+        return "next"
+    return {"L": "address", "T": "new", "W": "close", "R": "reload", "F": "find", "+": "zoom_in", "=": "zoom_in",
+            "-": "zoom_out", "0": "zoom_reset"}.get(key.upper() if len(key) == 1 else key)
+
+
 def zoom_step(current, direction):
     """The next zoom level up (+1) or down (-1), or 1.0 for 0."""
     if direction == 0:
@@ -579,6 +602,23 @@ def build(win):
         QMessageBox.information(page, "IGA", text)
 
     class Page(QWidget):
+        def keyPressEvent(self, event):
+            """A key with Ctrl or Alt that no child used comes up to here: if it is one of IGA's, do it."""
+            k, mods = int(event.key()), event.modifiers()
+            names = {int(Qt.Key.Key_Tab): "Tab", int(Qt.Key.Key_Backtab): "Backtab", int(Qt.Key.Key_Left): "Left",
+                     int(Qt.Key.Key_Right): "Right", int(Qt.Key.Key_Plus): "+", int(Qt.Key.Key_Equal): "=",
+                     int(Qt.Key.Key_Minus): "-"}
+            name = names.get(k) or (chr(k) if int(Qt.Key.Key_A) <= k <= int(Qt.Key.Key_Z) or
+                                    int(Qt.Key.Key_0) <= k <= int(Qt.Key.Key_9) else "")
+            what = key_action(name, bool(mods & Qt.KeyboardModifier.ControlModifier),
+                              bool(mods & Qt.KeyboardModifier.ShiftModifier),
+                              bool(mods & Qt.KeyboardModifier.AltModifier))
+            if what and what in st["actions"]:
+                st["actions"][what]()
+                event.accept()
+                return
+            super().keyPressEvent(event)
+
         def showEvent(self, event):
             super().showEvent(event)
             if not st["started"]:
@@ -594,7 +634,8 @@ def build(win):
     waiting.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     waiting.setStyleSheet("font-size: 13pt;")
     outer.addWidget(waiting, 1, Qt.AlignmentFlag.AlignTop)
-    st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False}
+    st = {"started": False, "ready": False, "views": {}, "info": {}, "downloads": [], "finding": False,
+          "actions": {}}
     page.escape = lambda: None
     page.recolour = lambda: None
     page.stop = lambda: None
@@ -1041,21 +1082,27 @@ def build(win):
         strip.currentChanged.connect(lambda i: choose(pages.order[i]) if 0 <= i < len(pages.order) else None)
         strip.tabMoved.connect(lambda frm, to: pages.move(pages.order[frm], to))
 
-        def key(seq, slot):
-            QShortcut(QKeySequence(seq), page, activated=slot, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        key("Ctrl+L", lambda: (address.setFocus(), address.selectAll()))
-        key("Ctrl+T", lambda: (open_page(), address.setFocus()))
-        key("Ctrl+W", lambda: close_page())
-        key("Ctrl+Tab", lambda: choose(pages.step(1)))
-        key("Ctrl+Shift+Tab", lambda: choose(pages.step(-1)))
-        key("Ctrl+R", lambda: act("reload"))
-        key("Ctrl+F", open_find)
-        for seq in ("Ctrl++", "Ctrl+="):
-            key(seq, lambda: zoom(1))
-        key("Ctrl+-", lambda: zoom(-1))
-        key("Ctrl+0", lambda: zoom(0))
-        key("Alt+Left", lambda: act("back"))
-        key("Alt+Right", lambda: act("forward"))
+        st["actions"].update({
+            "address": lambda: (address.setFocus(), address.selectAll()),
+            "new": lambda: (open_page(), address.setFocus()),
+            "close": lambda: close_page(),
+            "next": lambda: choose(pages.step(1)),
+            "previous": lambda: choose(pages.step(-1)),
+            "reload": lambda: act("reload"),
+            "find": open_find,
+            "zoom_in": lambda: zoom(1),
+            "zoom_out": lambda: zoom(-1),
+            "zoom_reset": lambda: zoom(0),
+            "back": lambda: act("back"),
+            "forward": lambda: act("forward"),
+        })
+        # Parented to the tab's top widget and live wherever the keyboard is inside it (the address bar, a
+        # button, the strip, or Chromium's own widget inside a view), and nowhere else: not on another tab.
+        for seq, what in SHORTCUTS:
+            sc = QShortcut(QKeySequence(seq), page)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(st["actions"][what])
+            st.setdefault("shortcuts", []).append(sc)
 
         def escape():
             focus = QApplication.focusWidget()

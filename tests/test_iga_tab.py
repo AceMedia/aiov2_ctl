@@ -77,6 +77,33 @@ class WhereTheEngineIsLoadedTests(unittest.TestCase):
         self.assertGreater(at, text.index('if getattr(win, "iga_on", False):'))
 
 
+class KeyTests(unittest.TestCase):
+    def test_every_shortcut_is_an_action_and_the_key_press_fallback_agrees(self):
+        names = {"Tab": "Tab", "Left": "Left", "Right": "Right"}
+        for seq, what in iga.SHORTCUTS:
+            parts = seq.split("+")
+            key = "+" if seq.endswith("++") else parts[-1]
+            ctrl, shift, alt = "Ctrl" in parts, "Shift" in parts, "Alt" in parts
+            self.assertEqual(iga.key_action(names.get(key, key), ctrl, shift, alt), what, seq)
+        self.assertEqual(iga.key_action("t", ctrl=True), "new")
+        self.assertEqual(iga.key_action("Backtab", ctrl=True, shift=True), "previous")
+
+    def test_plain_letters_shift_and_other_keys_are_not_igas(self):
+        for args in (("T",), ("T", False, True), ("Left",), ("L", True, False, True), ("Q", True), ("", True)):
+            self.assertIsNone(iga.key_action(*args), args)
+
+    def test_no_shortcut_clashes_with_the_main_windows(self):
+        app = source("ops_gui", "app.py")
+        for seq, _ in iga.SHORTCUTS:
+            self.assertTrue(seq.startswith(("Ctrl+", "Alt+")), seq)
+            self.assertNotIn(f'QKeySequence("{seq}")', app, seq)
+
+    def test_the_shortcuts_are_parented_to_the_tab_and_scoped_to_it(self):
+        text = source("ops_gui", "iga.py")
+        self.assertIn("QShortcut(QKeySequence(seq), page)", text)
+        self.assertIn("sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)", text)
+
+
 class EngineSettingsTests(unittest.TestCase):
     def test_what_is_switched_off(self):
         asked = dict(iga.ENGINE_SETTINGS)
