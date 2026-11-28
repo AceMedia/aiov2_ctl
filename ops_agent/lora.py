@@ -8,7 +8,7 @@ from datetime import datetime
 
 from . import bootstrap, companions
 from .power import debug, log
-from . import geo, nodeid
+from . import delivery, geo, nodeid
 
 
 def _pubsub():
@@ -101,6 +101,7 @@ class LoRa:
         self.conflict_processes = []
         self._bus = None                    # the bus this is subscribed on, while it is
         self._seen_packets = collections.deque(maxlen=200)
+        self.deliveries = {}                # packet id -> the delivery record of a sent message still awaiting an answer
 
         if not bootstrap.MESHTASTIC_AVAILABLE:
             debug("LoRa: meshtastic library not available")
@@ -117,6 +118,7 @@ class LoRa:
 
     def snapshot(self):
         with self.lock:
+            self._update_deliveries_locked(time.time())
             self_id = self._own_id_locked()
             selected_channel, best_channel, active_channels = self._effective_selected_channel_locked()
             return {
@@ -175,6 +177,7 @@ class LoRa:
                 debug("LoRa: no way to receive packets from this library")
             return False
         bus.subscribe(self._on_receive, "meshtastic.receive")
+        bus.subscribe(self._on_routing, "meshtastic.receive.routing")
         bus.subscribe(self._on_lost, "meshtastic.connection.lost")
         self._bus = bus
         debug("LoRa: subscribed for packets and connection changes")
@@ -183,7 +186,9 @@ class LoRa:
     def _stop_listening(self):
         bus, self._bus = self._bus, None
         if bus is not None:
-            for listener, topic in ((self._on_receive, "meshtastic.receive"), (self._on_lost, "meshtastic.connection.lost")):
+            for listener, topic in ((self._on_receive, "meshtastic.receive"),
+                                    (self._on_routing, "meshtastic.receive.routing"),
+                                    (self._on_lost, "meshtastic.connection.lost")):
                 try:
                     bus.unsubscribe(listener, topic)
                 except Exception as e:
@@ -206,6 +211,34 @@ class LoRa:
             self._handle_packet(packet)
         except Exception as e:
             debug(f"LoRa: packet handler error: {e}")
+
+    def _on_routing(self, packet, interface=None):
+        """A routing packet: the library's answer about a packet this app sent with an acknowledgement asked for.
+        Only answers about this connection's own waiting messages change anything (see ops_agent/delivery.py)."""
+        try:
+            if interface is not None and self.interface is not None and interface is not self.interface:
+                return
+            reply = delivery.routing_reply(packet)
+            if reply is None:
+                return
+            request, reason = reply
+            with self.lock:
+                record = self.deliveries.get(request)
+                if record is None:
+                    return
+                record.update(delivery.after_routing(record, reason))
+                if delivery.can_forget(record, time.time()):
+                    self.deliveries.pop(request, None)
+            debug(f"LoRa: answer for packet {request}: {reason}")
+        except Exception as e:
+            debug(f"LoRa: routing handler error: {e}")
+
+    def _update_deliveries_locked(self, now):
+        """Mark messages that have waited too long as not acknowledged, and stop following old ones."""
+        for key, record in list(self.deliveries.items()):
+            record.update(delivery.after_time(record, now))
+            if delivery.can_forget(record, now):
+                del self.deliveries[key]
 
     def _on_lost(self, interface=None):
         """The library says the connection has gone. Say so, so nothing goes on showing it as connected."""
@@ -1021,8 +1054,13 @@ class LoRa:
             with self.lock:
                 self.node_info.update(merged_nodes)
 
-    def send_message(self, text, channel_index=None):
-        """Send a text message on the selected active channel."""
+    def send_message(self, text, channel_index=None, want_ack=False):
+        """Send a text message on the selected active channel. It is handed to the radio and nothing more is known,
+        unless `want_ack` is True (the "Ask for acknowledgement" setting, off by default): then the library is asked
+        for an acknowledgement, which makes the mesh retry and so the radio sends more, and the message's state
+        follows the answer (ops_agent/delivery.py). With `want_ack` off the call to the library is exactly as before."""
+        want_ack = delivery.want_ack_setting(want_ack)
+        result = None
         with self.lock:
             active = self.active
             interface = self.interface
@@ -1036,14 +1074,18 @@ class LoRa:
             return False
 
         try:
-            interface.sendText(text, channelIndex=selected_channel)
+            if want_ack:
+                result = interface.sendText(text, channelIndex=selected_channel, wantAck=True)
+            else:
+                result = interface.sendText(text, channelIndex=selected_channel)
         except TypeError:
             if selected_channel != 0:
                 self._set_tx_status(False, f"Send failed: channel {selected_channel} unsupported")
                 log(f"LoRa: send API does not support ch{selected_channel}")
                 return False
             try:
-                interface.sendText(text)
+                result = interface.sendText(text)
+                want_ack = False                 # a library this old was not asked for one
             except Exception as e:
                 self._set_tx_status(False, f"Send failed: {str(e)[:40]}")
                 self._append_activity(
@@ -1087,28 +1129,36 @@ class LoRa:
             log(f"LoRa: Send failed - {e}")
             return False
 
+        sent_id = delivery.packet_id(result)
+        record = delivery.new_delivery(sent_id, want_ack, time.time())
         message = {
             "time": datetime.now().strftime("%H:%M:%S"),
             "from": "Me",
             "text": text,
             "channel": selected_channel,
             "sent": True,
+            "packet_id": sent_id,
+            "delivery": record,
         }
         with self.lock:
             self._remember_channel_activity(selected_channel, sent=True)
             self._append_bounded(self.messages, message, self.max_messages)
-            self._append_activity(
-                self._build_activity(
-                    {
-                        "fromId": "Me",
-                        "channel": selected_channel,
-                        "decoded": {"text": text, "portnum": "TEXT_MESSAGE_APP"},
-                    },
-                    sent=True,
-                    text_override=text,
-                )
+            activity = self._build_activity(
+                {
+                    "fromId": "Me",
+                    "id": sent_id,
+                    "channel": selected_channel,
+                    "decoded": {"text": text, "portnum": "TEXT_MESSAGE_APP"},
+                },
+                sent=True,
+                text_override=text,
             )
-        self._set_tx_status(True, f"Sent ch{selected_channel}: {text[:20]}")
+            activity["delivery"] = record           # the same record: an answer shows wherever the message does
+            self._append_activity(activity)
+            if record["state"] == delivery.WAITING:
+                self.deliveries[sent_id] = record
+        self._set_tx_status(True, f"Handed to the radio, ch{selected_channel}: {text[:20]}"
+                                  + (" (asking for an acknowledgement)" if record["state"] == delivery.WAITING else ""))
 
         debug(f"LoRa TX ch{selected_channel}: {text}")
         log(f"LoRa: Sent on ch{selected_channel} '{text[:30]}{'...' if len(text) > 30 else ''}'")

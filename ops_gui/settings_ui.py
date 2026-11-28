@@ -8,6 +8,9 @@ import threading
 from . import dashboard, data, features, notify, reports
 
 REFRESH_CHOICES = (5, 10, 30, 60)
+MESH_ACK_HINT = ("Off unless you switch it on. When on, each message you send asks for an acknowledgement, and the "
+                 "mesh retries a message that is not acknowledged, so the radio sends more. Your messages then show "
+                 "as acknowledged, failed or not acknowledged. When off, a message only shows as handed to the radio.")
 
 
 def build_settings(win, Bridge_signals):
@@ -320,6 +323,9 @@ def build_settings(win, Bridge_signals):
     v.addWidget(texts["mesh"])
     v.addWidget(label("meshtasticd starts when the LoRa rail comes on. To also start it at boot: "
                       "aiov2_ctl --mesh-on-boot (or --mesh-off-boot).", True))
+    v = card("Sending", lay)
+    ack_box = onoff(lambda on: win.set_flag("mesh_want_ack", bool(on)))
+    setting(v, "Ask for acknowledgement", MESH_ACK_HINT, ack_box)
     lay.addStretch(1)
     sub.addTab(scroll, "LoRa")
 
@@ -790,6 +796,7 @@ def build_settings(win, Bridge_signals):
         refresh_notifications()
         home_box.setChecked(win.flag("home_tab") is not False)
         apps_box.setChecked(bool(win.flag("apps_tab") or win.flag("games_tab")))
+        ack_box.setChecked(win.flag("mesh_want_ack") is True)
         idx = REFRESH_CHOICES.index(win.refresh_seconds) if win.refresh_seconds in REFRESH_CHOICES else 0
         combo.blockSignals(True)
         combo.setCurrentIndex(idx)

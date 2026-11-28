@@ -12,7 +12,7 @@ import html
 import math
 import time
 
-from ops_agent import geo, nodeid
+from ops_agent import delivery, geo, nodeid
 
 TICK_MS = 1000
 
@@ -126,8 +126,25 @@ def message_rows(activities, channel=None, limit=CHAT_LIMIT):
                      "text": a.get("summary", ""), "channel": a.get("channel", 0), "sent": bool(a.get("sent")),
                      "checkin": a.get("kind") == "checkin",
                      "snr": a.get("rx_snr"), "from_id": a.get("from_id"),
-                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp")})
+                     "packet_id": a.get("packet_id"), "stamp": a.get("stamp"),
+                     "state": delivery.delivery_text(a.get("delivery") or {"state": delivery.HANDED})
+                     if a.get("sent") else ""})
     return rows[-limit:]
+
+
+def view_signature(rows):
+    """What the Messages view shows, so it is redrawn when a sent message's state changes as well as when a
+    message arrives. row_signature() alone stays the identity used for marking what has been read."""
+    return tuple((row_signature(r), r.get("state")) for r in rows or [])
+
+
+def sent_note(ok, want_ack):
+    """What the Mesh tab says once Send is pressed. Never just "Sent": that would claim more than is known."""
+    if not ok:
+        return "Send failed. See the activity feed."
+    if want_ack:
+        return "Handed to the radio. Waiting for an acknowledgement (see Messages)."
+    return "Handed to the radio. Whether anyone received it is not known."
 
 
 def row_signature(row):
@@ -395,6 +412,8 @@ def activity_line(a):
     if a.get("rx_snr") is not None:
         sig = f"  ({a['rx_snr']:+.1f} dB)"
     arrow = ">" if a.get("sent") else "<"
+    if a.get("sent") and isinstance(a.get("delivery"), dict):
+        sig = f"  [{delivery.delivery_text(a['delivery'])}]"
     return f"{a.get('time', '')}  ch{a.get('channel', 0)}  {arrow} {a.get('from', '?')}: {a.get('summary', '')}{sig}"
 
 
@@ -728,8 +747,9 @@ def build_panel(win, Switch):
             text = self.entry.text().strip()
             if not can_send(self.allow_on, bool(self.lora), text):
                 return
-            ok = self.lora.send_message(text)
-            self.show_note("Sent." if ok else "Send failed. See the activity feed.")
+            want_ack = delivery.want_ack_setting(win.flag("mesh_want_ack") if hasattr(win, "flag") else None)
+            ok = self.lora.send_message(text, want_ack=want_ack)
+            self.show_note(sent_note(ok, want_ack))
             if ok:
                 self.entry.clear()
             self.tick()
@@ -794,7 +814,7 @@ def build_panel(win, Switch):
                 self.channel.setCurrentIndex(max(0, idx))
                 self.channel.blockSignals(False)
             self.rows = message_rows(acts, self.channel.currentData())
-            sig = tuple(row_signature(r) for r in self.rows)
+            sig = view_signature(self.rows)
             if sig == self.last_sig:
                 return
             self.last_sig = sig
@@ -803,6 +823,8 @@ def build_panel(win, Switch):
                 colour = "#3fe0d0" if r["sent"] else "#ff7a45"
                 who = html.escape(r["who"])
                 tag = " checked in" if r["checkin"] else ""
+                if r["state"]:
+                    tag += f' <span style="color:#9a90a6">({html.escape(r["state"])})</span>'
                 html_rows.append(f'<p style="margin:2px 0"><span style="color:#9a90a6">{r["time"]}  ch{r["channel"]}</span> '
                                  f'<b style="color:{colour}">{who}</b>{tag}<br>{html.escape(r["text"])}</p>')
             bar = self.view.verticalScrollBar()
