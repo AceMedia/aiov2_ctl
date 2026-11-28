@@ -31,44 +31,81 @@ If the package is missing or broken, the tab says so and gives the command that 
 sudo apt install python3-pyqt6.qtwebengine
 ```
 
+## The top row
+
+All of IGA's controls sit in one slim row, no taller than the app's buttons:
+
+- **Back**, **Forward** and **Reload** (Stop while a page loads), as small pixel icons;
+- the open pages, each as a tab with the site's own icon (its favicon) and title. With many pages open the other
+  tabs shrink to the favicon alone;
+- the **current page's tab is the address bar**. It shows a padlock for a secure (https) page, an open padlock for
+  one that is not secure (http), or the app's own mark for its start page, then the favicon, then the address
+  with the site's name in bold. Click it, or press Ctrl+L, and it opens into a field across the whole row with the
+  address selected; type, then Enter. Escape, or clicking elsewhere, folds it back;
+- **New page** (+), **Bookmark** and the **menu**.
+
+Every icon has a tooltip saying what it does and its key. A page without a favicon gets a small one in the app's
+style. Favicons come from the site itself, as part of loading the page; IGA never asks another service for them.
+
+The menu, the bookmarks list, naming a bookmark, downloads, find in page and messages such as the six-page limit
+open as a small panel under the row, made of the app's own buttons and boxes. Nothing pops up over the app.
+
 ## Keys
 
 | Key | What it does |
 | --- | --- |
-| Ctrl+L | Go to the address bar |
-| Enter (in the address bar) | Open the address |
+| Ctrl+L | Open the current page's tab into the address field |
+| Enter (in the address field) | Open the address |
 | Ctrl+T | New page |
 | Ctrl+W | Close page |
-| Ctrl+Tab, Ctrl+Shift+Tab | Next or previous page |
+| Ctrl+Tab, Ctrl+Shift+Tab | Next or previous IGA page (from the app's row of tabs they switch the app's tabs, as before) |
 | Ctrl+R | Reload |
 | Ctrl+F | Find in page |
 | Ctrl+plus, Ctrl+minus, Ctrl+0 | Zoom in, out, back to normal |
 | Alt+Left, Alt+Right | Back, Forward |
+| f, F11, the full-screen button | Full screen (see below) |
 | Escape | One step back out (see below) |
 
-While a web page or the address bar has the keyboard, the app's single-letter and number shortcuts do nothing,
+While a web page or the address field has the keyboard, the app's single-letter and number shortcuts do nothing,
 so you can type. Inside a web page Tab moves between the page's links and boxes.
 
-**Getting out of a page: Escape, one step per press.** Escape goes back one step at a time, as it does
-everywhere in the app:
+**Getting out: Escape, one step per press.** In this order, the first that applies:
 
-1. with the find bar open, it closes the find bar;
-2. in a page that is loading, it stops the loading;
-3. otherwise, in a page, it moves the keyboard to the address bar;
-4. from the address bar (or any other IGA control) it moves the keyboard to the app's row of tabs. IGA stays the
-   selected tab; there the letters, numbers and Tab switch tabs again.
+1. an open panel (the menu, find, a download question...) closes;
+2. the address field folds back into the current page's tab;
+3. a page that is loading stops;
+4. in full screen, one full-screen state back;
+5. from a page, the keyboard moves to the current page's tab;
+6. from the current page's tab (or any other IGA control), the keyboard moves to the app's row of tabs. IGA stays
+   the selected tab; there the letters, numbers and Tab switch tabs again.
 
 From the row of tabs, a further Escape is the app's own, as on every tab: it leaves full screen, then goes to the
 first tab. IGA itself never changes which tab is selected.
 
-The other controls (Back, Forward, Reload, Bookmark and the Menu) are reached with the D-pad highlight like the
-buttons on every other tab. The Menu holds New page, Close page, Start page, Bookmarks, Downloads, Find in page,
-Zoom and **Clear data now**.
+## Full screen
+
+On the IGA tab the app's full-screen control (the button at the top right, `f`, or Y on the gamepad) steps through
+three states:
+
+1. **Normal**: as on every tab.
+2. **Browser full screen**: the window fills the screen and the app's own row of tabs and status bar are hidden, so
+   IGA's row and the page fill it.
+3. **Page full screen**: IGA's row is hidden too; only the web page shows.
+
+Pressing the control again from page full screen goes back to normal. **F11** and **Escape** step back one state
+at a time. Rest the pointer on the top edge of the screen and a small strip slides in at the top right, with
+**Back one step** and **Leave full screen** (and, in page full screen, the page's address); it goes when the pointer
+moves away. Ctrl+L in page full screen brings the row back just long enough to type an address.
+
+A page that asks for full screen itself (a video) uses page full screen, and returns to where you were when it is
+done. Choosing another tab of the app brings the app's tabs and status bar back. On every other tab the full-screen
+control works exactly as before.
 
 ## What it looks like
 
 IGA's own controls are the app's ordinary buttons, boxes and tabs, so they follow the app's theme (light, dark or
-the system's), high contrast, the feature colour and the pixel fonts. The pages that belong to the app (the start
+the system's), high contrast, the feature colour and the pixel fonts. The icons are drawn in the
+app's pixel style in the button text colour. The pages that belong to the app (the start
 page, the "that is not an address" page and the page shown when a site cannot be loaded) are drawn in the app's
 colours too and are redrawn when you change the theme.
 
@@ -105,8 +142,11 @@ Everything is in `~/.local/share/aiov2_ctl/iga`, a folder only you can read:
 kept. **Clear everything when the app closes** (Settings > IGA, off by default) does the same each time the app
 closes.
 
-Downloads always ask where to save, starting in `~/Downloads`. The name offered is made safe: no folders, no
-leading dot, and a number added when a file of that name is already there.
+Downloads always ask where to save: a panel asks "Save example.pdf to ~/Downloads?" with **Save**, **Choose
+folder** (a list of your folders, in the app's own list) and **Cancel**. While you choose, the file is written into
+IGA's own private folder (`pending/`) and moved where you said once it has finished; a cancelled download is
+removed. The name is made safe: no folders, no leading dot, and a number added when a file of that name is already
+there.
 
 ## What it sends
 
