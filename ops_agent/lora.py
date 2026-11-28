@@ -114,6 +114,8 @@ def uses_default_key(settings, primary=False, modem_preset=None):
         return None
     psk = getattr(settings, "psk", None)
     if psk is not None:
+        if isinstance(psk, int):                # bytes(n) is n zero bytes, not a key: it cannot be told
+            return None
         try:
             return bytes(psk) == DEFAULT_PSK
         except (TypeError, ValueError):
