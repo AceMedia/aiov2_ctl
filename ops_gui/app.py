@@ -465,6 +465,7 @@ def build_window():
             for key in ("f", "F11"):
                 QShortcut(QKeySequence(key), self, activated=lambda k=key: self.fullscreen_key(k))
             self.tabs.currentChanged.connect(lambda _=0: self.iga_tab_left())
+            self.tabs.currentChanged.connect(lambda _=0: self.iga_arrived())
             QShortcut(QKeySequence("Escape"), self, activated=self.back)
             QShortcut(QKeySequence("Tab"), self, activated=lambda: self.step(1))
             QShortcut(QKeySequence("Shift+Tab"), self, activated=lambda: self.step(-1))
@@ -873,6 +874,13 @@ def build_window():
             elif not view["window_full"] and not keep_window and old > 0 and self.isFullScreen() and \
                     not getattr(self, "iga_was_full", False):
                 self.showMaximized()
+
+        def iga_arrived(self):
+            """The IGA tab has just become the showing tab: the keyboard goes inside it (iga.arrival_focus)."""
+            if self.iga_showing():
+                page = self.pages.get("IGA")
+                if page is not None and hasattr(page, "arrive"):
+                    QTimer.singleShot(0, page.arrive)
 
         def iga_tab_left(self):
             """Another tab was chosen while IGA was in one of its full-screen states: the app's tabs and status bar
@@ -1321,18 +1329,22 @@ def build_window():
                     return True
                 self.last_input = time.monotonic()
             if kind in (QEvent.Type.ShortcutOverride, QEvent.Type.KeyPress) and getattr(self, "iga_on", False) and \
-                    int(event.key()) in (int(Qt.Key.Key_Tab), int(Qt.Key.Key_Backtab)) and \
-                    self.tabs.count() and self.current_name() == "IGA":
-                # Ctrl+Tab and Ctrl+Shift+Tab are IGA's own (its pages) while its tab shows, except from the row of
-                # tabs; the main window's tab switching would otherwise take them (iga.tab_key_owner).
+                    self.iga_showing() and QApplication.activeWindow() is self and \
+                    QApplication.activeModalWidget() is None:
+                # IGA's own keys (Ctrl+L, Ctrl+T, Ctrl+Tab...) are IGA's whenever its tab shows, wherever the
+                # keyboard is in the window: the row of tabs, a corner button, IGA itself (iga.key_owner).
                 from . import iga
                 focus = QApplication.focusWidget()
-                where = "app_tabs" if focus is self.tabs.tabBar() else ("page" if self.in_typing_zone() else "")
+                page = self.pages.get("IGA")
+                where = "app_tabs" if focus is self.tabs.tabBar() else \
+                    ("page" if self.in_typing_zone() else
+                     ("iga" if focus is not None and page is not None and page.isAncestorOf(focus) else "corner"))
                 mods = event.modifiers()
-                owner = iga.tab_key_owner(True, where, "Backtab" if int(event.key()) == int(Qt.Key.Key_Backtab)
-                                          else "Tab", bool(mods & Qt.KeyboardModifier.ControlModifier),
-                                          bool(mods & Qt.KeyboardModifier.ShiftModifier))
-                if owner in ("next", "previous"):
+                owner = iga.key_owner(True, where, iga.key_name(event.key(), Qt.Key),
+                                      bool(mods & Qt.KeyboardModifier.ControlModifier),
+                                      bool(mods & Qt.KeyboardModifier.ShiftModifier),
+                                      bool(mods & Qt.KeyboardModifier.AltModifier))
+                if owner and owner != "page":
                     event.accept()
                     if kind == QEvent.Type.KeyPress:
                         page = self.pages.get("IGA")

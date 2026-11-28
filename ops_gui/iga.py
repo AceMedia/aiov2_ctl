@@ -216,18 +216,46 @@ def escape_step(finding, loading, where, panel=False, editing=False, fullscreen=
     return None
 
 
-def tab_key_owner(iga_showing, where, key, ctrl, shift):
-    """Who a Tab key belongs to while the app runs. `where` is 'app_tabs' (the app's row of tabs has the keyboard),
-    'page' (a web page has it) or anything else. Returns 'next' or 'previous' (IGA's pages: Ctrl+Tab and
-    Ctrl+Shift+Tab whenever the IGA tab is showing, except from the app's row of tabs, where the app's own
-    switching stays), 'page' (a plain Tab inside a web page goes to the page, for its form fields), or None (the
-    app's usual handling)."""
-    if key not in ("Tab", "Backtab") or not iga_showing:
+def key_owner(iga_showing, where, key, ctrl=False, shift=False, alt=False):
+    """Who a key press belongs to while the app runs. `where` is where the keyboard is: 'page' (inside a web page),
+    'address' (IGA's address field), 'iga' (another IGA control), 'app_tabs' (the app's row of tabs), 'corner'
+    (one of the window's corner buttons) or anything else. With the IGA tab showing, IGA's own keys (Ctrl or Alt
+    ones, key_action: Ctrl+L, Ctrl+T, Ctrl+Tab...) are IGA's wherever the keyboard is in the window; a plain Tab
+    inside a web page is the page's ('page'); everything else (plain Tab and the numbers on the row of tabs, say)
+    is the app's (None). On any other tab nothing is IGA's."""
+    if not iga_showing:
         return None
-    backwards = key == "Backtab" or shift
-    if ctrl:
-        return None if where == "app_tabs" else ("previous" if backwards else "next")
-    return "page" if where == "page" else None
+    what = key_action(key, ctrl, shift, alt)
+    if what:
+        return what
+    if key in ("Tab", "Backtab") and not (ctrl or alt) and where == "page":
+        return "page"
+    return None
+
+
+def tab_key_owner(iga_showing, where, key, ctrl, shift):
+    """The Tab keys' part of key_owner: 'next', 'previous', 'page' or None."""
+    if key not in ("Tab", "Backtab"):
+        return None
+    return key_owner(iga_showing, where, key, ctrl, shift)
+
+
+def key_name(code, keys):
+    """The name key_action() uses for a Qt key code, or ''. `keys` is Qt.Key (passed in, so this stays plain)."""
+    names = {int(keys.Key_Tab): "Tab", int(keys.Key_Backtab): "Backtab", int(keys.Key_Left): "Left",
+             int(keys.Key_Right): "Right", int(keys.Key_Plus): "+", int(keys.Key_Equal): "=", int(keys.Key_Minus): "-"}
+    code = int(code)
+    if code in names:
+        return names[code]
+    if int(keys.Key_A) <= code <= int(keys.Key_Z) or int(keys.Key_0) <= code <= int(keys.Key_9):
+        return chr(code)
+    return ""
+
+
+def arrival_focus(own, url):
+    """Where the keyboard goes when the IGA tab is shown or a page is opened: 'field' (the address field, open and
+    ready to type) for the start page or an empty page, otherwise 'page' (the web page)."""
+    return "field" if own == "start" or not url or url == "about:blank" else "page"
 
 
 def page_keeps(escape, function_key, ctrl, alt, meta):
@@ -872,12 +900,8 @@ def build(win):
     class Page(QWidget):
         def keyPressEvent(self, event):
             """A key with Ctrl or Alt that no child used comes up to here: if it is one of IGA's, do it."""
-            k, mods = int(event.key()), event.modifiers()
-            names = {int(Qt.Key.Key_Tab): "Tab", int(Qt.Key.Key_Backtab): "Backtab", int(Qt.Key.Key_Left): "Left",
-                     int(Qt.Key.Key_Right): "Right", int(Qt.Key.Key_Plus): "+", int(Qt.Key.Key_Equal): "=",
-                     int(Qt.Key.Key_Minus): "-"}
-            name = names.get(k) or (chr(k) if int(Qt.Key.Key_A) <= k <= int(Qt.Key.Key_Z) or
-                                    int(Qt.Key.Key_0) <= k <= int(Qt.Key.Key_9) else "")
+            mods = event.modifiers()
+            name = key_name(event.key(), Qt.Key)
             what = key_action(name, bool(mods & Qt.KeyboardModifier.ControlModifier),
                               bool(mods & Qt.KeyboardModifier.ShiftModifier),
                               bool(mods & Qt.KeyboardModifier.AltModifier))
@@ -916,6 +940,7 @@ def build(win):
     page.recolour = lambda: None
     page.stop = lambda: None
     page.set_row_hidden = lambda hidden: None
+    page.arrive = lambda: None
 
     def start():
         try:
@@ -1001,7 +1026,7 @@ def build(win):
         rl.addWidget(icon_button("reload", lambda: act("reload_or_stop")))
         rl.addWidget(tabs_box, 1)
         rl.addWidget(field, 1)
-        rl.addWidget(icon_button("new", lambda: (open_page(), focus_current())))
+        rl.addWidget(icon_button("new", lambda: (open_page(), arrive())))
         rl.addWidget(icon_button("bookmark", lambda: bookmark_this()))
         rl.addWidget(icon_button("menu", lambda: toggle_menu()))
         outer.addWidget(row)
@@ -1262,7 +1287,7 @@ def build(win):
 
             def chosen(bid, *_):
                 close_panel()
-                {"new": lambda: (open_page(), focus_current()), "close_page": lambda: close_page(),
+                {"new": lambda: (open_page(), arrive()), "close_page": lambda: close_page(),
                  "start": lambda: show_own(pages.current, "start"), "bookmarks": manage_bookmarks,
                  "downloads": downloads_list, "find": open_find, "zoom_in": lambda: zoom(1),
                  "zoom_out": lambda: zoom(-1), "zoom_reset": lambda: zoom(0), "clear": clear_now,
@@ -1660,7 +1685,7 @@ def build(win):
         # ---- keys
         st["actions"].update({
             "address": expand,
-            "new": lambda: (open_page(), focus_current()),
+            "new": lambda: (open_page(), arrive()),
             "close": lambda: close_page(),
             "next": lambda: choose(pages.step(1)),
             "previous": lambda: choose(pages.step(-1)),
@@ -1702,6 +1727,17 @@ def build(win):
             elif step_ == "address":
                 focus_current()
 
+        def arrive():
+            """Put the keyboard inside IGA: on the page, or in the open address field for an empty page."""
+            view = current()
+            if view is None:
+                return
+            own = info().get("own")
+            if arrival_focus(own, "" if own else view.url().toString()) == "field":
+                expand()
+            else:
+                view.setFocus()
+
         def set_row_hidden(hidden):
             st["row_hidden"] = bool(hidden)
             if not st["editing"]:
@@ -1724,10 +1760,11 @@ def build(win):
         page.recolour = recolour
         page.stop = stop
         page.set_row_hidden = set_row_hidden
+        page.arrive = arrive
         st["ready"] = True
         open_page()
         set_row_hidden(getattr(win, "iga_fs", 0) == 2)
-        focus_current()
+        arrive()
 
     return page
 

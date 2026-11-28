@@ -148,11 +148,45 @@ class KeyTests(unittest.TestCase):
             self.assertEqual(iga.tab_key_owner(True, where, "Tab", True, True), "previous", where)
             self.assertEqual(iga.tab_key_owner(True, where, "Backtab", True, True), "previous", where)
 
-    def test_the_apps_own_switching_stays_from_the_row_of_tabs_and_on_other_tabs(self):
-        self.assertIsNone(iga.tab_key_owner(True, "app_tabs", "Tab", True, False))
+    def test_the_apps_own_switching_stays_on_other_tabs(self):
+        self.assertEqual(iga.tab_key_owner(True, "app_tabs", "Tab", True, False), "next")
         self.assertIsNone(iga.tab_key_owner(False, "page", "Tab", True, False))
         self.assertIsNone(iga.tab_key_owner(True, "address", "Tab", False, False))
         self.assertIsNone(iga.tab_key_owner(True, "page", "Escape", True, False))
+
+    def test_who_owns_a_key_wherever_the_keyboard_is(self):
+        for where in ("page", "address", "iga", "app_tabs", "corner"):
+            self.assertEqual(iga.key_owner(True, where, "L", ctrl=True), "address", where)
+            self.assertEqual(iga.key_owner(True, where, "T", ctrl=True), "new", where)
+            self.assertEqual(iga.key_owner(True, where, "Tab", ctrl=True), "next", where)
+            self.assertEqual(iga.key_owner(True, where, "Tab", ctrl=True, shift=True), "previous", where)
+            self.assertEqual(iga.key_owner(True, where, "Left", alt=True), "back", where)
+            self.assertIsNone(iga.key_owner(True, where, "1"), where)          # the numbers are the app's
+            self.assertIsNone(iga.key_owner(True, where, "G"), where)          # and so are the letters
+        self.assertEqual(iga.key_owner(True, "page", "Tab"), "page")
+        for where in ("address", "iga", "app_tabs", "corner"):
+            self.assertIsNone(iga.key_owner(True, where, "Tab"), where)        # plain Tab: the app's
+            self.assertIsNone(iga.key_owner(True, where, "Backtab", shift=True), where)
+
+    def test_on_another_app_tab_nothing_is_igas(self):
+        for where in ("page", "app_tabs", "corner", ""):
+            for args in (("L", True), ("T", True), ("Tab", True), ("Tab", False)):
+                self.assertIsNone(iga.key_owner(False, where, *args), (where, args))
+
+    def test_key_names(self):
+        class Key:
+            Key_Tab, Key_Backtab, Key_Left, Key_Right = 1, 2, 3, 4
+            Key_Plus, Key_Equal, Key_Minus = 43, 61, 45
+            Key_A, Key_Z, Key_0, Key_9 = 65, 90, 48, 57
+        self.assertEqual([iga.key_name(c, Key) for c in (1, 2, 3, 43, 76, 48, 999)],
+                         ["Tab", "Backtab", "Left", "+", "L", "0", ""])
+
+    def test_where_the_keyboard_goes_on_arrival(self):
+        self.assertEqual(iga.arrival_focus("start", ""), "field")
+        self.assertEqual(iga.arrival_focus(None, "about:blank"), "field")
+        self.assertEqual(iga.arrival_focus(None, ""), "field")
+        self.assertEqual(iga.arrival_focus(None, "https://a.org/"), "page")
+        self.assertEqual(iga.arrival_focus("notice", "https://a.org/"), "page")
 
     def test_a_plain_tab_in_a_web_page_is_the_pages(self):
         self.assertEqual(iga.tab_key_owner(True, "page", "Tab", False, False), "page")
