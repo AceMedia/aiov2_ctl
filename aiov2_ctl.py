@@ -7038,6 +7038,9 @@ FEATURES = (
      "summary": "The wiki's pictures, downloaded once (about 3 MB), and the package that lets the app show them.",
      "required": False, "default": False, "apt": ("qt6-image-formats-plugins",), "hardware": None,
      "needs": ("wiki",)},
+    {"key": "ghost", "title": "Ghost hunt (for fun)",
+     "summary": "A tab of playful meters for entertainment, built from the app's real radio readings; it cannot detect anything.",
+     "required": False, "default": False, "apt": (), "hardware": None, "needs": ("app",)},
     {"key": "gps", "title": "GPS",
      "summary": "gpsd, which reads the GPS receiver for the app and the console.",
      "required": False, "default": True, "apt": ("gpsd",), "hardware": "aio_board", "needs": ("core",)},
@@ -7453,6 +7456,8 @@ def install_state(environ=None, euid=None, run=_run_text):
             present.add("wiki-on")
         if pictures and not wiki_pictures_missing(pictures, wiki_home(who.pw_dir)):
             present.add("wiki-pictures")
+        if os.path.isfile(os.path.join(ghost_home(who.pw_dir), "enabled")):
+            present.add("ghost-on")
     # The rules file can only be read by root; anyone else asks sudo what they may run, which needs no password
     # once the rules are there.
     listening = None
@@ -7490,6 +7495,7 @@ FEATURE_MARKERS = {
     "console": ("app-files", "console-shortcut"),
     "wiki": ("wiki-on",),
     "wikipics": ("wiki-pictures",),
+    "ghost": ("ghost-on",),
     "sdr": ("sdr-recovery",),
     "listening": ("sudoers-listening",),
     "flipper": ("udev",),
@@ -7578,6 +7584,26 @@ def repo_slug(url):
     """'OWNER/NAME' from a GitHub address, however it is spelled, or None."""
     m = re.search(r"github\.com[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?\s*$", url or "")
     return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def ghost_home(home):
+    """Where a user's Ghost hunt switch and saved sessions are kept: only on the device, only for that user."""
+    return os.path.join(home, ".local", "share", "aiov2_ctl", "ghost")
+
+
+def _ghost_steps(key, state):
+    """The one step for the Ghost hunt tab: an empty switch file, written as the user. Nothing is installed."""
+    user, home = state.get("user"), state.get("home")
+    if not user or not home:
+        return [_step(key, "no-user", "note", NO_USER_MESSAGE.replace("the ops app", "the Ghost hunt tab"), False,
+                      "", blocks=True)]
+    folder = ghost_home(home)
+    return [_step(key, "on", "ghost-on",
+                  f"Switch on the Ghost hunt tab in the ops app for {user}: an empty file, {folder}/enabled. It is "
+                  f"for fun only: playful meters built from readings the app already has. It installs no "
+                  f"packages, switches no rail and starts no scan. Sessions you record are kept in {folder}, "
+                  f"readable only by you, and are never sent anywhere.",
+                  False, f"Remove {folder}/enabled", path=folder)]
 
 
 def wiki_pictures_url(remote=None):
@@ -7805,6 +7831,8 @@ def install_plan(selected_keys, facts, state):
                                   "never runs pip as root.", False, ""))
         elif key in ("wiki", "wikipics"):
             plan += _wiki_steps(key, state)
+        elif key == "ghost":
+            plan += _ghost_steps(key, state)
         elif key == "sdr":
             plan.append(_step(key, "recovery", "systemd",
                               f"Write the readsb recovery ({SDR_RECOVERY_DROPIN_PATH}) and the once-a-minute "
@@ -8362,6 +8390,19 @@ def _act_wiki_on(step, ctx, run=_run_text):
     return "done", "restart the ops app to see the Wiki tab"
 
 
+def _act_ghost_on(step, ctx, run=_run_text):
+    user = ctx.get("user")
+    if not user:
+        return "failed", NO_USER_MESSAGE
+    if os.path.isfile(os.path.join(step["path"], "enabled")):
+        return "already", ""
+    rc, _, err = run(as_user(user, ["sh", "-c", 'mkdir -p "$1" && chmod 700 "$1" && : > "$1/enabled"', "sh",
+                                    step["path"]]), cwd="/", timeout=30)
+    if rc != 0:
+        return "failed", (err.strip().splitlines() or ["the switch could not be written"])[-1]
+    return "done", "restart the ops app to see the Ghost hunt tab"
+
+
 def _act_wiki_pictures(step, ctx, run=_run_text):
     user = ctx.get("user")
     if not user:
@@ -8443,6 +8484,7 @@ INSTALL_ACTIONS_BY_KIND = {
     "old-folder": _act_old_folder,
     "launchers": _act_launchers,
     "wiki-on": _act_wiki_on,
+    "ghost-on": _act_ghost_on,
     "wiki-pictures": _act_wiki_pictures,
     "note": _act_note,
 }
@@ -8603,6 +8645,7 @@ MARKER_WORDS = {
     "gui-shortcut": "the uConsole Ops shortcut",
     "console-shortcut": "the uConsole Ops Console shortcut",
     "wiki-on": "the Wiki tab's switch",
+    "ghost-on": "the Ghost hunt tab's switch",
     "wiki-pictures": "the wiki's pictures",
     "sdr-recovery": "the readsb recovery",
     "sudoers-listening": "the rules for listening without a password",
@@ -9143,6 +9186,15 @@ def uninstall_plan(selected, state):
                 plan.append(_unstep(key, "pictures", "wiki-pictures-gone",
                                     f"Remove the downloaded wiki pictures in {gone}, as {user}. The package "
                                     f"that shows them stays installed.", False, path=gone))
+        elif key == "ghost":
+            if not home:
+                plan.append(_unstep(key, "no-user", "note",
+                                    NO_USER_MESSAGE.replace("the ops app", "the Ghost hunt tab"), False, blocks=True))
+            else:
+                plan.append(_unstep(key, "off", "user-file",
+                                    f"Switch off the Ghost hunt tab in the ops app, as {user}. Any sessions you "
+                                    f"recorded stay in {ghost_home(home)} until you delete them.", False,
+                                    paths=(os.path.join(ghost_home(home), "enabled"),)))
         elif key == "flipper":
             plan.append(_unstep(key, "udev", "udev",
                                 f"Remove {COMPANION_UDEV_PATH}. After that only root can open a Flipper or ESP32 "

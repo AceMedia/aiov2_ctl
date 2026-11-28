@@ -14,6 +14,7 @@
 - [Ops Console](Ops-Console)
 - [Power & Telemetry](Power-&-Telemetry)
 - [Applications](Applications)
+- [Ghost Hunt (for fun)](Ghost-Hunt)
 
 **Radios and companions**
 
