@@ -192,15 +192,25 @@ def page_label(title, url, most=18):
     return words if len(words) <= most else words[:most - 1].rstrip() + "…"
 
 
-def escape_step(finding, loading, where):
+def escape_step(finding, loading, where, panel=False, editing=False, fullscreen=0):
     """What one Escape does on the IGA tab. `where` is 'page' (a web page has the keyboard), 'address' (the address
-    bar or any other IGA control has it) or anything else (the row of tabs, say). Returns 'find' (close the find
-    bar), 'stop' (stop loading), 'address' (out of the page to the address bar), 'tabs' (to the app's row of tabs,
-    IGA still selected), or None: Escape is then the app's own next step (focusnav.back_step), as on any tab."""
+    field or any other IGA control has it) or anything else (the row of tabs, say). In order: 'panel' (close the
+    open panel), 'collapse' (fold the address field back into the current page's tab), 'find' (close find),
+    'stop' (stop loading), 'fullscreen' (one full-screen state back), 'address' (out of the page to the address
+    field), 'tabs' (to the app's row of tabs, IGA still selected), or None: Escape is then the app's own next step
+    (focusnav.back_step), as on any tab."""
+    if panel:
+        return "panel"
+    if editing:
+        return "collapse"
     if finding:
         return "find"
+    if where == "page" and loading:
+        return "stop"
+    if fullscreen:
+        return "fullscreen"
     if where == "page":
-        return "stop" if loading else "address"
+        return "address"
     if where == "address":
         return "tabs"
     return None
@@ -481,7 +491,7 @@ def page_colours(tokens):
 def _page(title, body, colours):
     c = page_colours(colours)
     return ("<!doctype html><html><head><meta charset='utf-8'>"
-            "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'\">"
+            "<meta http-equiv='Content-Security-Policy' content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\">"
             f"<title>{html.escape(title)}</title><style>"
             f"body{{background:{c['bg']};color:{c['text']};font-family:'Spleen 8x16',monospace;font-size:16px;"
             f"margin:24px;}}h1{{font-size:20px;color:{c['text']};border-bottom:2px solid {c['accent']};"
@@ -491,21 +501,25 @@ def _page(title, body, colours):
             f"font-size:13px;}}</style></head><body>{body}</body></html>")
 
 
-def start_page(bookmarks, colours):
-    """The start page: the bookmarks as links and a line about IGA. Every word in it is escaped."""
+def start_page(bookmarks, colours, icons=None):
+    """The start page: the bookmarks as links, each with its site's favicon where one was seen this session
+    (`icons`: host to a PNG data: address), and a line about IGA. Every word in it is escaped."""
+    icons = icons if isinstance(icons, dict) else {}
     rows = []
     for b in bookmarks or ():
         url = b.get("url") if isinstance(b, dict) else None
         if not _web(url):
             continue
         title = b.get("title") or url
-        rows.append(f"<li><a href=\"{html.escape(url, quote=True)}\">{html.escape(title)}</a><br>"
+        icon = icons.get(site_key(url))
+        img = f"<img src=\"{icon}\" width='16' height='16' alt=''> " if favicon_ok(icon) else ""
+        rows.append(f"<li>{img}<a href=\"{html.escape(url, quote=True)}\">{html.escape(title)}</a><br>"
                     f"<span class='addr'>{html.escape(url)}</span></li>")
     marks = f"<ul>{''.join(rows)}</ul>" if rows else \
         "<p class='muted'>No bookmarks yet. Open a page and press Bookmark to keep it here.</p>"
     body = (f"<h1>IGA</h1>{marks}<p class='muted'>IGA is part of the uConsole Ops app. It loads only what you ask "
-            f"for. Ctrl+L goes to the address bar. Escape from a page goes to the address bar, and from the address bar to "
-            f"the app's row of tabs.</p>")
+            f"for. Click the current page's tab, or press Ctrl+L, to type an address. Escape goes back one step at a "
+            f"time: from a page to the address, from the address to the app's row of tabs.</p>")
     return _page("Start", body, colours)
 
 
@@ -525,6 +539,243 @@ def load_error_text(code_name):
             "certificate": "The site's certificate could not be trusted, so IGA did not open it.",
             }.get(code_name, "The page could not be loaded. Check the address, or whether this device is online.")
 
+
+
+# ---- the slim top row: buttons, the pages, and the current page's tab, which is the address bar
+ROW_HEIGHT = 28                 # the app's ordinary button height (style: min-height 28px)
+BUTTON_WIDTH = 30
+ROW_GAP = 2
+ROW_BUTTONS = ("back", "forward", "reload", "new", "bookmark", "menu")
+ICON_TAB = 34                   # a page shown by its favicon only
+TITLE_TAB_MIN, TITLE_TAB_MAX = 140, 220
+ADDRESS_MIN = 420               # the current page's tab always keeps this much for its address
+CHAR_WIDTH = 8                  # Spleen 8x16, the app's pixel font
+
+
+def row_layout(width, count, current):
+    """How the row shares `width` pixels among `count` pages, `current` being the index of the current one.
+    Returns [{'mode': 'address' | 'title' | 'icon', 'width': pixels}] in page order. The buttons take their
+    fixed room first; the other pages show favicon and title while each can have TITLE_TAB_MIN, otherwise favicon
+    only; the current page takes the rest, and never less than ADDRESS_MIN while the row is wide enough."""
+    count = max(1, int(count))
+    current = min(max(0, int(current)), count - 1)
+    room = max(0, int(width) - len(ROW_BUTTONS) * (BUTTON_WIDTH + ROW_GAP) - count * ROW_GAP)
+    others = count - 1
+    if others and (room - ADDRESS_MIN) // others >= TITLE_TAB_MIN:
+        mode, each = "title", min(TITLE_TAB_MAX, (room - ADDRESS_MIN) // others)
+    else:
+        mode, each = "icon", ICON_TAB
+    rest = max(room - others * each, min(room, ADDRESS_MIN) if others == 0 else 0)
+    return [{"mode": "address", "width": rest} if i == current else {"mode": mode, "width": each}
+            for i in range(count)]
+
+
+def chars_for(width, icons=1):
+    """How many characters of text fit on a tab `width` pixels wide with `icons` 16 pixel icons on it."""
+    return max(0, (int(width) - 12 - icons * 20) // CHAR_WIDTH)
+
+
+def address_html(url, most=60):
+    """The current page's address for its tab, host in bold, cut to `most` characters, every part escaped."""
+    url = url or ""
+    if not _web(url):
+        return html.escape(url[:most])
+    parts = urlsplit(url)
+    scheme, host = parts.scheme + "://", parts.netloc
+    rest = url[len(scheme) + len(host):]
+    shown_scheme = "" if parts.scheme == "https" else scheme          # https is the usual: the padlock says it
+    text = shown_scheme + host + rest
+    if len(text) > most:
+        keep = max(0, most - 1 - len(shown_scheme) - len(host))
+        rest = rest[:keep] + "…" if keep else ""
+        if len(shown_scheme) + len(host) > most:
+            host = host[:max(1, most - 1 - len(shown_scheme))] + "…"
+    return f"{html.escape(shown_scheme)}<b>{html.escape(host)}</b>{html.escape(rest)}"
+
+
+def mark_icon(url, own=False):
+    """Which small icon sits at the left of the current page's tab: 'lock', 'unlock', 'app' or None. Its words
+    (security_mark) are the tooltip and the accessible name."""
+    if own:
+        return "app"
+    word = security_mark(url)
+    return {"secure connection": "lock", "not secure": "unlock", "this app's own page": "app"}.get(word)
+
+
+# ---- the app's pixel icons for IGA's buttons, 16 by 16, '#' drawn in the button text colour
+def _art(rows):
+    rows = [r.ljust(16, ".")[:16] for r in rows]
+    return rows + ["." * 16] * (16 - len(rows))
+
+
+_BACK = _art(["", "", "", "......#", ".....##", "....###", "...###########", "..############", "...###########",
+              "....###", ".....##", "......#"])
+ICONS = {
+    "back": _BACK,
+    "forward": [r[::-1] for r in _BACK],
+    "reload": _art(["", "......#####", "....##.....#.#", "...#........##", "...#.......###", "..#", "..#", "..#",
+                    "..#", "...#........#", "...#........#", "....##.....#", "......#####"]),
+    "stop": _art(["", "..##........##", "...##......##", "....##....##", ".....##..##", "......####",
+                  ".......##", "......####", ".....##..##", "....##....##", "...##......##", "..##........##"]),
+    "new": _art(["", "", ".......##", ".......##", ".......##", ".......##", "..############", "..############",
+                 ".......##", ".......##", ".......##", ".......##"]),
+    "menu": _art(["", "", "", "..############", "..############", "", "", "..############", "..############", "",
+                  "", "..############", "..############"]),
+    "bookmark": _art(["", "....########", "....#......#", "....#......#", "....#......#", "....#......#",
+                      "....#......#", "....#......#", "....#..##..#", "....#.#..#.#", "....##....##", "....#......#"]),
+    "lock": _art(["", ".....######", "....#......#", "....#......#", "....#......#", "..############",
+                  "..############", "..#####..#####", "..#####..#####", "..############", "..############"]),
+    "unlock": _art(["", ".........######", "........#......#", "........#......#", "........#", "..############",
+                    "..############", "..#####..#####", "..#####..#####", "..############", "..############"]),
+    "app": _art(["", "################", "#.#.#.##########", "################", "#..............#",
+                 "#......##......#", "#.....#..#.....#", "#....#....#....#", "#....#....#....#", "#.....#..#.....#",
+                 "#......##......#", "#..............#", "################"]),
+    "page": _art(["", ".....######", "...##......##", "..#..........#", ".#............#", ".#............#",
+                  "################", ".#............#", ".#............#", "..#..........#", "...##......##",
+                  ".....######"]),
+}
+ICON_WORDS = {"back": "Back (Alt+Left)", "forward": "Forward (Alt+Right)", "reload": "Reload (Ctrl+R)",
+              "stop": "Stop loading (Escape)", "new": "New page (Ctrl+T)", "bookmark": "Bookmark this page",
+              "menu": "IGA menu: pages, bookmarks, downloads, find, zoom, clear data"}
+
+
+# ---- panels: IGA's own, non-modal, dropping under the row in place of stock dialogs and menus
+MENU_ITEMS = (("new", "New page  Ctrl+T"), ("close_page", "Close page  Ctrl+W"), ("start", "Start page"),
+              ("bookmarks", "Bookmarks"), ("downloads", "Downloads"), ("find", "Find in page  Ctrl+F"),
+              ("zoom_in", "Zoom in  Ctrl++"), ("zoom_out", "Zoom out  Ctrl+-"), ("zoom_reset", "Zoom reset  Ctrl+0"),
+              ("clear", "Clear data now"), ("close", "Close menu"))
+
+
+def panel_spec(kind, **kw):
+    """What a panel shows: {'kind', 'text', 'field' (text or None), 'list' (lines or None), 'buttons' [(id,
+    words)]}. Its words are plain text, never markup."""
+    def spec(text, buttons, field=None, items=None):
+        return {"kind": kind, "text": text, "field": field, "list": items, "buttons": list(buttons)}
+    if kind == "message":
+        return spec(kw.get("text", ""), [("ok", "OK")])
+    if kind == "menu":
+        return spec("", MENU_ITEMS)
+    if kind == "bookmark":
+        return spec("Name for this bookmark:", [("save", "Save"), ("cancel", "Cancel")], field=kw.get("title", ""))
+    if kind == "rename":
+        return spec("New name:", [("save", "Save"), ("cancel", "Cancel")], field=kw.get("title", ""))
+    if kind == "bookmarks":
+        items = [f"{b['title']}  ({b['url']})" for b in kw.get("bookmarks", ())]
+        if not items:
+            return spec("No bookmarks yet. Open a page and press Bookmark to keep it.", [("ok", "OK")])
+        return spec("Bookmarks:", [("open", "Open"), ("rename", "Rename"), ("remove", "Remove"),
+                                   ("close", "Close")], items=items)
+    if kind == "remove":
+        return spec(f"Remove the bookmark '{kw.get('title', '')}'?", [("remove", "Remove"), ("cancel", "Cancel")])
+    if kind == "clear":
+        return spec("Clear IGA's cookies, site storage, cache and history now? You will be signed out of sites. "
+                    "Bookmarks are kept.", [("clear", "Clear"), ("cancel", "Cancel")])
+    if kind == "downloads":
+        lines = list(kw.get("lines", ()))
+        return spec("Downloads:" if lines else "Nothing downloaded since the app started.", [("close", "Close")],
+                    items=lines or None)
+    if kind == "download":
+        return spec(f"Save {kw.get('name', 'the file')} to {kw.get('folder', 'Downloads')}?",
+                    [("save", "Save"), ("choose", "Choose folder"), ("cancel", "Cancel")])
+    if kind == "folders":
+        return spec(f"Save {kw.get('name', 'the file')} in {kw.get('folder', '')}:",
+                    [("open", "Open folder"), ("here", "Save here"), ("cancel", "Cancel")],
+                    items=[label for label, _ in kw.get("entries", ())])
+    if kind == "find":
+        return spec("Find in page:", [("next", "Next"), ("previous", "Previous"), ("close", "Close")],
+                    field=kw.get("text", ""))
+    raise ValueError(kind)
+
+
+def folder_entries(path, names, isdir):
+    """The rows of the folder chooser: up one level (unless at /), then the folders in `path` that are not hidden,
+    by name. [(words, path)]."""
+    out = []
+    parent = os.path.dirname(path.rstrip("/")) or "/"
+    if path.rstrip("/"):
+        out.append((".. (up one folder)", parent))
+    for name in sorted((n for n in names if not n.startswith(".")), key=str.lower):
+        full = os.path.join(path, name)
+        if isdir(full):
+            out.append((name + "/", full))
+    return out
+
+
+def pending_folder(home=None):
+    """Where a download is written while you choose where it goes: in IGA's own private folder."""
+    return os.path.join(user_folder(home), "pending")
+
+
+def download_next(state, target, moved):
+    """What to do with a download now: 'move' (finished and you chose where: move it there), 'delete' (it was
+    cancelled or failed: remove what was written), 'wait' (still going, or still waiting for your choice), or None
+    (nothing more)."""
+    if moved:
+        return None
+    if state in ("cancelled", "failed"):
+        return "delete"
+    if state == "done" and target:
+        return "move"
+    return "wait"
+
+
+# ---- full screen in three states while the IGA tab shows
+# 0 normal; 1 browser full screen (window full screen, the app's tabs and status bar hidden); 2 page full screen
+# (IGA's row hidden too).
+def next_fullscreen(state, action, before=0):
+    """The next state. 'toggle' (the full-screen button, f, the gamepad's Y): 0 to 1 to 2 and back to 0. 'back'
+    (F11 in state 1 or 2, or Escape): one state back. 'leave': straight to 0. 'page_on' (a page asked for full
+    screen, a video say): 2. 'page_off': back to `before`, the state it was in when the page asked."""
+    state = state if state in (0, 1, 2) else 0
+    if action == "toggle":
+        return (state + 1) % 3
+    if action == "back":
+        return max(0, state - 1)
+    if action == "leave":
+        return 0
+    if action == "page_on":
+        return 2
+    if action == "page_off":
+        return before if before in (0, 1) else 0
+    return state
+
+
+def fullscreen_view(state):
+    """What shows in a state: {'window_full', 'app_bars' (the app's row of tabs, its corner buttons and the
+    status bar), 'iga_row'}."""
+    return {"window_full": state > 0, "app_bars": state == 0, "iga_row": state < 2}
+
+
+def f11_action(state):
+    """F11 on the IGA tab: back one state when in full screen, otherwise the same as the full-screen button."""
+    return "back" if state > 0 else "toggle"
+
+
+def top_peek_step(shown, count, y, inside=True, edge=2, rest=2, leave=60):
+    """In states 1 and 2, resting the pointer on the top edge brings the small strip into view at the top right;
+    moving away from it takes it away. Returns (shown, count, 'show' | 'hide' | None). `count` counts the ticks
+    the pointer has rested on the edge."""
+    if not shown:
+        if inside and y <= edge:
+            count += 1
+            if count >= rest:
+                return True, 0, "show"
+            return False, count, None
+        return False, 0, None
+    if not inside or y > leave:
+        return False, 0, "hide"
+    return True, 0, None
+
+
+def favicon_ok(uri):
+    """True for a favicon kept for the start page: a PNG as a data: address, nothing else, not too big."""
+    return isinstance(uri, str) and len(uri) < 20000 and re.fullmatch(r"data:image/png;base64,[A-Za-z0-9+/=]+", uri)\
+        is not None
+
+
+def site_key(url):
+    """The host a favicon is remembered by."""
+    return (urlsplit(url).hostname or "").lower() if _web(url) else ""
 
 
 # ---- the engine: loaded only when the tab is first shown
