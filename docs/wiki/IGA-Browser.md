@@ -33,16 +33,19 @@ sudo apt install python3-pyqt6.qtwebengine
 
 ## The top row
 
-All of IGA's controls sit in one slim row, no taller than the app's buttons:
+All of IGA's controls sit in one slim row, 28 pixels high. The pages are the app's own folder tabs, drawn like the
+sub-tabs in Settings: the open page in the panel colour with the feature colour's stripe along its top, joined to
+the page below; the others a little lower, tucked under it:
 
-- **Back**, **Forward** and **Reload** (Stop while a page loads), as small pixel icons;
+- **Back**, **Forward** and **Reload** (Stop while a page loads), as small pixel icons at the left;
 - the open pages, each as a tab with the site's own icon (its favicon) and title. With many pages open the other
   tabs shrink to the favicon alone;
 - the **current page's tab is the address bar**. It shows a padlock for a secure (https) page, an open padlock for
   one that is not secure (http), or the app's own mark for its start page, then the favicon, then the address
-  with the site's name in bold. Click it, or press Ctrl+L, and it opens into a field across the whole row with the
-  address selected; type, then Enter. Escape, or clicking elsewhere, folds it back;
-- **New page** (+), **Bookmark** and the **menu**.
+  with the site's name in the text colour and the rest of the address fainter. Hover over the padlock to see what it
+  means. Click the tab, or press Ctrl+L (or Enter when the tabs have the keyboard), and the same tab opens across
+  the whole row with the full address selected; type, then Enter. Escape, or clicking elsewhere, folds it back;
+- **New page** (+), **Bookmark** and the **menu** at the right.
 
 Every icon has a tooltip saying what it does and its key. A page without a favicon gets a small one in the app's
 style. Favicons come from the site itself, as part of loading the page; IGA never asks another service for them.

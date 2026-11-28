@@ -933,7 +933,7 @@ def build(win):
     from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
     from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QKeySequence, QPixmap, QShortcut
     from PyQt6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                                 QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
+                                 QProgressBar, QPushButton, QVBoxLayout, QWidget)
     from . import data, style
 
     folder = user_folder()
