@@ -531,6 +531,7 @@ def build_settings(win, Bridge_signals):
         feat["report"] = report
         feat["buttons"] = []
         clear_layout(feat_rows)
+        update_note.setText(features.update_note(report["pending"]) if report else "")
         update_note.setVisible(bool(report and report["unfinished"]))
         if report is None:
             feat_note.setText(features.OLD_CLI)

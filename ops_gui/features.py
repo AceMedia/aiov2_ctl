@@ -12,6 +12,13 @@ OLD_CLI = ("This needs a newer aiov2_ctl: the installed one cannot list its feat
 UPDATE_ARGV = ["x-terminal-emulator", "-e", "aiov2_ctl --update"]
 UNFINISHED = ("The last update was not finished: the new version is in place but its installer has not run, so "
               "some of it is not set up. Update finishes it.")
+PULLED = ("A newer version is in the checkout than the one installed: it was fetched there but never put in "
+          "place, so this computer is still running the old one. Update puts it in place.")
+
+
+def update_note(pending):
+    """What Settings says about an update that has something left to do: '' when nothing has."""
+    return {"program": PULLED, "installer": UNFINISHED}.get(pending, "")
 UPDATE_HELP = ("An update brings the controller, the tray and this app up to date together. It keeps to the "
                "features you have and never switches a rail. Stable is the tested version; beta gets changes "
                "first. Restart this app afterwards to use the new version.")
@@ -42,8 +49,12 @@ def parse_report(text):
             return None
         rows.append(row)
     root = data.get("root")
+    unfinished = data.get("unfinished") is True
+    pending = data.get("pending")
+    if pending not in ("program", "installer"):         # an aiov2_ctl from before `pending` says only yes or no
+        pending = "installer" if unfinished else ""
     return {"root": root if root in ("sudo", "pkexec") else None, "features": rows,
-            "unfinished": data.get("unfinished") is True}
+            "unfinished": unfinished or bool(pending), "pending": pending}
 
 
 def titles(report):

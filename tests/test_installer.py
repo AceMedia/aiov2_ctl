@@ -2256,3 +2256,14 @@ class NoQuestionsTests(unittest.TestCase):
                 mock.patch.object(a, "package_available", return_value=True):
             a._act_apt({"packages": ["one", "two"]}, {"apt_updated": True})
         self.assertEqual(calls, [a.apt_install_argv(["one", "two"]), a.apt_install_argv(["one"]), a.apt_install_argv(["two"])])
+
+
+class ReportPendingTests(unittest.TestCase):
+    def test_the_report_says_what_is_left_of_an_update(self):
+        def made(unfinished):
+            return a.features_report(state(), {}, ALL_THERE, "sudo", unfinished)
+        self.assertEqual((made("")["pending"], made("")["unfinished"]), ("", False))
+        self.assertEqual((made(False)["pending"], made(False)["unfinished"]), ("", False))
+        self.assertEqual((made("program")["pending"], made("program")["unfinished"]), ("program", True))
+        self.assertEqual((made("installer")["pending"], made("installer")["unfinished"]), ("installer", True))
+        self.assertEqual(made(True)["pending"], "installer", "an older caller passing True")
