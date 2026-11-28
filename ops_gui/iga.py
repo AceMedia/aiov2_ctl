@@ -224,11 +224,13 @@ def zoom_step(current, direction):
 # ---- the open pages
 class Pages:
     """The open pages, by number, in the order of the strip, and which is current. At most MOST_PAGES; closing the
-    last one leaves one blank page."""
+    last one leaves one blank page. The tab starts with none (open_first=False) and opens its first page itself,
+    so that every page in the model has a view and a place in the strip."""
 
-    def __init__(self):
+    def __init__(self, open_first=True):
         self.order, self.current, self._next = [], None, 1
-        self.open()
+        if open_first:
+            self.open()
 
     def open(self):
         """Open a page after the current one and make it current. Returns (its number, '') or (None, why not)."""
@@ -636,7 +638,7 @@ def build(win):
             if attr is not None:
                 es.setAttribute(attr, value)
         st["profile"] = profile
-        pages = Pages()
+        pages = Pages(open_first=False)         # open_page() below makes the first, with its view and strip entry
         st["pages"] = pages
 
         class WebPage(QWebEnginePage):
@@ -734,7 +736,7 @@ def build(win):
 
         def relabel(pid):
             view = st["views"].get(pid)
-            if view is None or pid not in pages.order:
+            if view is None or pid not in pages.order or pages.index(pid) >= strip.count():
                 return
             i = st["info"].get(pid, {})
             title = "" if i.get("own") else view.title()
@@ -761,7 +763,7 @@ def build(win):
             wp = WebPage(profile, view)
             view.setPage(wp)
             deny_permissions(wp, QWebEnginePage)
-            view.titleChanged.connect(lambda *_: (relabel(pid), refresh_row()))
+            view.titleChanged.connect(lambda *_: (relabel(pid), refresh_row() if pid == pages.current else None))
             view.urlChanged.connect(lambda u: url_changed(pid, u))
             view.loadStarted.connect(lambda: loading(pid, True))
             view.loadProgress.connect(lambda n: progress.setValue(n) if pid == pages.current else None)

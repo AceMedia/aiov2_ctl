@@ -163,6 +163,18 @@ class PagesTests(unittest.TestCase):
         self.assertEqual(len(p.order), 1)
         self.assertEqual(p.current, p.order[0])
 
+    def test_the_tab_starts_empty_so_the_strip_and_the_model_agree(self):
+        p = iga.Pages(open_first=False)
+        self.assertEqual(p.order, [])
+        self.assertIsNone(p.current)
+        first, _ = p.open()
+        self.assertEqual(p.index(first), 0)              # the strip's first entry is the first page's label
+        second, _ = p.open()
+        self.assertEqual([p.index(first), p.index(second)], [0, 1])
+        for _ in range(4):
+            p.open()
+        self.assertIsNone(p.open()[0])                   # still six at most
+
     def test_a_new_page_opens_after_the_current_one(self):
         p = iga.Pages()
         a = p.current
